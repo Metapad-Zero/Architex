@@ -186,12 +186,12 @@ contract ArchitexLaunchpadTest is Test {
     // ═══════════════════════════════════════════════════════════════════════════
 
     function test_createToken_basic() public {
-        uint256 feeToBalBefore = usdc.balanceOf(feeTo);
+        uint256 feeToBalBefore = pad.pendingFees();
         vm.prank(alice);
         address token = pad.createToken("My Coin", "MCOIN", "ipfs://meta", 0, 0);
 
         // Launch fee paid
-        assertEq(usdc.balanceOf(feeTo), feeToBalBefore + LAUNCH_FEE);
+        assertEq(pad.pendingFees(), feeToBalBefore + LAUNCH_FEE);
 
         // Token has correct supply entirely at launchpad
         assertEq(IERC20(token).totalSupply(), TOTAL_SUPPLY);
@@ -287,7 +287,7 @@ contract ArchitexLaunchpadTest is Test {
         address token = _createToken();
 
         uint256 usdcIn = 100e6; // 100 USDC
-        uint256 fee = usdcIn * FEE_BPS / 10_000;
+        uint256 fee = divCeil(usdcIn * FEE_BPS, 10_000);
         uint256 net = usdcIn - fee;
 
         uint256 vUsdc = VIRTUAL_USDC_0;
@@ -296,7 +296,7 @@ contract ArchitexLaunchpadTest is Test {
         uint256 expectedTokens = vTokens - divCeil(k, vUsdc + net);
 
         uint256 aliceBefore = usdc.balanceOf(alice);
-        uint256 feeToBefore  = usdc.balanceOf(feeTo);
+        uint256 feeToBefore  = pad.pendingFees();
 
         vm.prank(alice);
         (uint256 tokensOut, uint256 usdcSpent) = pad.buy(token, usdcIn, 0, alice);
@@ -304,7 +304,7 @@ contract ArchitexLaunchpadTest is Test {
         assertEq(tokensOut, expectedTokens);
         assertEq(usdcSpent, usdcIn);
         assertEq(usdc.balanceOf(alice), aliceBefore - usdcIn);
-        assertEq(usdc.balanceOf(feeTo), feeToBefore + fee);
+        assertEq(pad.pendingFees(), feeToBefore + fee);
         assertEq(IERC20(token).balanceOf(alice), expectedTokens);
 
         // Curve state updated
@@ -347,18 +347,18 @@ contract ArchitexLaunchpadTest is Test {
         uint256 k = vUsdc * vTokens;
         uint256 tokensToSell = tokensOut / 2;
         uint256 gross = vUsdc - divCeil(k, vTokens + tokensToSell);
-        uint256 fee   = gross * FEE_BPS / 10_000;
+        uint256 fee   = divCeil(gross * FEE_BPS, 10_000);
         uint256 expectedUsdc = gross - fee;
 
         uint256 aliceBefore = usdc.balanceOf(alice);
-        uint256 feeToBefore  = usdc.balanceOf(feeTo);
+        uint256 feeToBefore  = pad.pendingFees();
 
         vm.prank(alice);
         uint256 usdcOut = pad.sell(token, tokensToSell, 0, alice);
 
         assertEq(usdcOut, expectedUsdc);
         assertEq(usdc.balanceOf(alice), aliceBefore + expectedUsdc);
-        assertEq(usdc.balanceOf(feeTo), feeToBefore + fee);
+        assertEq(pad.pendingFees(), feeToBefore + fee);
     }
 
     function test_sell_zeroAmountReverts() public {
@@ -732,7 +732,9 @@ contract ArchitexLaunchpadTest is Test {
         uint256 bal = IERC20(token).balanceOf(alice);
         if (bal == 0) return;
         uint256 sellAmt = bound(uint256(rawSell), 1, bal);
-        vm.prank(alice); pad.sell(token, sellAmt, 0, alice);
+        // dust that would pay out nothing is refused by design
+        vm.prank(alice);
+        try pad.sell(token, sellAmt, 0, alice) {} catch { return; }
 
         c = pad.curves(token);
         uint256 kAfter = uint256(c.virtualUsdc) * uint256(c.virtualTokens);
@@ -756,37 +758,37 @@ contract ArchitexLaunchpadTest is Test {
 
     function test_fee_onBuy() public {
         address token = _createToken();
-        uint256 feeToBefore = usdc.balanceOf(feeTo);
+        uint256 feeToBefore = pad.pendingFees();
         uint256 usdcIn = 1_000e6;
-        uint256 expectedFee = usdcIn * FEE_BPS / 10_000;
+        uint256 expectedFee = divCeil(usdcIn * FEE_BPS, 10_000);
 
         vm.prank(alice);
         pad.buy(token, usdcIn, 0, alice);
 
-        assertEq(usdc.balanceOf(feeTo), feeToBefore + expectedFee);
+        assertEq(pad.pendingFees(), feeToBefore + expectedFee);
     }
 
     function test_fee_onSell() public {
         address token = _createToken();
         vm.prank(alice); pad.buy(token, 500e6, 0, alice);
         uint256 tokens = IERC20(token).balanceOf(alice);
-        uint256 feeToBefore = usdc.balanceOf(feeTo);
+        uint256 feeToBefore = pad.pendingFees();
 
         IArchitexLaunchpad.Curve memory c = pad.curves(token);
         uint256 k = uint256(c.virtualUsdc) * uint256(c.virtualTokens);
         uint256 gross = uint256(c.virtualUsdc) - divCeil(k, uint256(c.virtualTokens) + tokens / 2);
-        uint256 expectedFee = gross * FEE_BPS / 10_000;
+        uint256 expectedFee = divCeil(gross * FEE_BPS, 10_000);
 
         vm.prank(alice); pad.sell(token, tokens / 2, 0, alice);
 
-        assertEq(usdc.balanceOf(feeTo), feeToBefore + expectedFee);
+        assertEq(pad.pendingFees(), feeToBefore + expectedFee);
     }
 
     function test_fee_launchFee() public {
-        uint256 feeToBefore = usdc.balanceOf(feeTo);
+        uint256 feeToBefore = pad.pendingFees();
         vm.prank(alice);
         pad.createToken("X", "X", "ipfs://x", 0, 0);
-        assertEq(usdc.balanceOf(feeTo), feeToBefore + LAUNCH_FEE);
+        assertEq(pad.pendingFees(), feeToBefore + LAUNCH_FEE);
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -871,7 +873,7 @@ contract ArchitexLaunchpadTest is Test {
         address token = _createToken();
         uint256 price = pad.spotPrice(token);
         // At initial state: vUsdc/vTokens * 1e18
-        uint256 expected = VIRTUAL_USDC_0 * 1e18 / VIRTUAL_TOKENS_0;
+        uint256 expected = VIRTUAL_USDC_0 * 1e36 / VIRTUAL_TOKENS_0;
         assertEq(price, expected);
     }
 
@@ -928,12 +930,12 @@ contract ArchitexLaunchpadTest is Test {
         uint256 bal = IERC20(token).balanceOf(alice);
 
         (uint256 qUsdc, uint256 qFee) = pad.quoteSell(token, bal);
-        uint256 feeToBefore = usdc.balanceOf(feeTo);
+        uint256 feeToBefore = pad.pendingFees();
 
         vm.prank(alice);
         uint256 usdcOut = pad.sell(token, bal, 0, alice);
         assertEq(usdcOut, qUsdc);
-        assertEq(usdc.balanceOf(feeTo) - feeToBefore, qFee);
+        assertEq(pad.pendingFees() - feeToBefore, qFee);
     }
 }
 

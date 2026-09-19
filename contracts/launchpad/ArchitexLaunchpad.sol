@@ -4,26 +4,39 @@ pragma solidity ^0.8.28;
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import "../interfaces/IArchitexLaunchpad.sol";
 import "../interfaces/IArchitexFactory.sol";
 import "../interfaces/IArchitexPair.sol";
 import "../interfaces/ILaunchToken.sol";
 import "./LaunchToken.sol";
 
-/// @title ArchitexLaunchpad
+/// @title ArchitexLaunchpad v1.1
 /// @notice Bonding-curve token launches that graduate into Architex AMM pools.
 ///
 /// Each token gets a constant-product virtual reserve curve:
 ///   k = virtualUsdc * virtualTokens  (recomputed every trade, never stored)
-///   real USDC held = virtualUsdc - VIRTUAL_USDC_0
+///   real USDC held for a curve = virtualUsdc - VIRTUAL_USDC_0
 ///
-/// Graduation: when the last curve token is sold, POOL_SUPPLY tokens + all real USDC are
-/// deposited directly into the Architex pair and LP tokens are permanently locked at DEAD.
+/// Fee model (v1.1): fees are ACCRUED in `pendingFees` and never pushed to `feeTo` during
+/// a trade. Call `collectFees()` permissionlessly to flush. A reverting or USDC-blocklisted
+/// `feeTo` can never stop a trade, a launch, or a graduation.
+///
+/// Graduation: when the last curve token is sold, POOL_SUPPLY tokens + exactly
+/// `virtualUsdc - VIRTUAL_USDC_0` USDC (per that curve, never balanceOf) are deposited
+/// directly into the Architex pair and LP tokens are permanently locked at DEAD.
 /// The router is deliberately NOT used; direct pair.mint() is immune to sync-attack.
 ///
-/// Not supported: fee-on-transfer / rebasing tokens (only USDC and LaunchTokens are handled).
+/// Arc trap: native USDC (18-dec) and ERC-20 USDC (6-dec) are the same balance on Arc.
+/// We never call balanceOf or address.balance for accounting — all amounts come from
+/// the stored virtual reserves.
+///
+/// Fee-on-transfer / rebasing tokens are NOT supported (only USDC and LaunchTokens).
+/// @dev `name`, `symbol`, `metadataURI` are untrusted bytes — length limits only,
+///      no charset validation, no HTML escaping. Rendering rules live in FRONTEND-BRIEF.md.
 contract ArchitexLaunchpad is IArchitexLaunchpad, ReentrancyGuard {
     using SafeERC20 for IERC20;
+    using SafeCast for uint256;
 
     // ─── Constants ───────────────────────────────────────────────────────────
 
@@ -60,6 +73,13 @@ contract ArchitexLaunchpad is IArchitexLaunchpad, ReentrancyGuard {
     /// @inheritdoc IArchitexLaunchpad
     uint256 public launchFee;
 
+    // ─── Fee accrual ─────────────────────────────────────────────────────────
+
+    /// @inheritdoc IArchitexLaunchpad
+    /// @notice Trade fees and the launch fee are accrued here; never pushed during a trade.
+    ///         Call collectFees() to send to feeTo.
+    uint256 public pendingFees;
+
     // ─── Token registry ──────────────────────────────────────────────────────
 
     mapping(address => Curve) private _curves;
@@ -86,20 +106,30 @@ contract ArchitexLaunchpad is IArchitexLaunchpad, ReentrancyGuard {
         launchFee = _launchFee;
     }
 
+    // ─── No ETH receive ──────────────────────────────────────────────────────
+
+    receive() external payable { revert(); }
+    fallback() external payable { revert(); }
+
     // ─── Admin ────────────────────────────────────────────────────────────────
 
     /// @inheritdoc IArchitexLaunchpad
+    /// @notice Only callable by feeToSetter. Rejects the zero address and the launchpad itself.
     function setFeeTo(address _feeTo) external {
         if (msg.sender != feeToSetter) revert Forbidden();
         if (_feeTo == address(0)) revert ZeroAddress();
+        if (_feeTo == address(this)) revert ZeroAddress();
         feeTo = _feeTo;
         emit FeeToUpdated(_feeTo);
     }
 
     /// @inheritdoc IArchitexLaunchpad
+    /// @notice Only callable by the current feeToSetter. Setting to address(0) is an
+    ///         IRREVERSIBLE RENOUNCE: the fee admin role is permanently abandoned and
+    ///         feeTo can never be changed again.
     function setFeeToSetter(address _feeToSetter) external {
         if (msg.sender != feeToSetter) revert Forbidden();
-        if (_feeToSetter == address(0)) revert ZeroAddress();
+        // address(0) is allowed here as an explicit irreversible renounce.
         feeToSetter = _feeToSetter;
         emit FeeToSetterUpdated(_feeToSetter);
     }
@@ -112,11 +142,25 @@ contract ArchitexLaunchpad is IArchitexLaunchpad, ReentrancyGuard {
         emit LaunchFeeUpdated(_launchFee);
     }
 
+    // ─── Fee collection ───────────────────────────────────────────────────────
+
+    /// @inheritdoc IArchitexLaunchpad
+    /// @notice Permissionless: sends `pendingFees` to `feeTo`. Safe to call at any time;
+    ///         a reverting feeTo reverts only this call, never a trade.
+    function collectFees() external returns (uint256 amount) {
+        amount = pendingFees;
+        if (amount == 0) return 0;
+        pendingFees = 0;
+        IERC20(usdc).safeTransfer(feeTo, amount);
+        emit FeesCollected(feeTo, amount);
+    }
+
     // ─── Token creation ───────────────────────────────────────────────────────
 
     /// @inheritdoc IArchitexLaunchpad
     /// @notice Deploys a new LaunchToken, registers its curve, and optionally performs
     ///         the creator's first buy atomically (anti-snipe protection).
+    ///         `name`/`symbol`/`metadataURI` are untrusted bytes; length limits enforced only.
     function createToken(
         string calldata name,
         string calldata symbol,
@@ -129,9 +173,10 @@ contract ArchitexLaunchpad is IArchitexLaunchpad, ReentrancyGuard {
         if (bytes(symbol).length == 0 || bytes(symbol).length > 10) revert InvalidSymbol();
         if (bytes(metadataURI).length > 256) revert InvalidMetadata();
 
-        // ── Pull launch fee ───────────────────────────────────────────────────
+        // ── Accrue launch fee (pull from creator; accrued, not pushed) ────────
         if (launchFee > 0) {
-            IERC20(usdc).safeTransferFrom(msg.sender, feeTo, launchFee);
+            IERC20(usdc).safeTransferFrom(msg.sender, address(this), launchFee);
+            pendingFees += launchFee;
         }
 
         // ── Deploy token ──────────────────────────────────────────────────────
@@ -139,6 +184,7 @@ contract ArchitexLaunchpad is IArchitexLaunchpad, ReentrancyGuard {
         token = address(lt);
 
         // ── Resolve / create the Architex pair ───────────────────────────────
+        // Never reverts because the pair already exists (attacker can pre-create it).
         address _pair = IArchitexFactory(factory).getPair(token, usdc);
         if (_pair == address(0)) {
             _pair = IArchitexFactory(factory).createPair(token, usdc);
@@ -150,8 +196,8 @@ contract ArchitexLaunchpad is IArchitexLaunchpad, ReentrancyGuard {
             token: token,
             creator: msg.sender,
             pair: _pair,
-            virtualUsdc: uint128(VIRTUAL_USDC_0),
-            virtualTokens: uint128(VIRTUAL_TOKENS_0),
+            virtualUsdc: VIRTUAL_USDC_0.toUint128(),
+            virtualTokens: VIRTUAL_TOKENS_0.toUint128(),
             tokensSold: 0,
             createdAt: uint64(block.timestamp),
             graduated: false,
@@ -161,7 +207,8 @@ contract ArchitexLaunchpad is IArchitexLaunchpad, ReentrancyGuard {
 
         emit TokenCreated(token, msg.sender, _pair, name, symbol, metadataURI);
 
-        // ── Optional creator first buy ─────────────────────────────────────────
+        // ── Optional creator first buy (anti-snipe; uses internal _buy) ───────
+        // initialBuyUsdc == 0 skips entirely and does NOT revert ZeroAmount.
         if (initialBuyUsdc > 0) {
             _buy(token, initialBuyUsdc, minTokensOut, msg.sender);
         }
@@ -170,8 +217,9 @@ contract ArchitexLaunchpad is IArchitexLaunchpad, ReentrancyGuard {
     // ─── Trading ─────────────────────────────────────────────────────────────
 
     /// @inheritdoc IArchitexLaunchpad
-    /// @notice Buy tokens from the curve. On the sell-out buy, pulls only net+fee
-    ///         (never pull-then-refund). Graduates atomically when the last token is sold.
+    /// @notice Buy tokens from the curve. On the sell-out buy, pulls only usdcSpent
+    ///         (which is <= usdcIn — never pull-then-refund). Graduates atomically when the
+    ///         last token is sold.
     function buy(
         address token,
         uint256 usdcIn,
@@ -183,6 +231,7 @@ contract ArchitexLaunchpad is IArchitexLaunchpad, ReentrancyGuard {
 
     /// @inheritdoc IArchitexLaunchpad
     /// @notice Sell tokens into the curve. Uses launchpadPull — no ERC-20 approval needed.
+    ///         `to` is the USDC recipient; `trader` is always msg.sender.
     function sell(
         address token,
         uint256 tokensIn,
@@ -197,33 +246,36 @@ contract ArchitexLaunchpad is IArchitexLaunchpad, ReentrancyGuard {
         uint256 vUsdc = c.virtualUsdc;
         uint256 vTokens = c.virtualTokens;
 
-        // ── Curve math ────────────────────────────────────────────────────────
-        // k = vUsdc * vTokens (computed fresh, never stored)
-        // gross = vUsdc - ceil(k / (vTokens + tokensIn))
-        uint256 k = vUsdc * vTokens;
-        uint256 gross = vUsdc - _divCeil(k, vTokens + tokensIn);
-        uint256 fee = gross * FEE_BPS / 10_000;
-        usdcOut = gross - fee;
+        // ── Sell math (shared with quoteSell) ─────────────────────────────────
+        (uint256 gross, uint256 fee) = _calcSell(vUsdc, vTokens, tokensIn);
 
+        usdcOut = gross - fee;
+        if (usdcOut == 0) revert ZeroAmount();
         if (usdcOut < minUsdcOut) revert SlippageExceeded();
 
         // ── Effects ───────────────────────────────────────────────────────────
-        c.virtualUsdc = uint128(vUsdc - gross);
-        c.virtualTokens = uint128(vTokens + tokensIn);
-        c.tokensSold = uint128(uint256(c.tokensSold) - tokensIn);
+        uint256 newVUsdc   = vUsdc - gross;
+        uint256 newVTokens = vTokens + tokensIn;
+        c.virtualUsdc   = newVUsdc.toUint128();
+        c.virtualTokens = newVTokens.toUint128();
+        c.tokensSold    = (uint256(c.tokensSold) - tokensIn).toUint128();
 
-        emit Trade(token, msg.sender, false, gross, tokensIn, fee, c.virtualUsdc, c.virtualTokens);
+        // Accrue fee (never push — feeTo cannot block a sell)
+        pendingFees += fee;
+
+        emit Trade(token, msg.sender, false, gross, tokensIn, fee, newVUsdc, newVTokens);
 
         // ── Interactions ──────────────────────────────────────────────────────
-        // Pull tokens from seller (no approval needed via launchpadPull)
+        // Pull tokens from seller via launchpadPull (no ERC-20 approval needed).
+        // Always msg.sender — never a user-supplied `from`.
         ILaunchToken(token).launchpadPull(msg.sender, tokensIn);
-        // Send fee and net USDC
-        if (fee > 0) IERC20(usdc).safeTransfer(feeTo, fee);
+        // Send net USDC to recipient
         IERC20(usdc).safeTransfer(to, usdcOut);
     }
 
     // ─── Internal buy logic ───────────────────────────────────────────────────
 
+    /// @dev Shared by buy() and createToken(). The nonReentrant guard is held by the caller.
     function _buy(
         address token,
         uint256 usdcIn,
@@ -235,54 +287,38 @@ contract ArchitexLaunchpad is IArchitexLaunchpad, ReentrancyGuard {
         if (c.graduated) revert CurveGraduated();
         if (usdcIn == 0) revert ZeroAmount();
 
-        uint256 vUsdc = c.virtualUsdc;
+        uint256 vUsdc   = c.virtualUsdc;
         uint256 vTokens = c.virtualTokens;
-        uint256 sold = c.tokensSold;
+        uint256 sold    = c.tokensSold;
         uint256 remaining = CURVE_SUPPLY - sold;
 
-        // ── k recomputed fresh ────────────────────────────────────────────────
-        uint256 k = vUsdc * vTokens;
-
-        // ── Normal buy: tokensOut = vTokens - ceil(k / (vUsdc + net)) ─────────
-        uint256 fee = usdcIn * FEE_BPS / 10_000;
-        uint256 net = usdcIn - fee;
-        tokensOut = vTokens - _divCeil(k, vUsdc + net);
-
-        bool graduates = false;
-
-        if (tokensOut >= remaining) {
-            // ── Exact-fill: only pull what's needed for the remaining tokens ──
-            // net = ceil(k / (vTokens - remaining)) - vUsdc
-            net = _divCeil(k, vTokens - remaining) - vUsdc;
-            // fee = ceil(net * FEE_BPS / (10_000 - FEE_BPS))
-            fee = _divCeil(net * FEE_BPS, 10_000 - FEE_BPS);
-            usdcSpent = net + fee;
-            tokensOut = remaining;
-            graduates = true;
-        } else {
-            usdcSpent = usdcIn;
-        }
+        // ── Buy math (shared with quoteBuy) ───────────────────────────────────
+        uint256 fee;
+        bool graduates;
+        (tokensOut, fee, usdcSpent, graduates) = _calcBuy(vUsdc, vTokens, remaining, usdcIn);
 
         if (tokensOut < minTokensOut) revert SlippageExceeded();
 
         // ── Effects ───────────────────────────────────────────────────────────
-        uint256 newVUsdc = vUsdc + net;
+        uint256 net        = usdcSpent - fee;
+        uint256 newVUsdc   = vUsdc + net;
         uint256 newVTokens = vTokens - tokensOut;
-        c.virtualUsdc = uint128(newVUsdc);
-        c.virtualTokens = uint128(newVTokens);
-        c.tokensSold = uint128(sold + tokensOut);
+        c.virtualUsdc   = newVUsdc.toUint128();
+        c.virtualTokens = newVTokens.toUint128();
+        c.tokensSold    = (sold + tokensOut).toUint128();
 
-        emit Trade(token, to, true, usdcSpent, tokensOut, fee, newVUsdc, newVTokens);
+        // Accrue fee (never push — feeTo cannot block a buy or graduation)
+        pendingFees += fee;
+
+        emit Trade(token, msg.sender, true, usdcSpent, tokensOut, fee, newVUsdc, newVTokens);
 
         // ── Interactions ──────────────────────────────────────────────────────
-        // Pull USDC from buyer (exact amount — never pull-then-refund)
+        // Pull exact usdcSpent from buyer (never pull-then-refund; usdcSpent <= usdcIn)
         IERC20(usdc).safeTransferFrom(msg.sender, address(this), usdcSpent);
-        // Send fee
-        if (fee > 0) IERC20(usdc).safeTransfer(feeTo, fee);
         // Send tokens to recipient
         IERC20(token).safeTransfer(to, tokensOut);
 
-        // ── Graduation (atomic, inside the sell-out buy) ──────────────────────
+        // ── Graduation (atomic inside the sell-out buy) ───────────────────────
         if (graduates) {
             _graduate(c);
         }
@@ -290,37 +326,98 @@ contract ArchitexLaunchpad is IArchitexLaunchpad, ReentrancyGuard {
 
     // ─── Graduation ───────────────────────────────────────────────────────────
 
-    /// @dev Called atomically from _buy when the last curve token is sold.
-    ///      Transfers POOL_SUPPLY tokens + all real USDC directly into the pair and
-    ///      mints LP to DEAD. Does NOT use the router (immune to sync-attack).
+    /// @dev Graduation sequence (spec v1.1 §3, exact order):
+    ///      (b) require totalSupply==0; (c) markGraduated; (d) transfer tokens+USDC;
+    ///      (e) mint LP to DEAD; (f) emit Graduated.
+    ///      No other external call in between. No router.
     function _graduate(Curve storage c) internal {
-        address token = c.token;
-        address _pair = c.pair;
+        address token  = c.token;
+        address _pair  = c.pair;
 
-        // Real USDC accumulated = virtualUsdc - VIRTUAL_USDC_0
-        uint256 realUsdc = uint256(c.virtualUsdc) - VIRTUAL_USDC_0;
+        // Real USDC raised on this curve only — never balanceOf
+        uint256 usdcSeeded = uint256(c.virtualUsdc) - VIRTUAL_USDC_0;
 
-        // Effects: mark graduated BEFORE external calls
+        // (b) Defense in depth: pair must have no LP yet (enforced by token transfer lock)
+        require(IArchitexPair(_pair).totalSupply() == 0, "pair already seeded");
+
+        // (c) Mark graduated; opens transfer-to-pair for token
         c.graduated = true;
         ILaunchToken(token).markGraduated();
 
-        // Transfer POOL_SUPPLY tokens directly to pair
+        // (d) Transfer POOL_SUPPLY tokens and exactly usdcSeeded USDC directly to pair
         IERC20(token).safeTransfer(_pair, POOL_SUPPLY);
-        // Transfer all real USDC directly to pair
-        if (realUsdc > 0) {
-            IERC20(usdc).safeTransfer(_pair, realUsdc);
+        if (usdcSeeded > 0) {
+            IERC20(usdc).safeTransfer(_pair, usdcSeeded);
         }
 
-        // Mint LP tokens to DEAD (permanently locked)
+        // (e) Mint LP tokens permanently to DEAD
         uint256 liquidity = IArchitexPair(_pair).mint(DEAD);
 
-        emit Graduated(token, _pair, realUsdc, POOL_SUPPLY, liquidity);
+        // (f) Emit
+        emit Graduated(token, _pair, usdcSeeded, POOL_SUPPLY, liquidity);
+    }
+
+    // ─── Core math — pure, shared by trades and quotes ────────────────────────
+
+    /// @dev Buy math. Returns (tokensOut, fee, usdcSpent, graduates).
+    ///      All rounding favours the curve (ceil divisions where needed).
+    ///      usdcSpent is ALWAYS <= usdcIn.
+    function _calcBuy(
+        uint256 vUsdc,
+        uint256 vTokens,
+        uint256 remaining,
+        uint256 usdcIn
+    ) internal pure returns (uint256 tokensOut, uint256 fee, uint256 usdcSpent, bool graduates) {
+        // k recomputed fresh every trade, never stored
+        uint256 k = vUsdc * vTokens;
+
+        // Normal buy fee: ceil(usdcIn * FEE_BPS / 10_000)
+        fee = _divCeil(usdcIn * FEE_BPS, 10_000);
+        uint256 net = usdcIn - fee;
+
+        // tokensOut = vTokens - ceil(k / (vUsdc + net))
+        tokensOut = vTokens - _divCeil(k, vUsdc + net);
+
+        if (tokensOut == 0) revert ZeroAmount();
+
+        if (tokensOut >= remaining) {
+            // ── Exact-fill: only pull what's needed for the remaining tokens ──
+            // net = ceil(k / (vTokens - remaining)) - vUsdc
+            net = _divCeil(k, vTokens - remaining) - vUsdc;
+            // usdcSpent = min(usdcIn, net + ceil(net * FEE_BPS / (10_000 - FEE_BPS))): never more than offered.
+            uint256 gross = net + _divCeil(net * FEE_BPS, 10_000 - FEE_BPS);
+            usdcSpent = gross < usdcIn ? gross : usdcIn;
+            // The fee is whatever was pulled beyond `net`. Keeping the uncapped fee here would credit
+            // one unit more than was received whenever the cap bites. usdcSpent >= net always holds:
+            // this branch is only reached when the offered net already covers `remaining`.
+            fee = usdcSpent - net;
+            tokensOut = remaining;
+            graduates = true;
+        } else {
+            usdcSpent = usdcIn;
+        }
+    }
+
+    /// @dev Sell math. Returns (gross, fee).
+    ///      gross = vUsdc - ceil(k / (vTokens + tokensIn))
+    ///      fee   = ceil(gross * FEE_BPS / 10_000)
+    ///      All rounding favours the curve.
+    function _calcSell(
+        uint256 vUsdc,
+        uint256 vTokens,
+        uint256 tokensIn
+    ) internal pure returns (uint256 gross, uint256 fee) {
+        uint256 k = vUsdc * vTokens;
+        gross = vUsdc - _divCeil(k, vTokens + tokensIn);
+        fee   = _divCeil(gross * FEE_BPS, 10_000);
     }
 
     // ─── View functions ───────────────────────────────────────────────────────
 
     /// @inheritdoc IArchitexLaunchpad
+    /// @dev Reverts UnknownToken for an address that was never launched here.
     function curves(address token) external view returns (Curve memory) {
+        if (_curves[token].token == address(0)) revert UnknownToken();
         return _curves[token];
     }
 
@@ -335,7 +432,9 @@ contract ArchitexLaunchpad is IArchitexLaunchpad, ReentrancyGuard {
     }
 
     /// @inheritdoc IArchitexLaunchpad
+    /// @param count Clamped to 100 to bound gas.
     function curvesPage(uint256 start, uint256 count) external view returns (Curve[] memory result) {
+        if (count > 100) count = 100;
         uint256 len = _tokens.length;
         if (start >= len) return new Curve[](0);
         uint256 end = start + count;
@@ -347,7 +446,7 @@ contract ArchitexLaunchpad is IArchitexLaunchpad, ReentrancyGuard {
     }
 
     /// @inheritdoc IArchitexLaunchpad
-    /// @notice Returns gross tokensOut, fee, usdcSpent, and whether this buy graduates the curve.
+    /// @notice Returns (tokensOut, fee, usdcSpent, graduates). Same code path as buy().
     function quoteBuy(address token, uint256 usdcIn)
         external
         view
@@ -356,31 +455,15 @@ contract ArchitexLaunchpad is IArchitexLaunchpad, ReentrancyGuard {
         Curve storage c = _curves[token];
         if (c.token == address(0)) revert UnknownToken();
         if (c.graduated) revert CurveGraduated();
+        if (usdcIn == 0) revert ZeroAmount();
 
-        uint256 vUsdc = c.virtualUsdc;
-        uint256 vTokens = c.virtualTokens;
         uint256 remaining = CURVE_SUPPLY - uint256(c.tokensSold);
-        uint256 k = vUsdc * vTokens;
-
-        fee = usdcIn * FEE_BPS / 10_000;
-        uint256 net = usdcIn - fee;
-        tokensOut = vTokens - _divCeil(k, vUsdc + net);
-
-        if (tokensOut >= remaining) {
-            uint256 netExact = _divCeil(k, vTokens - remaining) - vUsdc;
-            uint256 feeExact = _divCeil(netExact * FEE_BPS, 10_000 - FEE_BPS);
-            usdcSpent = netExact + feeExact;
-            tokensOut = remaining;
-            fee = feeExact;
-            graduates = true;
-        } else {
-            usdcSpent = usdcIn;
-            graduates = false;
-        }
+        return _calcBuy(c.virtualUsdc, c.virtualTokens, remaining, usdcIn);
     }
 
     /// @inheritdoc IArchitexLaunchpad
-    /// @notice Returns USDC out after fee, and the fee amount.
+    /// @notice Returns (usdcOut after fee, fee). Same code path as sell().
+    ///         `Trade.usdcAmount` on a sell is gross (seller receives usdcOut = gross - fee).
     function quoteSell(address token, uint256 tokensIn)
         external
         view
@@ -390,40 +473,34 @@ contract ArchitexLaunchpad is IArchitexLaunchpad, ReentrancyGuard {
         if (c.token == address(0)) revert UnknownToken();
         if (c.graduated) revert CurveGraduated();
 
-        uint256 vUsdc = c.virtualUsdc;
-        uint256 vTokens = c.virtualTokens;
-        uint256 k = vUsdc * vTokens;
-
-        uint256 gross = vUsdc - _divCeil(k, vTokens + tokensIn);
-        fee = gross * FEE_BPS / 10_000;
+        uint256 gross;
+        (gross, fee) = _calcSell(c.virtualUsdc, c.virtualTokens, tokensIn);
         usdcOut = gross - fee;
     }
 
     /// @inheritdoc IArchitexLaunchpad
     /// @return USDC (6 decimals) per whole token, scaled by 1e18.
-    ///         = virtualUsdc * 1e18 / virtualTokens  (tokens are 18-dec, USDC 6-dec)
+    ///         Formula: virtualUsdc * 1e36 / virtualTokens
+    ///         (virtualTokens is 18-dec, so dividing 1e36 by 1e18 gives 1e18-scaled USDC/token)
     function spotPrice(address token) external view returns (uint256) {
         Curve storage c = _curves[token];
         if (c.token == address(0)) revert UnknownToken();
-        // virtualUsdc (6-dec) / virtualTokens (18-dec) * 1e18 = virtualUsdc * 1e18 / virtualTokens
-        // Result is in units of (USDC / whole_token) * 1e18
-        return uint256(c.virtualUsdc) * 1e18 / uint256(c.virtualTokens);
+        // After graduation this is the curve's final price (the reserves are frozen), not a revert:
+        // lists and indexers read it for every token.
+        return uint256(c.virtualUsdc) * 1e36 / uint256(c.virtualTokens);
     }
 
     /// @inheritdoc IArchitexLaunchpad
     /// @return Spot price × CURVE_SUPPLY / 1e18, in USDC (6 decimals).
+    ///         = virtualUsdc * CURVE_SUPPLY / virtualTokens
     function marketCap(address token) external view returns (uint256) {
         Curve storage c = _curves[token];
         if (c.token == address(0)) revert UnknownToken();
-        // spotPrice = vUsdc * 1e18 / vTokens
-        // marketCap = spotPrice * CURVE_SUPPLY / 1e18
-        //           = vUsdc * 1e18 / vTokens * CURVE_SUPPLY / 1e18
-        //           = vUsdc * CURVE_SUPPLY / vTokens
         return uint256(c.virtualUsdc) * CURVE_SUPPLY / uint256(c.virtualTokens);
     }
 
     /// @inheritdoc IArchitexLaunchpad
-    /// @return tokensSold / CURVE_SUPPLY in basis points (0–10_000).
+    /// @return tokensSold * 10_000 / CURVE_SUPPLY (multiply first to avoid truncation to 0)
     function progressBps(address token) external view returns (uint256) {
         Curve storage c = _curves[token];
         if (c.token == address(0)) revert UnknownToken();
