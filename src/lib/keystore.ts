@@ -166,8 +166,18 @@ interface PrfExtensionResults {
   prf?: { enabled?: boolean; results?: { first?: ArrayBuffer } }
 }
 
+// A passkey, and so a passkey wallet, belongs to its relying-party id for good. On the production
+// domain it is pinned to the registrable domain, so the apex, www and any later subdomain share the
+// same wallets; every other host (localhost, preview URLs) scopes to itself. Frozen like the
+// derivation constants above: changing it orphans every passkey wallet made on architex.fun.
+const PRODUCTION_RP_ID = 'architex.fun'
+
+export function rpIdFor(hostname: string): string {
+  return hostname === PRODUCTION_RP_ID || hostname.endsWith(`.${PRODUCTION_RP_ID}`) ? PRODUCTION_RP_ID : hostname
+}
+
 function rpId(): string {
-  return window.location.hostname
+  return rpIdFor(window.location.hostname)
 }
 
 type ClientCapabilitiesProbe = () => Promise<Record<string, boolean | undefined>>

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { privateKeyToAccount } from 'viem/accounts'
-import { createPasswordKeystore, deriveWalletKey, fromBase64url, isKeystore, isPasskeyKind, toBase64url, unlockPasswordKeystore } from '../keystore'
+import { createPasswordKeystore, deriveWalletKey, fromBase64url, isKeystore, isPasskeyKind, rpIdFor, toBase64url, unlockPasswordKeystore } from '../keystore'
 
 const KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80'
 const ADDRESS = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266'
@@ -29,6 +29,17 @@ describe('passkey-derived wallet', () => {
     expect(await deriveWalletKey(prf(0xa5))).toBe(await deriveWalletKey(new Uint8Array(32).fill(0xa5)))
     const address = privateKeyToAccount(await deriveWalletKey(prf(0xa5))).address
     expect(address).toBe(FROZEN_ADDRESS)
+  })
+
+  // Frozen: the passkey scope decides which wallets a browser can reach.
+  test('the production domain and its subdomains share one passkey scope; other hosts keep their own', () => {
+    expect(rpIdFor('architex.fun')).toBe('architex.fun')
+    expect(rpIdFor('www.architex.fun')).toBe('architex.fun')
+    expect(rpIdFor('app.architex.fun')).toBe('architex.fun')
+    expect(rpIdFor('localhost')).toBe('localhost')
+    expect(rpIdFor('architex-git-main.vercel.app')).toBe('architex-git-main.vercel.app')
+    expect(rpIdFor('notarchitex.fun')).toBe('notarchitex.fun')
+    expect(rpIdFor('architex.fun.evil.example')).toBe('architex.fun.evil.example')
   })
 
   test('the stored hint carries no secret and is recognised', () => {
