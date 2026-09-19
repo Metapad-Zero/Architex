@@ -98,8 +98,14 @@ From the second review. Testnet needs none of these; mainnet needs all of them.
 - [x] Vectors V4 and V5 executed through `buy()`, not only quoted
 - [x] Suite run against the deployed Architex bytecode on Arc (fork suite above)
 - [x] Deployed to Arc Testnet, bytecode verified against the local build, read-only smoke passes
-- [ ] Live trading smoke test passes on Arc Testnet with real USDC (needs ~12 test USDC on the burner)
-- [ ] One token taken all the way to graduation on testnet, then traded on the Swap tab
+- [x] Live trading smoke test passes on Arc Testnet with real USDC (2026-09-19: create, buy, sell, collect;
+      28 checks, every number equal to the model, trader-side checks exact with gas; first token
+      `0xBe20432D6645aEC36FfAf40d7FDFB10Af363a923`)
+- [ ] One token taken all the way to graduation on testnet, then traded on the Swap tab. Graduation needs
+      about 8,794 USDC on the curve and the faucet gives 20 at a time, so this needs either a large
+      testnet grant or a rehearsal build with the constants scaled down. The pieces are each proven:
+      graduation against the deployed pair bytecode (fork suite), real USDC through the launchpad
+      (smoke test) and real USDC through the pair (`scripts/amm-smoke.ts`)
 - [ ] `LAUNCH_FEE` decided and non-zero (spam cost; the cap is 100 USDC)
 - [ ] `FEE_TO_SETTER` is a hardware wallet and is kept, never renounced: it is the only way to move
       `feeTo` if that address is ever blocklisted by USDC

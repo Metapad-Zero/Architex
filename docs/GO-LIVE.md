@@ -97,6 +97,10 @@ Passkeys made on `localhost` or a `*.vercel.app` preview do not exist on the rea
 
 - [ ] Watch the first hours: `PairCreated` / `Swap` events, RPC errors, wallet connection failures.
 - [ ] Announce.
+- [x] Real USDC through the AMM, on-chain (2026-09-19, Arc Testnet): the four USDC pools seeded, then
+      `scripts/amm-smoke.ts` on USDC/EURC: swap out of USDC, swap back, withdraw 10%. 27 checks exact,
+      gas included; pair reserves equal the chain-native balance to the wei. Before this, no USDC had
+      ever passed through an Architex pair, and USDC/EURC is the first mainnet pool.
 - [ ] Launchpad (bonding curves that graduate into Architex pairs): built, reviewed twice, 152 tests,
       proven against the deployed testnet bytecode. LIVE ON TESTNET (0xd9a7…736e, bytecode verified).
       Mainnet only after the "Before mainnet" list: `docs/launchpad/TESTNET-DEPLOY.md`.
