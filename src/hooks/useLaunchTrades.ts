@@ -41,8 +41,10 @@ async function fromExplorer(token: Address, signal: AbortSignal | undefined): Pr
   const url = `${activeChain.explorerBase}/api?module=logs&action=getLogs&address=${deployment.launchpad}&fromBlock=0&toBlock=latest&topic0=${TRADE_TOPIC}&topic1=${topic1}&topic0_1_opr=and`
   const response = await fetch(url, { signal })
   if (!response.ok) throw new Error(`Explorer ${response.status}`)
-  const body = (await response.json()) as { result?: ExplorerLog[] | string }
-  if (!Array.isArray(body.result)) return []
+  const body = (await response.json()) as { result?: ExplorerLog[] | string | null; message?: string }
+  // "No logs found" still carries an empty array. Anything else is an error inside a 200, and
+  // throwing sends the caller to its RPC fallback instead of showing an empty history.
+  if (!Array.isArray(body.result)) throw new Error(body.message ?? 'Explorer returned no result')
   const trades: LaunchTrade[] = []
   for (const log of body.result) {
     try {

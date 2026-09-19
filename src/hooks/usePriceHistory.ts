@@ -41,8 +41,10 @@ async function fromExplorer(pair: Address, signal: AbortSignal | undefined): Pro
   const url = `${activeChain.explorerBase}/api?module=logs&action=getLogs&address=${pair}&fromBlock=0&toBlock=latest&topic0=${SYNC_TOPIC}`
   const response = await fetch(url, { signal })
   if (!response.ok) throw new Error(`Explorer ${response.status}`)
-  const body = (await response.json()) as { result?: ExplorerLog[] | string }
-  if (!Array.isArray(body.result)) return []
+  const body = (await response.json()) as { result?: ExplorerLog[] | string | null; message?: string }
+  // "No logs found" still carries an empty array. Anything else is an error inside a 200, and
+  // throwing sends the caller to its RPC fallback instead of showing an empty history.
+  if (!Array.isArray(body.result)) throw new Error(body.message ?? 'Explorer returned no result')
   const points = body.result.map((log) => {
     const [reserve0, reserve1] = decodeSync(log.data as Hex)
     return { block: Number(log.blockNumber), time: Number(log.timeStamp), reserve0, reserve1 }
