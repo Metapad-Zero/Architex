@@ -7,7 +7,8 @@
   "lens": "0x0000000000000000000000000000000000000000",
   "deployer": "0x0000000000000000000000000000000000000000",
   "tokens": [
-    { "symbol": "USDC", "name": "USD Coin", "address": "0x3600000000000000000000000000000000000000", "decimals": 6, "faucet": false }
+    { "symbol": "USDC", "name": "USD Coin", "address": "0x3600000000000000000000000000000000000000", "decimals": 6, "faucet": false },
+    { "symbol": "EURC", "name": "EURC", "address": "0xbEf5f6d51CB62b58e6A8f77868681825C6fe21c1", "decimals": 6, "faucet": false }
   ],
   "pairs": [],
   "txs": {

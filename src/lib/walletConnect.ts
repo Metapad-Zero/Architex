@@ -22,7 +22,7 @@ function prefersDark(): boolean {
 }
 
 export function walletConnectConnector(): CreateConnectorFn {
-  const origin = typeof window === 'undefined' ? 'https://architex.app' : window.location.origin
+  const origin = typeof window === 'undefined' ? 'https://architex.fun' : window.location.origin
   const dark = prefersDark()
   return walletConnect({
     projectId: reownProjectId,

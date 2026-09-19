@@ -30,6 +30,11 @@ forge script contracts/script/DeployArchitex.s.sol:DeployArchitex \
   --interactive          # prompts for the deployer private key; never put it in a file
 ```
 
+With a hardware wallet, replace `--interactive` with `--ledger --sender 0xYourLedgerAddress` (Ethereum
+app open, blind signing enabled). Drop `--broadcast` for a free simulation against any RPC: on
+2026-09-19 the mainnet simulation estimated ~6.5M gas, about 0.27 USDC for all three contracts.
+`lib/forge-std` is vendored in the repo, so a fresh clone builds after `bun install`.
+
 Rehearse first against the testnet with `--rpc-url https://rpc.testnet.arc.io` (it costs only faucet USDC).
 `contracts/script/DeployArchitex.s.sol` deploys the three contracts in order and prints one JSON line
 with the addresses. Copy them into `src/deployments/arc-mainnet.json`. Gas: the deployer needs a few

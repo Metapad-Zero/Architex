@@ -8,10 +8,12 @@ import "../ArchitexLens.sol";
 
 /// @notice Foundry broadcast script that deploys the Architex core contracts.
 ///
-/// Usage:
+/// Usage (the script holds no key; never pass one on the command line, it lands in shell history):
 ///   export FEE_TO_SETTER=<your-address>
-///   forge script contracts/script/DeployArchitex.s.sol \
-///     --rpc-url <RPC_URL> --broadcast --private-key <PRIVATE_KEY>
+///   forge script contracts/script/DeployArchitex.s.sol:DeployArchitex --rpc-url <RPC_URL> \
+///     --broadcast --ledger --sender <ledger-address>      # hardware wallet
+///     --broadcast --interactive                            # or: prompts for the key, not echoed
+///   Drop --broadcast for a free simulation.
 ///
 /// Logs one JSON line: {"factory":"0x…","router":"0x…","lens":"0x…"}
 contract DeployArchitex is Script {

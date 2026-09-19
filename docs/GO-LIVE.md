@@ -3,57 +3,78 @@
 State on 2026-09-19. **You** = needs the owner (keys, funds, accounts, decisions). **Claude** = can be
 done by the agent on request. Order matters: each block depends on the one before it.
 
-## 0. Decisions (you, ~5 min) — everything else waits on these
+## 0. Decisions — made 2026-09-19
 
-- [ ] **Mainnet today, or public testnet beta today?** The contracts are a Uniswap-V2 design with 64
-      passing tests and Arc Studio's automated review, but **no third-party audit**. Mainnet means
-      real funds sit in them. If mainnet: start with liquidity you can afford to lose and label it Beta.
-- [ ] **The permanent domain.** Passkey wallets are derived per hostname and the Reown allowlist is
-      per domain: changing it later orphans passkey wallets. Pick it once.
-- [ ] **Launch tokens / pools** (mainnet token addresses; USDC `0x3600…0000` is already configured).
-- [ ] **Who holds `feeToSetter`** (cold wallet or multisig), and which wallet deploys.
+- [x] **Mainnet today.** The contracts are a Uniswap-V2 design with 63 passing tests and Arc Studio's
+      automated review, but **no third-party audit**: the app says so (Beta chip + a footer sentence on
+      mainnet). Start with liquidity you can afford to lose.
+- [x] **Domain: `architex.fun`** — bought on Vercel (registrar Vercel, account `water-bear86`).
+      Permanent: passkey wallets are derived per hostname and the Reown allowlist is per domain.
+- [x] **Launch tokens: what Arc has.** Verified on-chain on mainnet: USDC
+      `0x3600000000000000000000000000000000000000` and EURC `0xbEf5f6d51CB62b58e6A8f77868681825C6fe21c1`
+      (both 6 decimals), so the first pool is **USDC / EURC**. USYC
+      (`0x8a5D989Bbb96929F689B0200f435f53dA42bF490`) is excluded: it is a permissioned token (transfers
+      gated by an entitlements contract; supply on Arc is 0), so an AMM pair can never hold it.
+      Everything else will be our own tokens, launched on bonding curves; a token reaches the DEX when
+      its curve graduates by creating an Architex pair and depositing the liquidity (not built yet).
+- [x] **Fee admin (`feeToSetter`): the owner's Ledger.** Protocol fees start off (`feeTo` unset), so
+      this role only matters once fees are switched on.
 
-## 1. Contracts on Arc mainnet (you, ~20 min) — skip for a testnet beta
+## 1. Contracts on Arc mainnet (you, ~15 min)
 
-Arc mainnet RPC is live (chain 5042) and USDC has code at `0x3600…0000` (checked 2026-09-19).
-Foundry is installed at `~/.foundry/bin/forge`.
+Checked on this machine 2026-09-19: contracts compile and 63/63 tests pass locally
+(`~/.foundry/bin/forge test`); Arc mainnet RPC is live (chain 5042); a no-broadcast simulation of the
+deploy script against mainnet succeeds and estimates **~6.5M gas ≈ 0.27 USDC** in total.
 
-- [ ] Fund the deployer with a few USDC on Arc mainnet (USDC is the gas token).
-- [ ] Optional rehearsal on testnet: same command with `--rpc-url https://rpc.testnet.arc.io`.
-- [ ] Deploy (prompts for the key; never put it in a file):
+- [ ] Put 1–2 USDC on Arc mainnet in the deploying wallet (USDC is the gas token; bridge with CCTP
+      or withdraw to Arc from an exchange that supports it).
+- [ ] Free rehearsal, any time (no `--broadcast`, nothing is sent):
       ```bash
-      export FEE_TO_SETTER=0xYourAdminAddress
-      ~/.foundry/bin/forge script contracts/script/DeployArchitex.s.sol:DeployArchitex --rpc-url https://rpc.mainnet.arc.io --broadcast --interactive
+      FEE_TO_SETTER=0xYourAddress ~/.foundry/bin/forge script contracts/script/DeployArchitex.s.sol:DeployArchitex --rpc-url https://rpc.mainnet.arc.io
       ```
-- [ ] Give Claude the three addresses + tx hashes → Claude fills `src/deployments/arc-mainnet.json`
-      and runs `scripts/verify-deploy.ts` against mainnet.
-- [ ] Verify the contracts on the explorer; if you deployed from a hot key, `setFeeToSetter(multisig)`.
+- [ ] Deploy **with the Ledger** (Ethereum app open, blind signing on; three transactions to approve):
+      ```bash
+      FEE_TO_SETTER=0xYourLedgerAddress ~/.foundry/bin/forge script contracts/script/DeployArchitex.s.sol:DeployArchitex --rpc-url https://rpc.mainnet.arc.io --broadcast --ledger --sender 0xYourLedgerAddress
+      ```
+      If the Ledger is not here yet, deploy from a hot wallet now and hand the role over later:
+      ```bash
+      FEE_TO_SETTER=0xYourHotAddress ~/.foundry/bin/forge script contracts/script/DeployArchitex.s.sol:DeployArchitex --rpc-url https://rpc.mainnet.arc.io --broadcast --interactive
+      ```
+      ```bash
+      ~/.foundry/bin/cast send <factory> "setFeeToSetter(address)" 0xYourLedgerAddress --rpc-url https://rpc.mainnet.arc.io --interactive
+      ```
+      Never put a private key in a file or on the command line.
+- [ ] Give Claude the JSON line the script prints (`{"factory":…,"router":…,"lens":…}`) and the three
+      tx hashes (in `broadcast/DeployArchitex.s.sol/5042/run-latest.json`) → Claude fills
+      `src/deployments/arc-mainnet.json`, verifies the wiring on-chain and redeploys the site.
+- [ ] Verify the contracts on the explorer.
 
 ## 2. Liquidity (you, real funds)
 
-- [ ] Create the first pool(s) from Pools → "Create a pool" and seed both sides. Start small.
-- [ ] Smoke test on the production build: one small swap, one add, one remove.
+- [ ] Pools → "Create a pool" → USDC / EURC, seed both sides. Start small. The first deposit sets the
+      price: deposit at the real EUR/USD rate or the pool is arbitraged at your expense.
+- [ ] Smoke test on architex.fun: one small swap, one add, one remove.
 
 ## 3. Frontend to production (Claude on your word, ~30 min)
 
-- [x] Typecheck, lint, 23 tests, accessibility scan 0, production build 69 KB gzip entry, no dev
+- [x] Typecheck, lint, 23 tests, accessibility scan 0, production build ~72 KB gzip entry, no dev
       secrets in `dist/`.
-- [x] Testnet-only UI (Testnet chip, faucet panel, "Switch to Arc Testnet") already keys off the network.
-- [x] `vercel.json`: `frame-ancestors`, `nosniff`, referrer policy, immutable asset caching.
-- [x] `VITE_ARC_RPC_URL` overrides the public RPC (rate-limited) with a dedicated endpoint.
-- [x] Crash safety: a top-level error boundary ("Architex stopped unexpectedly" + Reload) instead of a
-      blank page, and every popover call goes through a helper that cannot throw.
-- [ ] **First commit** — the repo has zero commits and no remote. Then push to GitHub (`water-bear86`).
-- [ ] Vercel project (CLI is logged in as `water-bear86`): env `VITE_ARC_NETWORK=mainnet` (or
-      `testnet`), optional `VITE_ARC_RPC_URL`, attach the domain, DNS.
-- [ ] **Reown dashboard → allowlist the production domain** (you; the relay refuses unlisted domains).
-- [ ] Price-history chart on mainnet: `explorer.arc.io/api` sits behind a Cloudflare challenge (403 to
-      scripts, fine on testnet). Verify in the browser after deploy; fallback is RPC `getLogs` in
-      2k-block windows, or hiding the chart on mainnet. Swaps and pools do not depend on it.
-- [ ] "Built with Arc Studio" watermark: keep or remove.
-- [ ] Beta / unaudited notice and a Terms + risk link in the footer (you supply the text).
+- [x] Mainnet mode verified locally: Beta chip, USDC + EURC in the pickers, faucet hidden, a clear
+      "contracts are not deployed on this network yet" note until the addresses are filled in.
+- [x] `vercel.json` (frame-ancestors, nosniff, referrer policy, immutable asset caching),
+      `VITE_ARC_RPC_URL` override, error boundary, non-throwing popovers, link-preview card + meta
+      for architex.fun.
+- [x] In git: `Metapad-Zero/Architex` (private), branch `main`.
+- [ ] **Deploy to Vercel** (CLI is logged in): project + env `VITE_ARC_NETWORK`, attach `architex.fun`.
+      Suggested order: ship the **testnet** build to architex.fun first, prove the domain, passkeys and
+      WalletConnect there with nothing at risk, then flip the env to `mainnet` once section 1 is done.
+- [ ] **Reown dashboard → allowlist `architex.fun`** (you; the relay refuses unlisted domains).
+- [ ] Price-history chart on mainnet: `explorer.arc.io/api` sits behind a Cloudflare challenge (fine
+      on testnet). Verify in the browser after deploy; fallback is RPC `getLogs` in 2k-block windows,
+      or hiding the chart on mainnet. Swaps and pools do not depend on it.
+- [ ] "Built with Arc Studio" watermark: keep or remove. Terms / risk page: you supply the text.
 
-## 4. Launch verification on the production domain (both, ~20 min)
+## 4. Launch verification on architex.fun (both, ~20 min)
 
 Passkeys made on `localhost` or a `*.vercel.app` preview do not exist on the real domain: test there.
 
@@ -68,6 +89,6 @@ Passkeys made on `localhost` or a `*.vercel.app` preview do not exist on the rea
 
 - [ ] Watch the first hours: `PairCreated` / `Swap` events, RPC errors, wallet connection failures.
 - [ ] Announce.
-- [ ] Later, not blocking: third-party audit, full `connect-src` CSP (hosts listed in
-      `docs/MAINNET-DEPLOY.md`), Google/email sign-in (Privy or Circle user-controlled wallets),
-      re-sync the Arc Studio sandbox, rename the Arc Studio app.
+- [ ] Later, not blocking: third-party audit, bonding-curve launchpad + graduation into Architex pairs,
+      full `connect-src` CSP (hosts in `docs/MAINNET-DEPLOY.md`), Google/email sign-in (Privy or Circle
+      user-controlled wallets), re-sync the Arc Studio sandbox, rename the Arc Studio app.

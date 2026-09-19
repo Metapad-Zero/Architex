@@ -16,7 +16,7 @@ export function AppShell({ route, onRoute, children }: AppShellProps) {
       <header className="masthead">
         <div className="flex min-w-0 items-center gap-3 sm:gap-6">
           <button type="button" className="wordmark" onClick={() => onRoute({ view: 'swap' })}>Architex</button>
-          {activeChain.isTestnet && <span className="testnet-chip">Testnet</span>}
+          <span className="testnet-chip">{activeChain.isTestnet ? 'Testnet' : 'Beta'}</span>
           <nav className="ml-1 flex h-14 items-stretch sm:ml-4" aria-label="Primary">
             {(['swap', 'pools'] as const).map((view) => (
               <button
@@ -38,6 +38,11 @@ export function AppShell({ route, onRoute, children }: AppShellProps) {
         </div>
       </header>
       <main>{children}</main>
+      {!activeChain.isTestnet && (
+        <footer className="mx-auto w-full max-w-[512px] px-4 pb-24 text-sm leading-6 text-g500">
+          Beta. The Architex contracts have not been audited by a third party, so only use funds you can afford to lose.
+        </footer>
+      )}
       <ConnectSheet />
     </div>
   )

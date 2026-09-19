@@ -11,3 +11,6 @@ contracts/cache
 .vercel
 .DS_Store
 .playwright-mcp
+
+# forge script simulations; real broadcasts under broadcast/ are deployment records and stay tracked
+broadcast/*/*/dry-run/
