@@ -19,7 +19,7 @@ interface LaunchDetailProps {
 
 export function LaunchDetail({ token, onBack }: LaunchDetailProps) {
   const { launch, token: launchToken, usdc, tokenBalance, usdcBalance, usdcAllowance, isLoading, unknown, refetch } = useLaunch(token)
-  const { trades } = useLaunchTrades(token)
+  const { trades, historyComplete } = useLaunchTrades(token, launch ? Number(launch.createdAt) : undefined)
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 30_000)
@@ -104,11 +104,15 @@ export function LaunchDetail({ token, onBack }: LaunchDetailProps) {
       <section className="ledger" aria-label="Trades">
         <div className="section-heading-row"><h2>Trades</h2><span>{trades.length}</span></div>
         {trades.length === 0 ? (
-          <p className="price-history-empty">No trades yet.</p>
+          <p className="price-history-empty">
+            {historyComplete ? 'No trades yet.' : (
+              <>No recent trades. Older trades could not be loaded; <a className="underline" href={addressExplorerUrl(token)} target="_blank" rel="noreferrer">the explorer</a> has the full history.</>
+            )}
+          </p>
         ) : (
           <ol className="ledger-list">
             {trades.map((trade) => (
-              <li key={trade.txHash} className="ledger-row">
+              <li key={`${trade.txHash}:${trade.logIndex ?? 0}`} className="ledger-row">
                 <span className="min-w-0 flex-1">
                   <span className="block truncate">
                     {trade.isBuy ? 'Buy' : 'Sell'} {formatAmount(trade.tokenAmount, 18)} {launch.symbol} · {formatAmount(trade.isBuy ? trade.usdcAmount : trade.usdcAmount - trade.fee, 6)} USDC
@@ -121,6 +125,11 @@ export function LaunchDetail({ token, onBack }: LaunchDetailProps) {
               </li>
             ))}
           </ol>
+        )}
+        {trades.length > 0 && !historyComplete && (
+          <p className="mt-3 text-xs text-g500">
+            Recent trades only. <a className="underline" href={addressExplorerUrl(token)} target="_blank" rel="noreferrer">The explorer</a> has the full history.
+          </p>
         )}
       </section>
     </div>

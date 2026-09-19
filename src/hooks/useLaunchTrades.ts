@@ -1,11 +1,13 @@
 import { useQuery } from '@tanstack/react-query'
 import { useSyncExternalStore } from 'react'
-import { decodeEventLog, pad, parseAbiItem, toEventSelector, type Address, type Hex } from 'viem'
+import { decodeEventLog, pad, parseAbiItem, toEventSelector, type Address } from 'viem'
 import { usePublicClient } from 'wagmi'
 import { activeChain } from '../chain'
 import { deployment, isLaunchpadDeployed } from '../lib/deployment'
+import { fetchLogHistory } from '../lib/explorerLogs'
 import type { LaunchTrade } from '../lib/launch'
 import { launchFixtureApi } from '../lib/launchFixtureApi'
+import { blockTimes, readLogWindows } from '../lib/rpcLogs'
 
 export type { LaunchTrade }
 
@@ -21,87 +23,88 @@ const TRADE_EVENT = parseAbiItem(
   'event Trade(address indexed token, address indexed trader, bool isBuy, uint256 usdcAmount, uint256 tokenAmount, uint256 fee, uint256 virtualUsdc, uint256 virtualTokens)',
 )
 const TRADE_TOPIC = toEventSelector(TRADE_EVENT)
-const RPC_FALLBACK_SPAN = 1_900n
 const MAX_TRADES = 50
+// Every token's trades come from the one launchpad address and the explorer filters by one topic,
+// so a token's trades are picked out of the launchpad's feed: 6 pages is the newest 300 trades.
+const EXPLORER_PAGES = 6
+const RPC_WINDOWS = 3
 
-interface ExplorerLog {
-  transactionHash: string
-  blockNumber: string
-  timeStamp: string
-  data: string
-  topics: string[]
+interface TradeHistory {
+  trades: LaunchTrade[]
+  /** False when older trades may exist that could not be read; "No trades yet" is only true when complete. */
+  complete: boolean
+  source: 'explorer' | 'rpc'
 }
 
-function topicForToken(token: Address): Hex {
-  return pad(token, { size: 32 })
+function byNewest(a: LaunchTrade, b: LaunchTrade): number {
+  return b.block - a.block || (b.logIndex ?? 0) - (a.logIndex ?? 0)
 }
 
-async function fromExplorer(token: Address, signal: AbortSignal | undefined): Promise<LaunchTrade[]> {
-  const topic1 = topicForToken(token)
-  const url = `${activeChain.explorerBase}/api?module=logs&action=getLogs&address=${deployment.launchpad}&fromBlock=0&toBlock=latest&topic0=${TRADE_TOPIC}&topic1=${topic1}&topic0_1_opr=and`
-  const response = await fetch(url, { signal })
-  if (!response.ok) throw new Error(`Explorer ${response.status}`)
-  const body = (await response.json()) as { result?: ExplorerLog[] | string | null; message?: string }
-  // "No logs found" still carries an empty array. Anything else is an error inside a 200, and
-  // throwing sends the caller to its RPC fallback instead of showing an empty history.
-  if (!Array.isArray(body.result)) throw new Error(body.message ?? 'Explorer returned no result')
+async function fromExplorer(token: Address, createdAt: number | undefined, signal: AbortSignal | undefined): Promise<TradeHistory> {
+  const tokenTopic = pad(token, { size: 32 }).toLowerCase()
+  const history = await fetchLogHistory({
+    explorerBase: activeChain.explorerBase,
+    address: deployment.launchpad,
+    topic0: TRADE_TOPIC,
+    maxPages: EXPLORER_PAGES,
+    keep: (log) => log.topics[1]?.toLowerCase() === tokenTopic,
+    limit: MAX_TRADES,
+    notBefore: createdAt,
+    cacheKey: token,
+    signal,
+  })
   const trades: LaunchTrade[] = []
-  for (const log of body.result) {
+  for (const log of history.logs) {
     try {
-      const decoded = decodeEventLog({ abi: [TRADE_EVENT], data: log.data as Hex, topics: log.topics as [Hex, ...Hex[]] })
-      if (decoded.eventName !== 'Trade') continue
+      const decoded = decodeEventLog({ abi: [TRADE_EVENT], data: log.data, topics: log.topics as [`0x${string}`, ...`0x${string}`[]] })
       trades.push({
         trader: decoded.args.trader,
         isBuy: decoded.args.isBuy,
         usdcAmount: decoded.args.usdcAmount,
         tokenAmount: decoded.args.tokenAmount,
         fee: decoded.args.fee,
-        time: Number(log.timeStamp),
-        txHash: log.transactionHash as Hex,
-        block: Number(log.blockNumber),
+        time: log.time,
+        txHash: log.txHash,
+        block: log.block,
+        logIndex: log.logIndex,
       })
     } catch {
       // skip undecodable explorer rows
     }
   }
-  trades.sort((a, b) => b.block - a.block || b.time - a.time)
-  return trades.slice(0, MAX_TRADES)
+  return { trades: trades.sort(byNewest), complete: history.complete, source: 'explorer' }
 }
 
-export function useLaunchTrades(token: Address | undefined) {
+/** `createdAt` (unix seconds, from the curve) bounds the search: no trade can be older than its token. */
+export function useLaunchTrades(token: Address | undefined, createdAt: number | undefined) {
   const publicClient = usePublicClient()
   const api = launchFixtureApi()
   const fixtureVersion = useSyncExternalStore(api ? api.subscribe : noopSubscribe, api ? api.version : zero, zero)
 
-  const query = useQuery<LaunchTrade[], Error>({
-    queryKey: ['launchTrades', activeChain.id, token],
-    enabled: !fixtureOn && isLaunchpadDeployed && Boolean(token),
+  const query = useQuery<TradeHistory, Error>({
+    queryKey: ['launchTrades', activeChain.id, token, createdAt],
+    enabled: !fixtureOn && isLaunchpadDeployed && Boolean(token) && createdAt !== undefined,
     staleTime: 8_000,
-    refetchInterval: 12_000,
+    // The RPC fallback costs several calls a poll, so it polls less often than the explorer.
+    refetchInterval: (current) => (current.state.data?.source === 'rpc' ? 30_000 : 12_000),
     placeholderData: (previous) => previous,
-    queryFn: async ({ signal }): Promise<LaunchTrade[]> => {
-      if (!token) return []
+    queryFn: async ({ signal }): Promise<TradeHistory> => {
+      if (!token) return { trades: [], complete: true, source: 'explorer' }
       try {
-        return await fromExplorer(token, signal)
+        return await fromExplorer(token, createdAt, signal)
       } catch {
-        if (!publicClient) return []
-        const head = await publicClient.getBlockNumber()
-        const logs = await publicClient.getLogs({
-          address: deployment.launchpad,
-          event: TRADE_EVENT,
-          args: { token },
-          fromBlock: head > RPC_FALLBACK_SPAN ? head - RPC_FALLBACK_SPAN : 0n,
-          toBlock: head,
+        if (!publicClient) return { trades: [], complete: false, source: 'rpc' }
+        const { logs, complete } = await readLogWindows({
+          head: await publicClient.getBlockNumber(),
+          windows: RPC_WINDOWS,
+          read: (fromBlock, toBlock) => publicClient.getLogs({ address: deployment.launchpad, event: TRADE_EVENT, args: { token }, fromBlock, toBlock }),
+          reachedStart:
+            createdAt === undefined
+              ? undefined
+              : async (fromBlock) => Number((await publicClient.getBlock({ blockNumber: fromBlock })).timestamp) <= createdAt,
         })
-        const blocks = new Map<bigint, number>()
-        const wanted = [...new Set(logs.map((log) => log.blockNumber))].filter((block): block is bigint => block !== null)
-        await Promise.all(
-          wanted.slice(0, 40).map(async (blockNumber) => {
-            const block = await publicClient.getBlock({ blockNumber })
-            blocks.set(blockNumber, Number(block.timestamp))
-          }),
-        )
-        return logs
+        const times = await blockTimes(publicClient, logs.map((log) => log.blockNumber))
+        const trades = logs
           .filter((log) => log.blockNumber !== null && log.args.trader && log.args.tokenAmount !== undefined)
           .map((log) => ({
             trader: log.args.trader!,
@@ -109,19 +112,20 @@ export function useLaunchTrades(token: Address | undefined) {
             usdcAmount: log.args.usdcAmount ?? 0n,
             tokenAmount: log.args.tokenAmount ?? 0n,
             fee: log.args.fee ?? 0n,
-            time: blocks.get(log.blockNumber) ?? 0,
+            time: times.get(log.blockNumber) ?? 0,
             txHash: log.transactionHash,
             block: Number(log.blockNumber),
+            logIndex: log.logIndex ?? 0,
           }))
-          .sort((a, b) => b.block - a.block || b.time - a.time)
-          .slice(0, MAX_TRADES)
+          .sort(byNewest)
+        return { trades: trades.slice(0, MAX_TRADES), complete: complete || trades.length >= MAX_TRADES, source: 'rpc' }
       }
     },
   })
 
   if (fixtureOn) {
-    return { trades: token && api ? api.trades(token) : [], isLoading: false, error: null, version: fixtureVersion }
+    return { trades: token && api ? api.trades(token) : [], historyComplete: true, isLoading: false, error: null, version: fixtureVersion }
   }
 
-  return { trades: query.data ?? [], isLoading: query.isLoading, error: query.error, version: 0 }
+  return { trades: query.data?.trades ?? [], historyComplete: query.data?.complete ?? true, isLoading: query.isLoading, error: query.error, version: 0 }
 }

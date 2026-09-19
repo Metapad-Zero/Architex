@@ -99,7 +99,7 @@ input[type='checkbox'], input[type='radio'], input[type='range'] { accent-color:
   .nav-tab:hover { @apply bg-g100; }
 
   .swap-column {
-    @apply mx-auto w-full max-w-[512px] px-4 pb-36 pt-12 sm:px-4 sm:pt-16;
+    @apply mx-auto w-full max-w-[512px] px-4 pb-24 pt-12 sm:px-4 sm:pt-16;
   }
 
   .swap-sheet { @apply relative border-t border-ink; }
@@ -179,7 +179,7 @@ input[type='checkbox'], input[type='radio'], input[type='range'] { accent-color:
   .field-with-suffix > span { @apply border-l border-g300 px-3 text-sm text-g500; }
   .field-toggle { @apply h-full shrink-0 rounded-r border-l border-g300 px-3 text-sm font-semibold text-g700 hover:bg-g100 active:bg-ink active:text-paper disabled:text-g500; }
 
-  .pools-page { @apply mx-auto w-full max-w-[1008px] px-4 pb-36 pt-12 sm:px-6 sm:pt-16; }
+  .pools-page { @apply mx-auto w-full max-w-[1008px] px-4 pb-24 pt-12 sm:px-6 sm:pt-16; }
   .ruled-section { @apply border-t border-ink; }
   .section-heading-row { @apply flex min-h-14 items-center justify-between gap-4; }
   .section-heading-row h2 { @apply text-lg font-semibold; }

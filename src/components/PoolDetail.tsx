@@ -48,7 +48,7 @@ export function PoolDetail({ pair, token0, token1, lpBalance = 0n }: PoolDetailP
           <dd>{lpBalance > 0n ? `${formatPct(shareBps)} · ${formatAmount(pooledBase, base.decimals)} ${base.symbol} + ${formatAmount(pooledQuote, quote.decimals)} ${quote.symbol}` : 'None yet'}</dd>
         </div>
       </dl>
-      <PriceHistory points={history.data ?? []} base={base} quote={quote} quoteIsToken1={quoteIsToken1} loading={history.isLoading} />
+      <PriceHistory points={history.data?.points ?? []} partial={history.data ? !history.data.complete : false} base={base} quote={quote} quoteIsToken1={quoteIsToken1} loading={history.isLoading} />
     </div>
   )
 }

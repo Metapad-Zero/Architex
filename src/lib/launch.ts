@@ -31,6 +31,8 @@ export interface LaunchTrade {
   time: number
   txHash: Hash
   block: number
+  /** Position in the block; tells apart two trades made by one transaction. */
+  logIndex?: number
 }
 
 export function curveStateOf(launch: Pick<LaunchRecord, 'virtualUsdc' | 'virtualTokens' | 'tokensSold'>): CurveState {

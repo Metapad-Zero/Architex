@@ -10,6 +10,8 @@ interface PriceHistoryProps {
   /** True when `quote` is token1 of the pair (price = reserve1/reserve0), false when it is token0. */
   quoteIsToken1: boolean
   loading?: boolean
+  /** True when only the recent end of the history could be read, so an empty chart does not mean no trades. */
+  partial?: boolean
 }
 
 interface Plotted {
@@ -54,7 +56,7 @@ function niceTicks(min: number, max: number): number[] {
   return ticks.length ? ticks : [min, max]
 }
 
-export function PriceHistory({ points, base, quote, quoteIsToken1, loading = false }: PriceHistoryProps) {
+export function PriceHistory({ points, base, quote, quoteIsToken1, loading = false, partial = false }: PriceHistoryProps) {
   const hostRef = useRef<HTMLDivElement>(null)
   const [width, setWidth] = useState(480)
   const [active, setActive] = useState<number | null>(null)
@@ -146,7 +148,13 @@ export function PriceHistory({ points, base, quote, quoteIsToken1, loading = fal
         )}
       </div>
       {plotted.length === 0 ? (
-        <p className="price-history-empty">{loading ? "Reading the pool's history…" : 'No trades yet — the first swap starts the price history.'}</p>
+        <p className="price-history-empty">
+          {loading
+            ? "Reading the pool's history…"
+            : partial
+              ? 'No recent swaps. Older price history could not be loaded.'
+              : 'No trades yet — the first swap starts the price history.'}
+        </p>
       ) : (
         <svg
           className="price-history-plot"

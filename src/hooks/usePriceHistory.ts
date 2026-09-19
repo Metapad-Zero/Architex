@@ -2,6 +2,8 @@ import { useQuery } from '@tanstack/react-query'
 import { decodeAbiParameters, parseAbiItem, type Address, type Hex } from 'viem'
 import { usePublicClient } from 'wagmi'
 import { activeChain } from '../chain'
+import { fetchLogHistory } from '../lib/explorerLogs'
+import { blockTimes, readLogWindows } from '../lib/rpcLogs'
 
 export interface PricePoint {
   block: number
@@ -10,17 +12,20 @@ export interface PricePoint {
   reserve1: bigint
 }
 
+export interface PriceHistoryData {
+  /** Oldest first. */
+  points: PricePoint[]
+  /** False when older swaps may exist that could not be read; "No trades yet" is only true when complete. */
+  complete: boolean
+  source: 'explorer' | 'rpc'
+}
+
 const SYNC_TOPIC = '0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1'
 const SYNC_EVENT = parseAbiItem('event Sync(uint112 reserve0, uint112 reserve1)')
 const MAX_POINTS = 240
-// Arc's public RPC refuses eth_getLogs over more than ~2k blocks; the explorer keeps the full history.
-const RPC_FALLBACK_SPAN = 1_900n
-
-interface ExplorerLog {
-  blockNumber: string
-  timeStamp: string
-  data: string
-}
+// 5 pages of 50: the chart draws the most recent 250 reserve updates.
+const EXPLORER_PAGES = 5
+const RPC_WINDOWS = 3
 
 function thin<T>(points: T[], max: number): T[] {
   if (points.length <= max) return points
@@ -37,62 +42,56 @@ function decodeSync(data: Hex): [bigint, bigint] {
   return [reserve0, reserve1]
 }
 
-async function fromExplorer(pair: Address, signal: AbortSignal | undefined): Promise<PricePoint[]> {
-  const url = `${activeChain.explorerBase}/api?module=logs&action=getLogs&address=${pair}&fromBlock=0&toBlock=latest&topic0=${SYNC_TOPIC}`
-  const response = await fetch(url, { signal })
-  if (!response.ok) throw new Error(`Explorer ${response.status}`)
-  const body = (await response.json()) as { result?: ExplorerLog[] | string | null; message?: string }
-  // "No logs found" still carries an empty array. Anything else is an error inside a 200, and
-  // throwing sends the caller to its RPC fallback instead of showing an empty history.
-  if (!Array.isArray(body.result)) throw new Error(body.message ?? 'Explorer returned no result')
-  const points = body.result.map((log) => {
-    const [reserve0, reserve1] = decodeSync(log.data as Hex)
-    return { block: Number(log.blockNumber), time: Number(log.timeStamp), reserve0, reserve1 }
-  })
-  points.sort((a, b) => a.block - b.block)
-  return points
+function oldestFirst(a: PricePoint, b: PricePoint): number {
+  return a.block - b.block
+}
+
+async function fromExplorer(pair: Address, signal: AbortSignal | undefined): Promise<PriceHistoryData> {
+  const history = await fetchLogHistory({ explorerBase: activeChain.explorerBase, address: pair, topic0: SYNC_TOPIC, maxPages: EXPLORER_PAGES, signal })
+  const points: PricePoint[] = []
+  // Newest first from the explorer; reversing keeps the order of several syncs inside one block.
+  for (const log of [...history.logs].reverse()) {
+    try {
+      const [reserve0, reserve1] = decodeSync(log.data)
+      points.push({ block: log.block, time: log.time, reserve0, reserve1 })
+    } catch {
+      // skip undecodable explorer rows
+    }
+  }
+  return { points: thin(points, MAX_POINTS), complete: history.complete, source: 'explorer' }
 }
 
 export function usePriceHistory(pair: Address | undefined, enabled = true) {
   const publicClient = usePublicClient()
-  return useQuery<PricePoint[], Error, PricePoint[]>({
+  return useQuery<PriceHistoryData, Error>({
     queryKey: ['priceHistory', activeChain.id, pair],
     enabled: enabled && Boolean(pair),
     staleTime: 20_000,
-    refetchInterval: 30_000,
+    // The RPC fallback costs several calls a poll, so it polls less often than the explorer.
+    refetchInterval: (current) => (current.state.data?.source === 'rpc' ? 60_000 : 30_000),
     placeholderData: (previous) => previous,
-    queryFn: async ({ signal }): Promise<PricePoint[]> => {
-      if (!pair) return []
+    queryFn: async ({ signal }): Promise<PriceHistoryData> => {
+      if (!pair) return { points: [], complete: true, source: 'explorer' }
       try {
-        return thin(await fromExplorer(pair, signal), MAX_POINTS)
+        return await fromExplorer(pair, signal)
       } catch {
-        if (!publicClient) return []
-        const head = await publicClient.getBlockNumber()
-        const logs = await publicClient.getLogs({
-          address: pair,
-          event: SYNC_EVENT,
-          fromBlock: head > RPC_FALLBACK_SPAN ? head - RPC_FALLBACK_SPAN : 0n,
-          toBlock: head,
+        if (!publicClient) return { points: [], complete: false, source: 'rpc' }
+        const { logs, complete } = await readLogWindows({
+          head: await publicClient.getBlockNumber(),
+          windows: RPC_WINDOWS,
+          read: (fromBlock, toBlock) => publicClient.getLogs({ address: pair, event: SYNC_EVENT, fromBlock, toBlock }),
         })
-        const blocks = new Map<bigint, number>()
-        const wanted = [...new Set(logs.map((log) => log.blockNumber))].filter((b): b is bigint => b !== null)
-        await Promise.all(
-          wanted.slice(0, 40).map(async (blockNumber) => {
-            const block = await publicClient.getBlock({ blockNumber })
-            blocks.set(blockNumber, Number(block.timestamp))
-          }),
-        )
-        return thin(
-          logs
-            .filter((log) => log.blockNumber !== null && log.args.reserve0 !== undefined && log.args.reserve1 !== undefined)
-            .map((log) => ({
-              block: Number(log.blockNumber),
-              time: blocks.get(log.blockNumber) ?? 0,
-              reserve0: log.args.reserve0!,
-              reserve1: log.args.reserve1!,
-            })),
-          MAX_POINTS,
-        )
+        const times = await blockTimes(publicClient, logs.map((log) => log.blockNumber))
+        const points = logs
+          .filter((log) => log.blockNumber !== null && log.args.reserve0 !== undefined && log.args.reserve1 !== undefined)
+          .map((log) => ({
+            block: Number(log.blockNumber),
+            time: times.get(log.blockNumber) ?? 0,
+            reserve0: log.args.reserve0!,
+            reserve1: log.args.reserve1!,
+          }))
+          .sort(oldestFirst)
+        return { points: thin(points, MAX_POINTS), complete, source: 'rpc' }
       }
     },
   })

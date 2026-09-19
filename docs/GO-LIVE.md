@@ -80,7 +80,8 @@ deploy script against mainnet succeeds and estimates **~6.5M gas ≈ 0.27 USDC**
 - [ ] Price-history chart on mainnet: `explorer.arc.io/api` sits behind a Cloudflare challenge (fine
       on testnet). Verify in the browser after deploy; fallback is RPC `getLogs` in 2k-block windows,
       or hiding the chart on mainnet. Swaps and pools do not depend on it.
-- [ ] "Built with Arc Studio" watermark: keep or remove. Terms / risk page: you supply the text.
+- [x] "Built with Arc Studio" watermark: removed (owner's call, 2026-09-19). The README still credits Arc Studio.
+- [ ] Terms / risk page: you supply the text.
 
 ## 4. Launch verification on architex.fun (both, ~20 min)
 
