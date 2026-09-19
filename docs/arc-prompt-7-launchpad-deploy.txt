@@ -1,0 +1,16 @@
+Deploy one contract to ARC-TESTNET. Nothing else.
+
+The four attached Solidity files replace the ones in the workspace. They are the final, twice-reviewed versions (152 local tests pass). Do not edit them, do not write or run tests, do not run an audit, do not touch src/. Quick preset. Compile only if the deploy needs it.
+
+Contract: contracts/launchpad/ArchitexLaunchpad.sol : ArchitexLaunchpad
+
+Constructor arguments, in order:
+1. _usdc        = 0x3600000000000000000000000000000000000000
+2. _factory     = 0x6362f5A0fc007AB7D1e61f99D3F4eB04360D060a
+3. _feeTo       = 0x7212fA4Fe663d063A7a83dA0467d592ed3A51D46
+4. _feeToSetter = 0x7212fA4Fe663d063A7a83dA0467d592ed3A51D46
+5. _launchFee   = 1000000
+
+Compiler settings stay exactly as in foundry.toml: solc 0.8.28, evm_version paris, optimizer on with 200 runs, via_ir = true.
+
+Report the deployed address, the transaction hash and the explorer link. If anything fails, stop and report the error. Do not retry with modified sources.

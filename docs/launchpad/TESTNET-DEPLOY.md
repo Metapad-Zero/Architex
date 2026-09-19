@@ -1,5 +1,14 @@
 # Launchpad: deploying to Arc Testnet
 
+**Deployed 2026-09-19:** [`0xd9a7b70085AFE91c4868587899824048d933736e`](https://explorer.testnet.arc.io/address/0xd9a7b70085AFE91c4868587899824048d933736e)
+by Arc Studio's testnet deployer, launch fee 1 USDC, `feeTo` and `feeToSetter` = the dev burner
+`0x7212fA4Fe663d063A7a83dA0467d592ed3A51D46` (testnet only; mainnet uses a hardware wallet).
+The on-chain code was checked byte for byte against the local build:
+
+```bash
+bun run scripts/verify-bytecode.ts 0xd9a7b70085AFE91c4868587899824048d933736e ArchitexLaunchpad
+```
+
 The launchpad is one contract, `ArchitexLaunchpad`, deployed next to the existing Architex factory.
 It deploys each `LaunchToken` itself, so there is nothing else to deploy.
 
@@ -88,7 +97,8 @@ From the second review. Testnet needs none of these; mainnet needs all of them.
 - [x] Solvency invariant is an equality, counts `pendingFees`, and the handler calls `collectFees`
 - [x] Vectors V4 and V5 executed through `buy()`, not only quoted
 - [x] Suite run against the deployed Architex bytecode on Arc (fork suite above)
-- [ ] Live smoke test passes on Arc Testnet with real USDC
+- [x] Deployed to Arc Testnet, bytecode verified against the local build, read-only smoke passes
+- [ ] Live trading smoke test passes on Arc Testnet with real USDC (needs ~12 test USDC on the burner)
 - [ ] One token taken all the way to graduation on testnet, then traded on the Swap tab
 - [ ] `LAUNCH_FEE` decided and non-zero (spam cost; the cap is 100 USDC)
 - [ ] `FEE_TO_SETTER` is a hardware wallet and is kept, never renounced: it is the only way to move

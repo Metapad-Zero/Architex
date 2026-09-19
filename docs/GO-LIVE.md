@@ -98,8 +98,8 @@ Passkeys made on `localhost` or a `*.vercel.app` preview do not exist on the rea
 - [ ] Watch the first hours: `PairCreated` / `Swap` events, RPC errors, wallet connection failures.
 - [ ] Announce.
 - [ ] Launchpad (bonding curves that graduate into Architex pairs): built, reviewed twice, 152 tests,
-      proven against the deployed testnet bytecode. Not deployed yet. Testnet first, then the
-      "Before mainnet" list: `docs/launchpad/TESTNET-DEPLOY.md`.
+      proven against the deployed testnet bytecode. LIVE ON TESTNET (0xd9a7…736e, bytecode verified).
+      Mainnet only after the "Before mainnet" list: `docs/launchpad/TESTNET-DEPLOY.md`.
 - [ ] Later, not blocking: third-party audit,
       full `connect-src` CSP (hosts in `docs/MAINNET-DEPLOY.md`), Google/email sign-in (Privy or Circle
       user-controlled wallets), re-sync the Arc Studio sandbox, rename the Arc Studio app.
