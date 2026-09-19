@@ -65,10 +65,18 @@ deploy script against mainnet succeeds and estimates **~6.5M gas ≈ 0.27 USDC**
       `VITE_ARC_RPC_URL` override, error boundary, non-throwing popovers, link-preview card + meta
       for architex.fun.
 - [x] In git: `Metapad-Zero/Architex` (private), branch `main`.
-- [ ] **Deploy to Vercel** (CLI is logged in): project + env `VITE_ARC_NETWORK`, attach `architex.fun`.
-      Suggested order: ship the **testnet** build to architex.fun first, prove the domain, passkeys and
-      WalletConnect there with nothing at risk, then flip the env to `mainnet` once section 1 is done.
-- [ ] **Reown dashboard → allowlist `architex.fun`** (you; the relay refuses unlisted domains).
+- [x] **Deployed to Vercel** 2026-09-19: project `architex` (team `redemption`), production
+      deployment live at **https://architex.fun** (also `architex-eight.vercel.app`), currently the
+      **testnet** build (`VITE_ARC_NETWORK=testnet` on Production + Preview). Verified there: pools load,
+      no dev wallet seeded, passkey sign-in offered, WalletConnect issues a QR, security headers served.
+      Redeploy with `vercel deploy --prod` from the repo root (CLI deploys; the GitHub repo is not
+      connected to Vercel yet).
+- [ ] **Flip to mainnet** once section 1 is done: set `VITE_ARC_NETWORK=mainnet` on Production,
+      fill `src/deployments/arc-mainnet.json`, redeploy.
+- [x] Passkey scope pinned to `architex.fun` (apex, www and subdomains share wallets) before any real
+      wallet exists on the domain.
+- [ ] Reown dashboard: WalletConnect already works from `architex.fun`; if you ever turn the
+      allowlist on, add `architex.fun` first or the relay will refuse it.
 - [ ] Price-history chart on mainnet: `explorer.arc.io/api` sits behind a Cloudflare challenge (fine
       on testnet). Verify in the browser after deploy; fallback is RPC `getLogs` in 2k-block windows,
       or hiding the chart on mainnet. Swaps and pools do not depend on it.
