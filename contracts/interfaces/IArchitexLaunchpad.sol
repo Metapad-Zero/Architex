@@ -38,6 +38,8 @@ interface IArchitexLaunchpad {
     error UnknownToken();
     error CurveGraduated();
     error SlippageExceeded();
+    /// @notice A sell (or its quote) for more tokens than the curve has sold.
+    error ExceedsSold();
     error InvalidName();
     error InvalidSymbol();
     error InvalidMetadata();

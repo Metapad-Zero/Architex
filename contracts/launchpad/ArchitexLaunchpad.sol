@@ -241,16 +241,14 @@ contract ArchitexLaunchpad is IArchitexLaunchpad, ReentrancyGuard {
         Curve storage c = _curves[token];
         if (c.token == address(0)) revert UnknownToken();
         if (c.graduated) revert CurveGraduated();
-        if (tokensIn == 0) revert ZeroAmount();
 
         uint256 vUsdc = c.virtualUsdc;
         uint256 vTokens = c.virtualTokens;
 
-        // ── Sell math (shared with quoteSell) ─────────────────────────────────
-        (uint256 gross, uint256 fee) = _calcSell(vUsdc, vTokens, tokensIn);
-
-        usdcOut = gross - fee;
-        if (usdcOut == 0) revert ZeroAmount();
+        // ── Guards + math, the one path quoteSell also takes ──────────────────
+        uint256 gross;
+        uint256 fee;
+        (gross, fee, usdcOut) = _sellQuote(c, tokensIn);
         if (usdcOut < minUsdcOut) revert SlippageExceeded();
 
         // ── Effects ───────────────────────────────────────────────────────────
@@ -472,10 +470,21 @@ contract ArchitexLaunchpad is IArchitexLaunchpad, ReentrancyGuard {
         Curve storage c = _curves[token];
         if (c.token == address(0)) revert UnknownToken();
         if (c.graduated) revert CurveGraduated();
+        (, fee, usdcOut) = _sellQuote(c, tokensIn);
+    }
 
-        uint256 gross;
+    /// @dev Every check a sell makes before it touches state, so a quote can never promise what a
+    ///      sell would refuse: nothing to sell, more than the curve has sold, or dust worth nothing.
+    function _sellQuote(Curve storage c, uint256 tokensIn)
+        internal
+        view
+        returns (uint256 gross, uint256 fee, uint256 usdcOut)
+    {
+        if (tokensIn == 0) revert ZeroAmount();
+        if (tokensIn > uint256(c.tokensSold)) revert ExceedsSold();
         (gross, fee) = _calcSell(c.virtualUsdc, c.virtualTokens, tokensIn);
         usdcOut = gross - fee;
+        if (usdcOut == 0) revert ZeroAmount();
     }
 
     /// @inheritdoc IArchitexLaunchpad

@@ -662,7 +662,7 @@ contract ArchitexLaunchpadTest is Test {
                 totalRequired += uint256(c.virtualUsdc) - VIRTUAL_USDC_0;
             }
         }
-        assertGe(padUsdc, totalRequired, "solvency violated");
+        assertEq(padUsdc, totalRequired + pad.pendingFees(), "USDC held must equal curve float plus accrued fees");
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -893,6 +893,7 @@ contract ArchitexLaunchpadTest is Test {
         address token = _graduateToken();
         // After graduation tokensSold == CURVE_SUPPLY → 10_000 bps
         assertEq(pad.curves(token).tokensSold, CURVE_SUPPLY);
+        assertEq(pad.progressBps(token), 10_000);
     }
 
     function test_curvesPage_clamping() public {
@@ -997,7 +998,7 @@ contract LaunchpadInvariantTest is Test {
                 totalRequired += uint256(c.virtualUsdc) - VIRTUAL_USDC_0;
             }
         }
-        assertGe(padUsdc, totalRequired, "solvency invariant violated");
+        assertEq(padUsdc, totalRequired + pad.pendingFees(), "USDC held must equal curve float plus accrued fees");
     }
 
     /// @notice tokensSold never exceeds CURVE_SUPPLY

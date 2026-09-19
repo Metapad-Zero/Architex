@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import "forge-std/Test.sol";
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 import "../ArchitexFactory.sol";
 import "../ArchitexRouter.sol";
@@ -38,6 +39,128 @@ contract BlockableUSDC is ERC20 {
 contract PlainToken is ERC20 {
     constructor() ERC20("Other", "OTHER") {
         _mint(msg.sender, 1_000_000e18);
+    }
+}
+
+interface IUsdcHook {
+    function onUsdcReceived() external;
+}
+
+/// @dev A USDC that calls its recipient back: the only way to reach a reentrant call, since neither
+///      real USDC nor LaunchToken has a transfer hook. Proves the guard is there, not that it is needed.
+contract HookedUSDC is ERC20 {
+    address public hook;
+
+    constructor() ERC20("USD Coin", "USDC") {}
+
+    function decimals() public pure override returns (uint8) {
+        return 6;
+    }
+
+    function mint(address to, uint256 amount) external {
+        _mint(to, amount);
+    }
+
+    function setHook(address target) external {
+        hook = target;
+    }
+
+    function _update(address from, address to, uint256 value) internal override {
+        super._update(from, to, value);
+        if (to == hook && hook != address(0) && from != address(0)) IUsdcHook(hook).onUsdcReceived();
+    }
+}
+
+contract ReentrantSeller is IUsdcHook {
+    ArchitexLaunchpad public immutable pad;
+    address public token;
+
+    constructor(ArchitexLaunchpad _pad) {
+        pad = _pad;
+    }
+
+    function prime(address _token, IERC20 usdc_, uint256 usdcIn) external {
+        token = _token;
+        usdc_.approve(address(pad), type(uint256).max);
+        pad.buy(_token, usdcIn, 0, address(this));
+    }
+
+    function sellAll() external {
+        pad.sell(token, IERC20(token).balanceOf(address(this)), 0, address(this));
+    }
+
+    function onUsdcReceived() external {
+        pad.buy(token, 1e6, 0, address(this));
+    }
+}
+
+/// @dev Random buys, sells and fee collections over two curves, never a donation.
+contract AccountingHandler is Test {
+    ArchitexLaunchpad public pad;
+    BlockableUSDC public usdc;
+    address[2] public tokens;
+    address public trader = address(0xA11CE);
+
+    constructor(ArchitexLaunchpad _pad, BlockableUSDC _usdc, address a, address b) {
+        pad = _pad;
+        usdc = _usdc;
+        tokens = [a, b];
+        usdc.mint(trader, 1_000_000_000e6);
+        vm.prank(trader);
+        usdc.approve(address(pad), type(uint256).max);
+    }
+
+    function buy(uint8 which, uint64 rawAmount) external {
+        address token = tokens[which % 2];
+        if (pad.curves(token).graduated) return;
+        uint256 amount = bound(uint256(rawAmount), 1, 4_000e6);
+        vm.prank(trader);
+        try pad.buy(token, amount, 0, trader) {} catch {}
+    }
+
+    function sell(uint8 which, uint96 rawAmount) external {
+        address token = tokens[which % 2];
+        if (pad.curves(token).graduated) return;
+        uint256 held = IERC20(token).balanceOf(trader);
+        if (held == 0) return;
+        vm.prank(trader);
+        try pad.sell(token, bound(uint256(rawAmount), 1, held), 0, trader) {} catch {}
+    }
+
+    function collect() external {
+        pad.collectFees();
+    }
+}
+
+contract LaunchpadAccountingInvariant is Test {
+    uint256 constant VIRTUAL_USDC_0 = 2_916_666_667;
+    uint256 constant VIRTUAL_TOKENS_0 = 1_066_666_667e18;
+
+    BlockableUSDC usdc;
+    ArchitexLaunchpad pad;
+    AccountingHandler handler;
+
+    function setUp() public {
+        usdc = new BlockableUSDC();
+        ArchitexFactory amm = new ArchitexFactory(address(this));
+        pad = new ArchitexLaunchpad(address(usdc), address(amm), makeAddr("feeTo"), makeAddr("setter"), 3e6);
+        usdc.mint(address(this), 100e6);
+        usdc.approve(address(pad), type(uint256).max);
+        address a = pad.createToken("First", "ONE", "", 0, 0);
+        address b = pad.createToken("Second", "TWO", "", 0, 0);
+        handler = new AccountingHandler(pad, usdc, a, b);
+        targetContract(address(handler));
+    }
+
+    /// @notice What the launchpad holds is exactly what it owes: accrued fees plus every live curve's float.
+    function invariant_heldEqualsOwed() public view {
+        uint256 owed = pad.pendingFees();
+        for (uint256 i = 0; i < pad.tokensLength(); i++) {
+            IArchitexLaunchpad.Curve memory c = pad.curves(pad.tokenAt(i));
+            assertEq(uint256(c.virtualTokens) + uint256(c.tokensSold), VIRTUAL_TOKENS_0);
+            if (!c.graduated) owed += uint256(c.virtualUsdc) - VIRTUAL_USDC_0;
+        }
+        assertEq(usdc.balanceOf(address(pad)), owed);
     }
 }
 
@@ -447,5 +570,161 @@ contract ArchitexLaunchpadV11Test is Test {
         assertEq(pad.curvesPage(0, 1_000).length, 3);
         assertEq(pad.curvesPage(1, 1).length, 1);
         assertEq(pad.curvesPage(3, 10).length, 0);
+    }
+
+    // ── Review #2: vectors executed, not only quoted ─────────────────────────
+
+    function test_vector_V4_executedOnBothSidesOfTheBoundary() public {
+        address below = _create();
+        uint256 before = usdc.balanceOf(alice);
+        vm.prank(alice);
+        (uint256 tokensBelow, uint256 spentBelow) = pad.buy(below, 8793969840, 0, alice);
+        assertEq(spentBelow, 8793969840);
+        assertEq(before - usdc.balanceOf(alice), 8793969840);
+        assertLt(tokensBelow, CURVE_SUPPLY);
+        assertFalse(pad.curves(below).graduated);
+
+        address at = _create();
+        before = usdc.balanceOf(bob);
+        vm.prank(bob);
+        (uint256 tokensAt, uint256 spentAt) = pad.buy(at, 8793969841, 0, bob);
+        assertEq(spentAt, 8793969841);
+        assertEq(before - usdc.balanceOf(bob), 8793969841);
+        assertEq(tokensAt, CURVE_SUPPLY);
+        assertTrue(pad.curves(at).graduated);
+    }
+
+    function test_vector_V5_executed() public {
+        address token = _create();
+        vm.prank(alice);
+        (uint256 tokensOut, uint256 spent) = pad.buy(token, 199, 0, alice);
+        assertEq(tokensOut, 72411423670080333291);
+        assertEq(spent, 199);
+        assertEq(pad.pendingFees(), 1);
+        vm.prank(alice);
+        vm.expectRevert(IArchitexLaunchpad.ZeroAmount.selector);
+        pad.buy(token, 1, 0, alice);
+    }
+
+    function test_quoteSellRevertsExactlyWhereSellWould() public {
+        address token = _create();
+        vm.prank(alice);
+        (uint256 tokens,) = pad.buy(token, 100e6, 0, alice);
+
+        vm.expectRevert(IArchitexLaunchpad.ZeroAmount.selector);
+        pad.quoteSell(token, 0);
+        vm.expectRevert(IArchitexLaunchpad.ZeroAmount.selector);
+        pad.quoteSell(token, 1);
+        vm.expectRevert(IArchitexLaunchpad.ExceedsSold.selector);
+        pad.quoteSell(token, tokens + 1);
+
+        vm.startPrank(alice);
+        vm.expectRevert(IArchitexLaunchpad.ZeroAmount.selector);
+        pad.sell(token, 0, 0, alice);
+        vm.expectRevert(IArchitexLaunchpad.ZeroAmount.selector);
+        pad.sell(token, 1, 0, alice);
+        vm.expectRevert(IArchitexLaunchpad.ExceedsSold.selector);
+        pad.sell(token, tokens + 1, 0, alice);
+        vm.stopPrank();
+
+        (uint256 quoted,) = pad.quoteSell(token, tokens);
+        vm.prank(alice);
+        assertEq(pad.sell(token, tokens, 0, alice), quoted);
+    }
+
+    function test_absurdInputRevertsOnlyThatCall() public {
+        address token = _create();
+        IArchitexLaunchpad.Curve memory beforeCall = pad.curves(token);
+        vm.prank(alice);
+        vm.expectRevert();
+        pad.buy(token, type(uint256).max, 0, alice);
+        IArchitexLaunchpad.Curve memory afterCall = pad.curves(token);
+        assertEq(afterCall.virtualUsdc, beforeCall.virtualUsdc);
+        assertEq(afterCall.tokensSold, 0);
+        vm.prank(alice);
+        pad.buy(token, 10e6, 0, alice);
+    }
+
+    function test_reentrantCallIsRefused() public {
+        HookedUSDC hooked = new HookedUSDC();
+        ArchitexFactory amm2 = new ArchitexFactory(address(this));
+        ArchitexLaunchpad pad2 = new ArchitexLaunchpad(address(hooked), address(amm2), feeTo, setter, 0);
+        address token = pad2.createToken("Hook", "HOOK", "", 0, 0);
+        ReentrantSeller attacker = new ReentrantSeller(pad2);
+        hooked.mint(address(attacker), 1_000e6);
+        attacker.prime(token, IERC20(address(hooked)), 100e6);
+        hooked.setHook(address(attacker));
+        vm.expectRevert(ReentrancyGuard.ReentrancyGuardReentrantCall.selector);
+        attacker.sellAll();
+    }
+
+    function test_launchFeeAndTradeFeesAreAllCollectable() public {
+        vm.prank(setter);
+        pad.setLaunchFee(5e6);
+        vm.prank(alice);
+        address token = pad.createToken("Paid", "PAID", "", 10_000e6, CURVE_SUPPLY);
+        assertTrue(pad.curves(token).graduated);
+        assertEq(pad.pendingFees(), 5e6 + 43969850);
+        assertEq(usdc.balanceOf(address(pad)), pad.pendingFees(), "after graduation only fees remain");
+        assertEq(pad.collectFees(), 5e6 + 43969850);
+        assertEq(usdc.balanceOf(feeTo), 5e6 + 43969850);
+        assertEq(usdc.balanceOf(address(pad)), 0);
+    }
+
+    function test_allLiquidityIsLockedAndGasIsBounded() public {
+        vm.prank(alice);
+        uint256 gasBefore = gasleft();
+        address token = pad.createToken("Gas", "GAS", "", 10_000e6, CURVE_SUPPLY);
+        uint256 gasUsed = gasBefore - gasleft();
+        assertLt(gasUsed, 3_500_000, "create + pair + sell-out + graduation");
+        IArchitexPair pair = IArchitexPair(pad.curves(token).pair);
+        assertEq(pair.balanceOf(DEAD), pair.totalSupply(), "every LP unit sits at the dead address");
+    }
+
+    function test_skimmedDonationLeavesTheOpeningPriceExact() public {
+        address token = _create();
+        IArchitexPair pair = IArchitexPair(pad.curves(token).pair);
+        vm.prank(mallory);
+        usdc.transfer(address(pair), 500e6);
+        pair.skim(mallory);
+        assertEq(usdc.balanceOf(address(pair)), 0);
+        vm.prank(alice);
+        pad.buy(token, 1_000_000e6, 0, alice);
+        uint256 poolPrice = usdc.balanceOf(address(pair)) * 1e36 / IERC20(token).balanceOf(address(pair));
+        uint256 curvePrice = pad.spotPrice(token);
+        uint256 gap = poolPrice > curvePrice ? poolPrice - curvePrice : curvePrice - poolPrice;
+        assertLt(gap * 1_000_000, curvePrice, "pool opens at the curve's final price within 1e-6");
+    }
+
+    function test_nobodyCanMintThePairBeforeGraduation() public {
+        address token = _create();
+        IArchitexPair pair = IArchitexPair(pad.curves(token).pair);
+        vm.startPrank(mallory);
+        usdc.transfer(address(pair), 100e6);
+        vm.expectRevert();
+        pair.mint(mallory);
+        vm.stopPrank();
+        assertEq(pair.totalSupply(), 0);
+    }
+
+    function test_flashSwapIntoTheUsdcPairIsLocked() public {
+        address token = _create();
+        address usdcPair = pad.curves(token).pair;
+        vm.prank(alice);
+        (uint256 tokens,) = pad.buy(token, 500e6, 0, alice);
+        PlainToken other = new PlainToken();
+        other.transfer(alice, 1_000e18);
+        vm.startPrank(alice);
+        IERC20(token).approve(address(router), type(uint256).max);
+        other.approve(address(router), type(uint256).max);
+        router.addLiquidity(token, address(other), tokens / 2, 500e18, 0, 0, alice, block.timestamp + 1);
+        vm.stopPrank();
+
+        IArchitexPair otherPair = IArchitexPair(amm.getPair(token, address(other)));
+        bool tokenIsZero = otherPair.token0() == token;
+        other.transfer(address(otherPair), 50e18);
+        uint256 out = tokens / 100;
+        vm.expectRevert(ILaunchToken.PairLockedUntilGraduation.selector);
+        otherPair.swap(tokenIsZero ? out : 0, tokenIsZero ? 0 : out, usdcPair, "");
     }
 }

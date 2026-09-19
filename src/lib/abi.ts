@@ -127,6 +127,7 @@ export const launchpadAbi = parseAbi([
   'error UnknownToken()',
   'error CurveGraduated()',
   'error SlippageExceeded()',
+  'error ExceedsSold()',
   'error InvalidName()',
   'error InvalidSymbol()',
   'error InvalidMetadata()',

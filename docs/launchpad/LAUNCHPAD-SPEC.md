@@ -45,7 +45,8 @@ Spot price = `virtualUsdc / virtualTokens`.
   **`usdcSpent` is never greater than `usdcIn`**; pull exactly `usdcSpent` (never pull-then-refund).
   `tokensOut == 0` reverts `ZeroAmount`. Rounding always favours the curve.
 - **Sell** `tokensIn`: `gross = virtualUsdc - ceil(k / (virtualTokens + tokensIn))`;
-  `fee = ceil(gross * FEE_BPS / 10_000)`; seller receives `gross - fee`; zero proceeds revert `ZeroAmount`.
+  `fee = ceil(gross * FEE_BPS / 10_000)`; seller receives `gross - fee`; zero proceeds revert `ZeroAmount`;
+  `tokensIn > tokensSold` reverts `ExceedsSold`. `quoteSell` reverts exactly where `sell` would.
 - `tokensSold` is **net**: `+=` on buys, `-=` on sells. Circulating supply before graduation equals
   `tokensSold`, so nobody can sell more than it; `virtualUsdc` never drops below `VIRTUAL_USDC_0`.
 - `quoteBuy` / `quoteSell` must share the trade functions' code path (one internal pure function each),

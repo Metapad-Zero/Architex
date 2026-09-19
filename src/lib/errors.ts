@@ -26,6 +26,7 @@ const REVERTS: Record<string, string> = {
   UnknownToken: 'That token is not on the launchpad.',
   CurveGraduated: 'This curve has graduated. Trade it on Swap.',
   SlippageExceeded: 'The price moved past your slippage limit. Try again or raise slippage in settings.',
+  ExceedsSold: 'That is more than this curve has sold. Enter a smaller amount.',
   InvalidName: 'Name must be 1 to 32 bytes.',
   InvalidSymbol: 'Symbol must be 1 to 10 bytes.',
   InvalidMetadata: 'Image URL must be 256 bytes or fewer.',
