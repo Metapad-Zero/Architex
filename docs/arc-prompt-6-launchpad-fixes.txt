@@ -1,0 +1,21 @@
+Fix round for the Architex launchpad you wrote last turn. Your code was pulled, built and run locally (58/58 launchpad tests pass) and reviewed twice: by Grok Build as red team (docs/launchpad/GROK-REVIEW-1.md, attached) and by Claude against your source. The spec is now v1.1 (docs/launchpad/LAUNCHPAD-SPEC.md, attached, binding) and the interface gained three additive members (attached). Default preset, NO deployment this turn, keep the turn focused.
+
+What you already got right (do not change): per-curve usdcSeeded from stored reserves, unguarded internal _buy called from createToken, launchpadPull(msg.sender) landing on the launchpad, net tokensSold, direct pair.mint(DEAD), getPair-then-createPair, the OZ5 _update pair lock.
+
+Required changes in contracts/launchpad/ArchitexLaunchpad.sol:
+1. Fees round UP: buy fee = ceil(usdcIn*FEE_BPS/10_000); sell fee = ceil(gross*FEE_BPS/10_000). tokensOut == 0 reverts ZeroAmount; sell proceeds == 0 reverts ZeroAmount.
+2. Exact fill: usdcSpent = min(usdcIn, net + ceil(net*FEE_BPS/(10_000-FEE_BPS))), fee = usdcSpent - net. usdcSpent must never exceed usdcIn.
+3. Fees are ACCRUED, never pushed: add `uint256 public pendingFees`; trade fees and the launch fee increase it (pull the launch fee from the creator into the launchpad); add permissionless `collectFees()` that zeroes pendingFees then transfers to feeTo and emits FeesCollected. No transfer to feeTo anywhere inside createToken/buy/sell/graduation.
+4. spotPrice is wrong by 1e18 (returns 2 at launch): it must be virtualUsdc * 1e36 / virtualTokens. Keep marketCap and progressBps as they are.
+5. Graduation: add `require(pair.totalSupply() == 0)` (custom error is fine) immediately before markGraduated; keep the rest of the order exactly as in spec step 3.
+6. Trade.trader is always msg.sender (your buy path emits `to`).
+7. One internal pure/view function for the buy math and one for the sell math, used by both the trade and quoteBuy/quoteSell, so they cannot diverge.
+8. SafeCast.toUint128 on every uint128 write. curves(unknown) reverts UnknownToken. curvesPage clamps count to 100. setFeeTo rejects address(0) and address(this). NatSpec: setFeeToSetter(0) is an irreversible renounce; name/symbol/metadataURI are untrusted bytes.
+
+Required tests (add to contracts/test/ArchitexLaunchpad.t.sol, keep the existing ones passing or update them to the new rounding):
+- The spec's "Test vectors" table, asserted to the unit (V1, V2, V3, V4, V5 and the start values). They come from an independent TypeScript model; if your numbers differ, say exactly where instead of changing the expected values.
+- Every item in the "Tests the implementer must add" list at the end of GROK-REVIEW-1.md that still applies under spec v1.1 (two live curves; createToken that buys out the whole curve in one transaction; pre-created pair; donate with and without sync then graduate; factory protocol fee switched on before graduation; launchpadPull destination and access; net tokensSold round trip; pair lock incl. router path [token, USDC] before/after and a token/other-token pair before graduation; views at t=0 and at sell-out; a feeTo that is a reverting contract does not block createToken/buy/sell/graduation and collectFees reverts cleanly while pendingFees stays intact).
+- Invariant: USDC balance >= pendingFees + sum(virtualUsdc - VIRTUAL_USDC_0) over live curves; virtualTokens + tokensSold == VIRTUAL_TOKENS_0; k non-decreasing.
+- Print the gas used by createToken that creates the pair AND graduates in the same transaction.
+
+Finish with forge build + forge test (whole repo) and report: total tests, any vector that did not match, the measured gas, and anything in GROK-REVIEW-1.md you disagree with and why.

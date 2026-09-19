@@ -48,16 +48,20 @@ export function quoteBuy(state: CurveState, usdcIn: bigint): BuyQuote {
   if (remaining <= 0n) throw new Error('CurveGraduated')
   const k = state.virtualUsdc * state.virtualTokens
 
-  let fee = (usdcIn * CURVE.FEE_BPS) / BPS
+  // Fees round up: a floor would make every trade under 200 units of USDC free.
+  let fee = ceilDiv(usdcIn * CURVE.FEE_BPS, BPS)
   let net = usdcIn - fee
   let tokensOut = state.virtualTokens - ceilDiv(k, state.virtualUsdc + net)
 
   if (tokensOut >= remaining) {
-    // The buy that sells out the curve fills exactly the remainder and is charged only for it.
+    // The buy that sells out the curve fills exactly the remainder and is charged only for it,
+    // and never more than was offered: at the boundary the last unit comes out of the fee.
     tokensOut = remaining
     net = ceilDiv(k, state.virtualTokens - remaining) - state.virtualUsdc
-    fee = ceilDiv(net * CURVE.FEE_BPS, BPS - CURVE.FEE_BPS)
+    const wanted = net + ceilDiv(net * CURVE.FEE_BPS, BPS - CURVE.FEE_BPS)
+    fee = (wanted < usdcIn ? wanted : usdcIn) - net
   }
+  if (tokensOut === 0n) throw new Error('ZeroAmount')
 
   return {
     tokensOut,
@@ -74,7 +78,8 @@ export function quoteSell(state: CurveState, tokensIn: bigint): SellQuote {
   if (tokensIn > state.tokensSold) throw new Error('InsufficientSold')
   const k = state.virtualUsdc * state.virtualTokens
   const gross = state.virtualUsdc - ceilDiv(k, state.virtualTokens + tokensIn)
-  const fee = (gross * CURVE.FEE_BPS) / BPS
+  const fee = ceilDiv(gross * CURVE.FEE_BPS, BPS)
+  if (gross - fee === 0n) throw new Error('ZeroAmount')
   return {
     usdcOut: gross - fee,
     fee,

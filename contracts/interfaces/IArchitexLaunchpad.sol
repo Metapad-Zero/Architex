@@ -30,6 +30,7 @@ interface IArchitexLaunchpad {
     event FeeToUpdated(address indexed feeTo);
     event FeeToSetterUpdated(address indexed feeToSetter);
     event LaunchFeeUpdated(uint256 launchFee);
+    event FeesCollected(address indexed feeTo, uint256 amount);
 
     error ZeroAddress();
     error ZeroAmount();
@@ -47,6 +48,8 @@ interface IArchitexLaunchpad {
     function feeTo() external view returns (address);
     function feeToSetter() external view returns (address);
     function launchFee() external view returns (uint256);
+    /// @notice Trade and launch fees accrued in the launchpad and not yet sent to `feeTo`.
+    function pendingFees() external view returns (uint256);
 
     function TOTAL_SUPPLY() external view returns (uint256);
     function CURVE_SUPPLY() external view returns (uint256);
@@ -81,6 +84,10 @@ interface IArchitexLaunchpad {
     function marketCap(address token) external view returns (uint256);
     /// @return tokensSold / CURVE_SUPPLY in basis points
     function progressBps(address token) external view returns (uint256);
+
+    /// @notice Permissionless: sends `pendingFees` to `feeTo`. Fees are never pushed during a trade, so a
+    ///         reverting or blocklisted `feeTo` cannot stop trading.
+    function collectFees() external returns (uint256 amount);
 
     function setFeeTo(address feeTo) external;
     function setFeeToSetter(address feeToSetter) external;

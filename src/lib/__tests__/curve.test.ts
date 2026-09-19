@@ -96,6 +96,37 @@ describe('bonding curve', () => {
     expect(tokens <= single.tokensOut).toBe(true)
   })
 
+  test('the smallest sell-out buy is never charged more than it offered', () => {
+    // walk down to the smallest input that still sells out the whole curve
+    let low = 8_000n * USDC
+    let high = 9_000n * USDC
+    while (high - low > 1n) {
+      const mid = (low + high) / 2n
+      if (quoteBuy(INITIAL_CURVE, mid).graduates) high = mid
+      else low = mid
+    }
+    const atBoundary = quoteBuy(INITIAL_CURVE, high)
+    expect(atBoundary.graduates).toBe(true)
+    expect(atBoundary.tokensOut).toBe(CURVE.CURVE_SUPPLY)
+    expect(atBoundary.usdcSpent <= high).toBe(true)
+    expect(quoteBuy(INITIAL_CURVE, low).graduates).toBe(false)
+    // and with one token-wei left, a 2-unit buy finishes the curve without over-charging
+    const almost: CurveState = { ...quoteBuy(INITIAL_CURVE, low).next }
+    const finish = quoteBuy(almost, 1_000n * USDC)
+    expect(finish.graduates).toBe(true)
+    expect(finish.usdcSpent <= 1_000n * USDC).toBe(true)
+    expect(finish.next.tokensSold).toBe(CURVE.CURVE_SUPPLY)
+  })
+
+  test('no trade is free: fees round up, and dust that buys nothing is refused', () => {
+    expect(quoteBuy(INITIAL_CURVE, 199n).fee).toBe(1n)
+    expect(quoteBuy(INITIAL_CURVE, 1_000_000n).fee).toBe(5_000n)
+    expect(() => quoteBuy(INITIAL_CURVE, 1n)).toThrow('ZeroAmount')
+    const held = quoteBuy(INITIAL_CURVE, 100n * USDC)
+    expect(() => quoteSell(held.next, 1n)).toThrow('ZeroAmount')
+    expect(quoteSell(held.next, held.tokensOut).fee > 0n).toBe(true)
+  })
+
   test('refuses what the contract refuses', () => {
     const soldOut = quoteBuy(INITIAL_CURVE, 1_000_000n * USDC).next
     expect(() => quoteBuy(soldOut, USDC)).toThrow('CurveGraduated')

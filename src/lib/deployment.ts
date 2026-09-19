@@ -25,6 +25,8 @@ export interface ArchitexDeployment {
   factory: Address
   router: Address
   lens: Address
+  /** Zero until the launchpad is deployed on this network; the Launch view exists only when it is set. */
+  launchpad: Address
   deployer: Address
   tokens: DeploymentToken[]
   pairs: DeploymentPair[]
@@ -33,3 +35,4 @@ export interface ArchitexDeployment {
 
 export const deployment = (arcNetwork === 'mainnet' ? mainnetDeployment : testnetDeployment) as ArchitexDeployment
 export const isDeployed = deployment.factory !== zeroAddress
+export const isLaunchpadDeployed = isDeployed && deployment.launchpad !== zeroAddress
