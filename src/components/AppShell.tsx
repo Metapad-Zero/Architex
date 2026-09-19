@@ -16,7 +16,13 @@ export function AppShell({ route, onRoute, children }: AppShellProps) {
     <div className="min-h-dvh bg-paper text-ink">
       <header className="masthead">
         <div className="flex min-w-0 items-center gap-3 sm:gap-6">
-          <button type="button" className="wordmark" onClick={() => onRoute({ view: 'swap' })}>Architex</button>
+          <button type="button" className="wordmark" onClick={() => onRoute({ view: 'swap' })}>
+            <svg className="wordmark-mark" viewBox="0 0 64 64" aria-hidden="true" focusable="false">
+              <path d="M18 58V28a14 14 0 0 1 28 0v30" fill="none" stroke="currentColor" strokeWidth="9" />
+              <rect x="2" y="36" width="60" height="8" fill="var(--accent)" />
+            </svg>
+            <span className="wordmark-text">Architex</span>
+          </button>
           <span className="testnet-chip">{activeChain.isTestnet ? 'Testnet' : 'Beta'}</span>
           <nav className="ml-1 flex h-14 items-stretch sm:ml-4" aria-label="Primary">
             {(['swap', 'pools', ...(isLaunchViewAvailable ? (['launch'] as const) : [])] as const).map((view) => (

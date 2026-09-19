@@ -74,7 +74,12 @@ input[type='checkbox'], input[type='radio'], input[type='range'] { accent-color:
   }
 
   .wordmark {
-    @apply text-lg font-semibold tracking-[-0.03em];
+    @apply inline-flex items-center gap-2 text-lg font-semibold tracking-[-0.03em];
+  }
+
+  /* The arch crossed by the accent rule: an A. Source of truth is brand/mark.svg. */
+  .wordmark-mark {
+    @apply size-6 flex-none;
   }
 
   .testnet-chip {
@@ -291,6 +296,10 @@ input[type='checkbox'], input[type='radio'], input[type='range'] { accent-color:
   .testnet-chip { display: none; }
   .masthead { padding-inline: 12px; }
   .wordmark { font-size: 1rem; }
+  /* On a phone the mark stands alone; the name stays for screen readers. */
+  .wordmark-text { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .wordmark { position: relative; min-width: 44px; min-height: 44px; justify-content: center; }
+  .wordmark-mark { width: 1.625rem; height: 1.625rem; }
   .masthead { gap: 8px; }
   .masthead > div:first-child { gap: 8px; }
   .nav-tab { min-width: 44px; padding-inline: 6px; }

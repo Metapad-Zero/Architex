@@ -31,7 +31,7 @@ export function walletConnectConnector(): CreateConnectorFn {
       name: 'Architex',
       description: 'Swap and provide liquidity on Arc.',
       url: origin,
-      icons: [`${origin}/icon.svg`],
+      icons: [`${origin}/icon-512.png`, `${origin}/icon.svg`],
     },
     qrModalOptions: {
       themeMode: dark ? 'dark' : 'light',

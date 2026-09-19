@@ -4,7 +4,7 @@
   "title": "Design System: Architex",
   "source": {
     "tokens": "src/index.css (:root custom properties; dark print = light-dark() overrides under @supports) + tailwind.config.js + index.html <meta name=\"color-scheme\">",
-    "components": "src/index.css @layer components; src/components/*.tsx; src/hooks/useConnectSheet.tsx; src/hooks/useSwap.ts (hint); src/lib/localWallet.ts + src/lib/keystore.ts + src/lib/localWalletConnector.ts + src/config.ts (browser wallet); src/lib/walletConnect.ts + src/config.ts + public/icon.svg (WalletConnect row); src/components/UnlockSheet.tsx + src/lib/unlock.ts + src/lib/signingIntent.ts (confirm sheet)",
+    "components": "src/index.css @layer components; src/components/*.tsx; src/hooks/useConnectSheet.tsx; src/hooks/useSwap.ts (hint); src/lib/localWallet.ts + src/lib/keystore.ts + src/lib/localWalletConnector.ts + src/config.ts (browser wallet); src/lib/walletConnect.ts + src/config.ts + public/icon-512.png (WalletConnect row); brand/*.svg + brand/og.html + scripts/brand-assets.sh (logo, app icons, link-preview card); src/components/UnlockSheet.tsx + src/lib/unlock.ts + src/lib/signingIntent.ts (confirm sheet)",
     "directionContract": ".impeccable/surfaces/src-app-tsx.md",
     "reviewEvidence": [
       ".impeccable/review/desktop.png",
@@ -152,7 +152,7 @@
       "noExtensionCopy": ["No wallet extension found. Use a phone wallet above or a browser wallet below, or install MetaMask or Rabby and reload.", "No wallet extension found. Your browser wallet is above."],
       "modalTheme": { "--wcm-font-family": "\"Public Sans Variable\", \"Public Sans\", system-ui, sans-serif", "--wcm-container-border-radius": "1px", "--wcm-z-index": "2147483000", "--wcm-accent-color": "#000000 (light print only; the dark print keeps Reown's default so the QR stays scannable on its white card)", "themeMode": "prefers-color-scheme, read when the connector is made" },
       "projectId": "public Reown identifier with a default in source, overridable by VITE_REOWN_PROJECT_ID",
-      "metadata": "name Architex; description \"Swap and provide liquidity on Arc.\"; icon public/icon.svg, the app icon wallets show in their connection prompt",
+      "metadata": "name Architex; description \"Swap and provide liquidity on Arc.\"; icons public/icon-512.png then public/icon.svg, the app icon (white arch, yellow rule, black tile) wallets show in their connection prompt",
       "confirmation": "external wallets (injected or WalletConnect) never see the confirm sheet: the wallet itself confirms",
       "reconnect": "Disconnect on the connected face is disabled while wagmi is restoring a session after reload (isReconnecting)"
     },
