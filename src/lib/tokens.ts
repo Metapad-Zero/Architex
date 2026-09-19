@@ -8,6 +8,22 @@ export interface Token {
   name: string
   decimals: number
   faucet: boolean
+  /** Launchpad tokens are not unique by symbol; always show the address next to them. */
+  isLaunch?: boolean
+}
+
+const remembered = new Map<string, Token>()
+
+export function rememberToken(token: Token): void {
+  remembered.set(token.address.toLowerCase(), token)
+}
+
+export function rememberedToken(address: string): Token | undefined {
+  return remembered.get(address.toLowerCase())
+}
+
+export function isCanonicalToken(address: string): boolean {
+  return deployment.tokens.some((token) => token.address.toLowerCase() === address.toLowerCase())
 }
 
 export interface TokenMetaResult {

@@ -7,7 +7,7 @@ import type { Hash } from 'viem'
  */
 export interface RecentEntry {
   hash: Hash
-  kind: 'swap' | 'add' | 'remove' | 'faucet'
+  kind: 'swap' | 'add' | 'remove' | 'faucet' | 'launch'
   summary: string
   time: number
 }

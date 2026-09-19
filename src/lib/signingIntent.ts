@@ -1,8 +1,8 @@
-import { decodeFunctionData, hexToString, isHex, maxUint256, type Address, type Hex, type TypedDataDefinition } from 'viem'
-import { factoryAbi, routerAbi, testTokenAbi } from './abi'
+import { decodeFunctionData, hexToString, isHex, maxUint256, zeroAddress, type Address, type Hex, type TypedDataDefinition } from 'viem'
+import { factoryAbi, launchpadAbi, routerAbi, testTokenAbi } from './abi'
 import { deployment } from './deployment'
 import { formatAmount, shortAddress } from './format'
-import type { Token } from './tokens'
+import { rememberedToken, type Token } from './tokens'
 import type { SigningRequest } from './unlock'
 
 export interface TxRequest {
@@ -32,7 +32,9 @@ function same(a: string | undefined, b: string | undefined): boolean {
 }
 
 function tokenFor(address: string, tokens: readonly Token[]): Token | undefined {
-  return tokens.find((token) => same(token.address, address)) ?? deployment.tokens.find((token) => same(token.address, address))
+  return tokens.find((token) => same(token.address, address))
+    ?? deployment.tokens.find((token) => same(token.address, address))
+    ?? rememberedToken(address)
 }
 
 function amount(value: bigint, address: string, tokens: readonly Token[]): string {
@@ -49,6 +51,7 @@ function contractName(address: string | undefined, tokens: readonly Token[]): st
   if (!address) return 'Contract creation'
   if (same(address, deployment.router)) return 'Architex router'
   if (same(address, deployment.factory)) return 'Architex factory'
+  if (deployment.launchpad !== zeroAddress && same(address, deployment.launchpad)) return 'Architex launchpad'
   if (deployment.pairs.some((pair) => same(pair.pair, address))) return 'Architex pool'
   const token = tokenFor(address, tokens)
   return token ? `${token.symbol} token` : shortAddress(address)
@@ -81,6 +84,49 @@ function decode<const abi extends readonly unknown[]>(abi: abi, data: Hex) {
     return decodeFunctionData({ abi, data })
   } catch {
     return undefined
+  }
+}
+
+export function describeLaunchpadCall(data: Hex, from: string | undefined, tokens: readonly Token[]): SigningIntent | undefined {
+  const call = decode(launchpadAbi, data)
+  if (!call) return undefined
+  const args = call.args as readonly unknown[]
+  switch (call.functionName) {
+    case 'createToken': {
+      const [name, symbol, , initialBuyUsdc] = args as [string, string, string, bigint, bigint]
+      const usdc = deployment.tokens[0]?.address ?? ''
+      return {
+        title: 'Create token',
+        lines: [
+          { label: 'Name', value: name || '—' },
+          { label: 'Symbol', value: symbol || '—' },
+          { label: 'First buy', value: initialBuyUsdc > 0n ? amount(initialBuyUsdc, usdc, tokens) : 'None' },
+          { label: 'Launch fee', value: 'Charged in USDC' },
+        ],
+      }
+    }
+    case 'buy': {
+      const [token, usdcIn, minTokensOut, to] = args as [Address, bigint, bigint, Address]
+      const usdc = deployment.tokens[0]?.address ?? ''
+      const lines = [
+        { label: 'You pay', value: amount(usdcIn, usdc, tokens) },
+        { label: 'You receive at least', value: amount(minTokensOut, token, tokens) },
+      ]
+      if (!same(to, from)) lines.push({ label: 'Sent to', value: shortAddress(to) })
+      return { title: `Buy ${symbol(token, tokens)}`, lines }
+    }
+    case 'sell': {
+      const [token, tokensIn, minUsdcOut, to] = args as [Address, bigint, bigint, Address]
+      const usdc = deployment.tokens[0]?.address ?? ''
+      const lines = [
+        { label: 'You sell', value: amount(tokensIn, token, tokens) },
+        { label: 'You receive at least', value: amount(minUsdcOut, usdc, tokens) },
+      ]
+      if (!same(to, from)) lines.push({ label: 'Sent to', value: shortAddress(to) })
+      return { title: `Sell ${symbol(token, tokens)}`, lines }
+    }
+    default:
+      return undefined
   }
 }
 
@@ -141,6 +187,11 @@ function describeTransaction(tx: TxRequest, tokens: readonly Token[]): SigningIn
         }
       }
     }
+  }
+
+  if (data && deployment.launchpad !== zeroAddress && same(tx.to, deployment.launchpad)) {
+    const intent = describeLaunchpadCall(data, tx.from, tokens)
+    if (intent) return intent
   }
 
   if (data && same(tx.to, deployment.factory)) {

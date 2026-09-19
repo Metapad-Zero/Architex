@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react'
 import { activeChain } from '../chain'
 import type { AppRoute } from '../hooks/useHashRoute'
+import { isLaunchViewAvailable } from '../lib/deployment'
 import { ConnectSheet } from './ConnectSheet'
 import { WalletButton } from './WalletButton'
 
@@ -18,16 +19,16 @@ export function AppShell({ route, onRoute, children }: AppShellProps) {
           <button type="button" className="wordmark" onClick={() => onRoute({ view: 'swap' })}>Architex</button>
           <span className="testnet-chip">{activeChain.isTestnet ? 'Testnet' : 'Beta'}</span>
           <nav className="ml-1 flex h-14 items-stretch sm:ml-4" aria-label="Primary">
-            {(['swap', 'pools'] as const).map((view) => (
+            {(['swap', 'pools', ...(isLaunchViewAvailable ? (['launch'] as const) : [])] as const).map((view) => (
               <button
                 key={view}
                 type="button"
                 className="nav-tab"
-                data-active={route.view === view}
-                aria-current={route.view === view ? 'page' : undefined}
-                onClick={() => onRoute({ view })}
+                data-active={view === 'launch' ? route.view === 'launch' || route.view === 'launch-new' : route.view === view}
+                aria-current={(view === 'launch' ? route.view === 'launch' || route.view === 'launch-new' : route.view === view) ? 'page' : undefined}
+                onClick={() => onRoute(view === 'launch' ? { view: 'launch' } : { view })}
               >
-                {view === 'swap' ? 'Swap' : 'Pools'}
+                {view === 'swap' ? 'Swap' : view === 'pools' ? 'Pools' : 'Launch'}
               </button>
             ))}
           </nav>

@@ -20,6 +20,20 @@ const REVERTS: Record<string, string> = {
   ERC20InsufficientBalance: 'Not enough balance for that amount.',
   ERC20InsufficientAllowance: 'Approval is too small for that amount. Approve again.',
   OwnableUnauthorizedAccount: 'Only the owner can do that.',
+  ZeroAddress: 'That address is missing. Try again.',
+  ZeroAmount: 'Amount is too small to trade.',
+  Forbidden: 'You are not allowed to do that.',
+  UnknownToken: 'That token is not on the launchpad.',
+  CurveGraduated: 'This curve has graduated. Trade it on Swap.',
+  SlippageExceeded: 'The price moved past your slippage limit. Try again or raise slippage in settings.',
+  InvalidName: 'Name must be 1 to 32 bytes.',
+  InvalidSymbol: 'Symbol must be 1 to 10 bytes.',
+  InvalidMetadata: 'Image URL must be 256 bytes or fewer.',
+  LaunchFeeTooHigh: 'That launch fee is above the maximum.',
+  OnlyLaunchpad: 'Only the launchpad can do that.',
+  PairAlreadySet: 'The pool for this token is already set.',
+  AlreadyGraduated: 'This token has already graduated.',
+  PairLockedUntilGraduation: 'Transfers to the pool are locked until the curve graduates.',
 }
 
 export function explainRevert(errorName: string | undefined): string {

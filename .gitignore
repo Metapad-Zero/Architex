@@ -15,3 +15,6 @@ contracts/cache
 # forge script simulations; real broadcasts under broadcast/ are deployment records and stay tracked
 broadcast/*/*/dry-run/
 .env*
+
+# forge fuzz/invariant failure cache
+/cache/

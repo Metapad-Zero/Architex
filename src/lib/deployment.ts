@@ -36,3 +36,7 @@ export interface ArchitexDeployment {
 export const deployment = (arcNetwork === 'mainnet' ? mainnetDeployment : testnetDeployment) as ArchitexDeployment
 export const isDeployed = deployment.factory !== zeroAddress
 export const isLaunchpadDeployed = isDeployed && deployment.launchpad !== zeroAddress
+
+// `import.meta.env.DEV` is a compile-time constant, so the fixture branch is dead in production.
+export const isLaunchViewAvailable =
+  isLaunchpadDeployed || (import.meta.env.DEV && import.meta.env.VITE_LAUNCHPAD_FIXTURE === '1')

@@ -2,6 +2,7 @@ import { formatUnits } from 'viem'
 import { formatAmount } from '../lib/format'
 import type { Token } from '../lib/tokens'
 import { TokenSelect } from './TokenSelect'
+import { tokenMonogram } from '../lib/tokens'
 
 interface AmountFieldProps {
   id: string
@@ -98,7 +99,14 @@ export function AmountField({
             }
           }}
         />
-        <TokenSelect token={token} tokens={tokens} balances={balances} onSelect={onToken} disabled={disabled || disableTokenSelect} label={`${label} token`} hotkey={hotkey} />
+        {disableTokenSelect && token ? (
+          <span className="token-static">
+            <span className="token-mark" aria-hidden="true">{tokenMonogram(token)}</span>
+            <span>{token.symbol}</span>
+          </span>
+        ) : (
+          <TokenSelect token={token} tokens={tokens} balances={balances} onSelect={onToken} disabled={disabled} label={`${label} token`} hotkey={hotkey} />
+        )}
       </div>
       <div className="mt-2 flex min-h-6 items-center justify-between gap-3 text-sm">
         <span className="text-g500">{usdValue ?? ''}</span>

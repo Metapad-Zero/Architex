@@ -5,6 +5,7 @@ import { useConnectSheet } from '../hooks/useConnectSheet'
 import { activeChain } from '../chain'
 import { quote as ratioQuote, reservesFor, type QuoteMode } from '../lib/amm'
 import { isDeployed } from '../lib/deployment'
+import { isCanonicalToken } from '../lib/tokens'
 import { formatAmount, formatUsd, parseAmount } from '../lib/format'
 import { useRecent } from '../lib/recent'
 import { formatSwapUrl, parseSwapUrl, readLastPair, writeLastPair } from '../lib/swapUrl'
@@ -31,7 +32,9 @@ function findToken(tokens: readonly Token[], address: Address | undefined): Toke
 function findTokenByRef(tokens: readonly Token[], ref: string | undefined): Token | undefined {
   if (!ref) return undefined
   const needle = ref.toLowerCase()
-  return tokens.find((token) => token.symbol.toLowerCase() === needle || token.address.toLowerCase() === needle)
+  const byAddress = tokens.find((token) => token.address.toLowerCase() === needle)
+  if (byAddress) return byAddress
+  return tokens.find((token) => token.symbol.toLowerCase() === needle && isCanonicalToken(token.address))
 }
 
 export function SwapSheet() {

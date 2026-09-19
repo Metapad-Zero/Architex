@@ -225,6 +225,26 @@ input[type='checkbox'], input[type='radio'], input[type='range'] { accent-color:
   .position-summary > span:nth-child(2), .position-summary > span:nth-child(3) { @apply hidden sm:block; }
 
   .skeleton { @apply rounded bg-g100; animation: skeleton-pulse 1.4s ease-in-out infinite; }
+
+  .launches-table { @apply w-full border-collapse text-left text-sm; }
+  .launches-table thead { @apply border-y border-ink text-g500; }
+  .launches-table th, .launches-table td { @apply px-3 py-4 align-middle first:pl-0 last:pr-0; }
+  .launches-table thead th { @apply font-normal; }
+  .launches-table th:nth-child(n + 2), .launches-table td:nth-child(n + 2) { @apply text-right; }
+  .launches-table th:nth-child(2) { @apply w-40; }
+  .launches-table th:nth-child(3) { @apply w-64; }
+  .launches-table th:nth-child(4) { @apply w-32; }
+  .launches-table td:nth-child(4) { @apply whitespace-nowrap text-g500; }
+  .launch-row { @apply border-b border-g300; }
+  .launch-sold { @apply flex items-center justify-end gap-3 whitespace-nowrap; }
+  .launch-sold > span { @apply min-w-[7.5rem] text-right; }
+  .launch-meter { @apply h-2 w-24 shrink-0 overflow-hidden border border-ink bg-paper; }
+  .launch-meter > span { @apply block h-full bg-ink; }
+  .launch-detail { @apply grid gap-6 sm:grid-cols-2 sm:items-start sm:gap-10; }
+  /* Grid and flex children refuse to shrink below their content unless told to: the amount row is wide. */
+  .launch-detail > * { @apply min-w-0; }
+  .token-static { @apply inline-flex min-h-11 shrink-0 items-center gap-2 text-base font-semibold; }
+  .launch-create { @apply relative max-w-xl border-t border-ink pt-8; }
 }
 
 @keyframes rule-sweep {
@@ -255,14 +275,27 @@ input[type='checkbox'], input[type='radio'], input[type='range'] { accent-color:
   .pool-row td:nth-child(3) span + span::before { content: ' · '; }
   .expanded-row { display: block; }
   .expanded-row > td { display: block; }
+  .launches-table thead { @apply sr-only; }
+  .launches-table, .launches-table tbody { display: block; }
+  .launch-row { display: grid; grid-template-columns: 1fr auto; align-items: center; padding: 8px 0; }
+  .launch-row th, .launch-row td { display: flex; align-items: center; min-width: 0; min-height: 44px; padding: 0; }
+  .launch-row .pool-toggle { min-width: 0; max-width: 100%; }
+  .launch-sold > span { min-width: 0; text-align: left; }
+  .launch-row td:nth-child(2) { justify-content: flex-end; text-align: right; }
+  .launch-row td:nth-child(3) { grid-column: 1; min-height: 0; padding-bottom: 4px; }
+  .launch-row td:nth-child(4) { grid-column: 2; min-height: 0; justify-content: flex-end; padding-bottom: 8px; color: var(--g500); }
+  .launch-sold { justify-content: flex-start; }
 }
 
 @media (max-width: 479px) {
   .testnet-chip { display: none; }
   .masthead { padding-inline: 12px; }
   .wordmark { font-size: 1rem; }
-  .nav-tab { min-width: 44px; padding-inline: 8px; }
-  .masthead .ghost-button { padding-inline: 10px; }
+  .masthead { gap: 8px; }
+  .masthead > div:first-child { gap: 8px; }
+  .nav-tab { min-width: 44px; padding-inline: 6px; }
+  .masthead nav { margin-left: 0; }
+  .masthead .ghost-button { padding-inline: 8px; white-space: nowrap; font-size: 0.8125rem; }
   .masthead .ghost-button svg { display: none; }
 }
 
