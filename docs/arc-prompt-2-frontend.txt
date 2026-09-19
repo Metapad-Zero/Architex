@@ -1,0 +1,11 @@
+Second turn on this app. The contracts are deployed (see deployments/arc-testnet.json in the workspace). The frontend has now been built OUTSIDE this sandbox against contracts/interfaces/*.sol and is being delivered into the workspace with this turn as round-trip files under src/, plus package.json and index.html.
+
+Do these, in order:
+1. `bun install` (package.json gained @fontsource-variable/public-sans). Then `bun run typecheck && bun run lint && bun run build`. Fix any sandbox-specific breakage minimally — do NOT redesign, restyle, rename, or "improve" the UI; it is a finished, reviewed design. If something must change to build here, keep the change to the smallest diff and list it.
+2. Make sure src/deployments/arc-testnet.json matches deployments/arc-testnet.json exactly (addresses, tokens, pairs). If they differ, copy deployments/arc-testnet.json over src/deployments/arc-testnet.json.
+3. Start the dev preview and confirm the app renders: masthead "ArcSwap", Swap and Pools views, pools table showing the seeded pools with non-zero reserves read through ArcSwapLens. Report what the Pools table shows (pool names + TVL numbers).
+4. Send 5 USDC (testnet) from the deployer wallet to __BURNER__ so the external verifier can run real swaps, and report the tx hash.
+5. Write contracts/script/DeployArcSwap.s.sol: a Foundry script that deploys ArcSwapFactory(feeToSetter = vm.envAddress("FEE_TO_SETTER")), ArcSwapRouter(factory), ArcSwapLens(factory, router) in order, and logs the three addresses as one JSON line. Must compile (`forge build`). Do not run it.
+6. Update AGENTS.md: What This App Does (ArcSwap DEX: swap + pools + positions, local quoting via ArcSwapLens), Key Files (src/lib/amm.ts, src/hooks/useSwap.ts, src/components/SwapSheet.tsx, src/components/PoolsView.tsx, src/deployments/*.json), and the deployed addresses.
+
+Do not touch contracts/*.sol implementations or redeploy anything. Report: check results, any diffs you had to make, what the preview shows, the USDC transfer tx hash.

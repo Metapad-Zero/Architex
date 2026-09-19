@@ -1,0 +1,13 @@
+node_modules
+dist
+.arc-studio
+.env
+.env.*
+contracts/out
+contracts/cache
+.impeccable/review
+.agents/skills/impeccable
+
+.vercel
+.DS_Store
+.playwright-mcp

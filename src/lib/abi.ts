@@ -1,0 +1,113 @@
+import { parseAbi } from 'viem'
+
+export const factoryAbi = parseAbi([
+  'event PairCreated(address indexed token0, address indexed token1, address pair, uint256 allPairsLength)',
+  'event FeeToUpdated(address indexed feeTo)',
+  'event FeeToSetterUpdated(address indexed feeToSetter)',
+  'error IdenticalAddresses()',
+  'error ZeroAddress()',
+  'error PairExists()',
+  'error Forbidden()',
+  'function feeTo() view returns (address)',
+  'function feeToSetter() view returns (address)',
+  'function getPair(address tokenA, address tokenB) view returns (address pair)',
+  'function allPairs(uint256 index) view returns (address pair)',
+  'function allPairsLength() view returns (uint256)',
+  'function createPair(address tokenA, address tokenB) returns (address pair)',
+  'function setFeeTo(address feeTo)',
+  'function setFeeToSetter(address feeToSetter)',
+])
+
+export const pairAbi = parseAbi([
+  'event Approval(address indexed owner, address indexed spender, uint256 value)',
+  'event Transfer(address indexed from, address indexed to, uint256 value)',
+  'event Mint(address indexed sender, uint256 amount0, uint256 amount1)',
+  'event Burn(address indexed sender, uint256 amount0, uint256 amount1, address indexed to)',
+  'event Swap(address indexed sender, uint256 amount0In, uint256 amount1In, uint256 amount0Out, uint256 amount1Out, address indexed to)',
+  'event Sync(uint112 reserve0, uint112 reserve1)',
+  'function name() view returns (string)',
+  'function symbol() view returns (string)',
+  'function decimals() view returns (uint8)',
+  'function totalSupply() view returns (uint256)',
+  'function balanceOf(address owner) view returns (uint256)',
+  'function allowance(address owner, address spender) view returns (uint256)',
+  'function approve(address spender, uint256 value) returns (bool)',
+  'function transfer(address to, uint256 value) returns (bool)',
+  'function transferFrom(address from, address to, uint256 value) returns (bool)',
+  'function DOMAIN_SEPARATOR() view returns (bytes32)',
+  'function nonces(address owner) view returns (uint256)',
+  'function permit(address owner, address spender, uint256 value, uint256 deadline, uint8 v, bytes32 r, bytes32 s)',
+  'function MINIMUM_LIQUIDITY() pure returns (uint256)',
+  'function factory() view returns (address)',
+  'function token0() view returns (address)',
+  'function token1() view returns (address)',
+  'function getReserves() view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast)',
+  'function price0CumulativeLast() view returns (uint256)',
+  'function price1CumulativeLast() view returns (uint256)',
+  'function kLast() view returns (uint256)',
+  'function mint(address to) returns (uint256 liquidity)',
+  'function burn(address to) returns (uint256 amount0, uint256 amount1)',
+  'function swap(uint256 amount0Out, uint256 amount1Out, address to, bytes data)',
+  'function skim(address to)',
+  'function sync()',
+  'function initialize(address token0, address token1)',
+])
+
+export const routerAbi = parseAbi([
+  'error Expired()',
+  'error InsufficientAAmount()',
+  'error InsufficientBAmount()',
+  'error InsufficientOutputAmount()',
+  'error ExcessiveInputAmount()',
+  'error InvalidPath()',
+  'error PairDoesNotExist()',
+  'function factory() view returns (address)',
+  'function addLiquidity(address tokenA, address tokenB, uint256 amountADesired, uint256 amountBDesired, uint256 amountAMin, uint256 amountBMin, address to, uint256 deadline) returns (uint256 amountA, uint256 amountB, uint256 liquidity)',
+  'function removeLiquidity(address tokenA, address tokenB, uint256 liquidity, uint256 amountAMin, uint256 amountBMin, address to, uint256 deadline) returns (uint256 amountA, uint256 amountB)',
+  'function removeLiquidityWithPermit(address tokenA, address tokenB, uint256 liquidity, uint256 amountAMin, uint256 amountBMin, address to, uint256 deadline, bool approveMax, uint8 v, bytes32 r, bytes32 s) returns (uint256 amountA, uint256 amountB)',
+  'function swapExactTokensForTokens(uint256 amountIn, uint256 amountOutMin, address[] path, address to, uint256 deadline) returns (uint256[] amounts)',
+  'function swapTokensForExactTokens(uint256 amountOut, uint256 amountInMax, address[] path, address to, uint256 deadline) returns (uint256[] amounts)',
+  'function quote(uint256 amountA, uint256 reserveA, uint256 reserveB) pure returns (uint256 amountB)',
+  'function getAmountOut(uint256 amountIn, uint256 reserveIn, uint256 reserveOut) pure returns (uint256 amountOut)',
+  'function getAmountIn(uint256 amountOut, uint256 reserveIn, uint256 reserveOut) pure returns (uint256 amountIn)',
+  'function getAmountsOut(uint256 amountIn, address[] path) view returns (uint256[] amounts)',
+  'function getAmountsIn(uint256 amountOut, address[] path) view returns (uint256[] amounts)',
+])
+
+export const lensAbi = parseAbi([
+  'struct TokenMeta { address token; string symbol; string name; uint8 decimals; }',
+  'struct PairInfo { address pair; address token0; address token1; uint112 reserve0; uint112 reserve1; uint32 blockTimestampLast; uint256 totalSupply; }',
+  'struct Position { address pair; address token0; address token1; uint256 lpBalance; uint256 lpTotalSupply; uint112 reserve0; uint112 reserve1; uint256 routerAllowance; }',
+  'function factory() view returns (address)',
+  'function router() view returns (address)',
+  'function pairsLength() view returns (uint256)',
+  'function pairs(uint256 start, uint256 count) view returns (PairInfo[])',
+  'function pairsByAddress(address[] pairAddrs) view returns (PairInfo[])',
+  'function tokenMeta(address[] tokens) view returns (TokenMeta[])',
+  'function balances(address owner, address[] tokens) view returns (uint256[])',
+  'function allowances(address owner, address spender, address[] tokens) view returns (uint256[])',
+  'function positions(address owner, uint256 start, uint256 count) view returns (Position[])',
+])
+
+const erc20AbiEntries = [
+  'function name() view returns (string)',
+  'function symbol() view returns (string)',
+  'function decimals() view returns (uint8)',
+  'function totalSupply() view returns (uint256)',
+  'function balanceOf(address owner) view returns (uint256)',
+  'function allowance(address owner, address spender) view returns (uint256)',
+  'function approve(address spender, uint256 value) returns (bool)',
+  'function transfer(address to, uint256 value) returns (bool)',
+  'function transferFrom(address from, address to, uint256 value) returns (bool)',
+] as const
+
+export const erc20Abi = parseAbi(erc20AbiEntries)
+
+export const testTokenAbi = parseAbi([
+  ...erc20AbiEntries,
+  'event Faucet(address indexed to, uint256 amount)',
+  'function FAUCET_UNITS() view returns (uint256)',
+  'function faucet()',
+  'function mint(address to, uint256 amount)',
+  'function owner() view returns (address)',
+])

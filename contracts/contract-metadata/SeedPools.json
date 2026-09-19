@@ -1,0 +1,62 @@
+{
+  "contractAddress": "0x207d7525edeeb63572b44f0414fe3b0730370be0",
+  "network": "ARC-TESTNET",
+  "deployerWalletId": "3c2464b2-8369-52e2-a782-800bbeca5396",
+  "contract_code_path": "/home/user/app/contracts/SeedPools.sol",
+  "contract_compiled_code_path": "/home/user/app/contracts/out/SeedPools.sol/SeedPools.json",
+  "contract_network_and_links": {
+    "Arc Testnet": "https://explorer.testnet.arc.io/address/0x207d7525edeeb63572b44f0414fe3b0730370be0"
+  },
+  "contract_deployments": [
+    {
+      "chain": "Arc Testnet",
+      "address": "0x207d7525edeeb63572b44f0414fe3b0730370be0",
+      "explorerUrl": "https://explorer.testnet.arc.io/address/0x207d7525edeeb63572b44f0414fe3b0730370be0",
+      "txHash": "0x622f0d4a1479b07c4777efde76ea9e3b17f07dd6439daa18b5eff8d403182464",
+      "deployedAt": "2026-09-19T01:16:20.719Z"
+    }
+  ],
+  "abi": [
+    {
+      "type": "constructor",
+      "inputs": [
+        {
+          "name": "factory",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "router",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "usdc",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "weth",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "wbtc",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "arc",
+          "type": "address",
+          "internalType": "address"
+        },
+        {
+          "name": "eurc",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "stateMutability": "nonpayable"
+    }
+  ]
+}

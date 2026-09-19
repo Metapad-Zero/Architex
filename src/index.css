@@ -1,0 +1,274 @@
+@import '@fontsource-variable/public-sans';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --paper: #ffffff;
+  --ink: #000000;
+  --g100: #f1f1ef;
+  --g300: #d9d9d6;
+  --g500: #6b6b67;
+  --g700: #3d3d3a;
+  --accent: #ffd400;
+  --on-accent: #000000;
+  --gain: #0b7a3b;
+  --loss: #c81e1e;
+  --radius: 4px;
+  --unit: 8px;
+  color-scheme: light dark;
+  font-synthesis: none;
+}
+
+/* Dark variant = the same sheet printed in negative: paper and ink swap, the grays invert,
+   signal yellow stays yellow and keeps black ink on it. Follows the system preference. */
+@supports (color: light-dark(#000, #fff)) {
+  :root {
+    --paper: light-dark(#ffffff, #000000);
+    --ink: light-dark(#000000, #ffffff);
+    --g100: light-dark(#f1f1ef, #161616);
+    --g300: light-dark(#d9d9d6, #2e2e2c);
+    --g500: light-dark(#6b6b67, #9c9c98);
+    --g700: light-dark(#3d3d3a, #c9c9c5);
+    --gain: light-dark(#0b7a3b, #4fcf7f);
+    --loss: light-dark(#c81e1e, #ff6b62);
+  }
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html { background: var(--paper); }
+
+body {
+  margin: 0;
+  min-height: 100dvh;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: 'Public Sans Variable', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  font-size: 1rem;
+  font-weight: 400;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+  caret-color: var(--ink);
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+button, input { font: inherit; font-variant-numeric: inherit; }
+button, a { -webkit-tap-highlight-color: transparent; }
+button { color: inherit; }
+a { color: inherit; text-underline-offset: 3px; }
+::selection { background: var(--accent); color: var(--on-accent); }
+.bg-accent { color: var(--on-accent); }
+:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+* { scrollbar-color: var(--g300) var(--paper); scrollbar-width: thin; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: var(--paper); }
+::-webkit-scrollbar-thumb { background: var(--g300); border: 2px solid var(--paper); }
+input[type='checkbox'], input[type='radio'], input[type='range'] { accent-color: var(--ink); }
+
+@layer components {
+  .masthead {
+    @apply flex h-14 items-center justify-between gap-3 border-b border-ink px-4 sm:px-6;
+  }
+
+  .wordmark {
+    @apply text-lg font-semibold tracking-[-0.03em];
+  }
+
+  .testnet-chip {
+    @apply rounded border border-ink bg-g100 px-2 py-0.5 text-2xs font-semibold;
+  }
+
+  .nav-tab {
+    @apply relative min-w-12 px-3 text-sm font-semibold sm:min-w-16;
+  }
+
+  .nav-tab::after {
+    content: '';
+    @apply absolute inset-x-2 bottom-0 h-[3px] bg-transparent;
+  }
+
+  .nav-tab[data-active='true']::after { @apply bg-ink; }
+  .nav-tab:hover { @apply bg-g100; }
+
+  .swap-column {
+    @apply mx-auto w-full max-w-[512px] px-4 pb-36 pt-12 sm:px-4 sm:pt-16;
+  }
+
+  .swap-sheet { @apply relative border-t border-ink; }
+  .sheet-tools { @apply absolute right-0 top-0 -translate-y-1/2; }
+  /* The one authored motion: a short ink bar running along a sheet's top rule while the chain confirms. */
+  .rule-sweep { @apply pointer-events-none absolute left-0 top-[-1px] h-0.5 w-1/4 bg-ink; animation: rule-sweep 1.4s cubic-bezier(0.2, 0, 0, 1) infinite; }
+  .amount-field { @apply min-w-0 py-7; }
+  .amount-label { @apply block text-sm text-g500; }
+  .amount-input {
+    @apply h-14 border-0 bg-transparent p-0 text-amount font-semibold text-ink outline-none placeholder:text-g500 focus:outline-none disabled:text-g500 sm:text-amount;
+  }
+  .amount-field[data-over-balance='true'] .amount-input { @apply text-loss; }
+
+  .flip-rule { @apply relative h-px bg-ink; }
+  .flip-button {
+    @apply absolute left-1/2 top-1/2 flex h-11 w-11 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded border border-ink bg-paper transition-colors duration-200 ease-out hover:bg-g100 active:bg-ink active:text-paper disabled:cursor-not-allowed disabled:border-g300 disabled:text-g300;
+  }
+  .flip-button svg { transition: transform 200ms cubic-bezier(0.2, 0, 0, 1); }
+
+  .ghost-button {
+    @apply inline-flex min-h-11 items-center justify-center gap-2 rounded border border-ink bg-paper px-3 text-sm font-semibold transition-colors duration-200 ease-out hover:bg-g100 active:bg-ink active:text-paper disabled:cursor-not-allowed disabled:border-g300 disabled:bg-g100 disabled:text-g500;
+  }
+
+  .primary-button {
+    @apply relative flex h-14 items-center justify-center overflow-hidden rounded border border-ink bg-accent px-5 text-base font-semibold transition-colors duration-200 ease-out active:bg-ink active:text-paper disabled:cursor-not-allowed disabled:border-g100 disabled:bg-g100 disabled:text-g500;
+    color: var(--on-accent);
+  }
+  .primary-button:active:not(:disabled) { color: var(--paper); }
+  .primary-button:hover:not(:disabled):not(.is-loading) { box-shadow: inset 0 0 0 2px var(--ink); }
+  .primary-button.is-loading { @apply border-ink bg-ink text-paper; }
+
+  .token-trigger { @apply min-w-[7rem] shrink-0 px-3 text-base; }
+  .token-mark { @apply inline-flex h-6 w-6 shrink-0 items-center justify-center rounded border border-current text-2xs font-semibold leading-none tracking-[-0.02em]; }
+  .token-popover, .settings-popover, .connect-sheet {
+    @apply fixed z-50 m-0 max-h-[min(520px,calc(100dvh-32px))] overflow-hidden rounded border border-ink bg-paper p-0 text-ink;
+  }
+  .token-popover:not(:popover-open), .settings-popover:not(:popover-open), .connect-sheet:not(:popover-open) { display: none; }
+  .token-popover[open], .settings-popover[open], .connect-sheet[open] { display: block; }
+  [popover]::backdrop { background: transparent; }
+  .token-search { @apply flex h-12 items-center gap-2 border-b border-ink px-3; }
+  .token-search input { @apply min-w-0 flex-1 border-0 bg-transparent text-sm outline-none placeholder:text-g500; }
+  .token-list { @apply max-h-[400px] overflow-y-auto p-1; }
+  .token-row { @apply flex min-h-14 w-full items-center gap-3 rounded px-3 py-2; }
+  .token-row:hover, .token-row[data-active='true'] { @apply bg-g100; }
+  .token-row[data-active='true'] { outline: 2px solid var(--ink); outline-offset: -2px; }
+  .token-row[data-selected='true'] { @apply bg-ink text-paper; outline-color: var(--ink); }
+  .token-row[data-selected='true'] .text-g500 { @apply text-paper; }
+
+  /* Fixed slots: every receipt row stays one line at every width; values shorten, rows never grow. */
+  .receipt-lines { @apply border-t border-ink text-sm; }
+  .receipt-lines > div { @apply flex min-h-10 items-center justify-between gap-4 border-b border-g300 py-2; }
+  .receipt-lines dt { @apply shrink-0 whitespace-nowrap text-g500; }
+  .receipt-lines dd { @apply m-0 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-right; }
+  .quote-message { @apply py-3 text-sm text-g700; }
+
+  .hint-line { @apply mt-3 text-sm leading-6 text-g500; }
+  .ledger { @apply mt-14 border-t border-ink; }
+  .ledger-list { @apply m-0 list-none p-0; }
+  .ledger-row { @apply flex min-h-12 items-center gap-4 border-b border-g300 py-2 text-sm; }
+
+  .tx-line { @apply mt-3 flex min-h-8 items-center gap-2 text-sm; }
+  .tx-line > svg { @apply h-4 w-4 shrink-0; }
+
+  .settings-popover { @apply max-w-[calc(100vw-32px)]; }
+  .connect-sheet { @apply overflow-y-auto; }
+  /* The confirm sheet: the one true modal, because a signature needs protected focus and a scrim. */
+  .unlock-sheet {
+    @apply fixed inset-0 z-[60] m-auto h-fit max-h-[calc(100dvh-32px)] w-[min(400px,calc(100vw-32px))] overflow-y-auto rounded border border-ink bg-paper p-0 text-ink;
+  }
+  .unlock-sheet:not(:popover-open) { display: none; }
+  .unlock-sheet::backdrop { background: rgb(0 0 0 / 0.4); }
+  .icon-button { @apply flex h-11 w-11 items-center justify-center rounded hover:bg-g100 active:bg-ink active:text-paper; }
+  .choice-button { @apply min-h-11 rounded border border-ink px-2 text-sm font-semibold hover:bg-g100 active:bg-ink active:text-paper; }
+  .choice-button[data-active='true'] { @apply bg-ink text-paper; }
+  .field-with-suffix { @apply flex h-11 items-center rounded border border-ink bg-paper; }
+  .field-with-suffix input { @apply min-w-0 flex-1 border-0 bg-transparent px-3 outline-none; }
+  .field-with-suffix > span { @apply border-l border-g300 px-3 text-sm text-g500; }
+  .field-toggle { @apply h-full shrink-0 rounded-r border-l border-g300 px-3 text-sm font-semibold text-g700 hover:bg-g100 active:bg-ink active:text-paper disabled:text-g500; }
+
+  .pools-page { @apply mx-auto w-full max-w-[1008px] px-4 pb-36 pt-12 sm:px-6 sm:pt-16; }
+  .ruled-section { @apply border-t border-ink; }
+  .section-heading-row { @apply flex min-h-14 items-center justify-between gap-4; }
+  .section-heading-row h2 { @apply text-lg font-semibold; }
+  .section-heading-row > span { @apply text-sm text-g500; }
+  .empty-state { @apply flex min-h-32 flex-col items-start justify-center gap-4 border-y border-g300 py-7 text-sm text-g500 sm:flex-row sm:items-center sm:justify-between; }
+  .table-wrap { @apply overflow-visible; }
+  .pools-table { @apply w-full border-collapse text-left text-sm; }
+  .pools-table thead { @apply border-y border-ink text-g500; }
+  .pools-table th, .pools-table td { @apply px-3 py-4 align-top first:pl-0 last:pr-0; }
+  .pools-table thead th { @apply font-normal; }
+  .pools-table th:nth-child(n + 2), .pools-table td:nth-child(n + 2) { @apply text-right; }
+  .pools-table th:nth-child(2) { @apply w-40; }
+  .pools-table th:nth-child(3) { @apply w-56; }
+  .pool-row { @apply border-b border-g300; }
+  .pool-row[data-expanded='true'] { @apply border-b-0; }
+  .pool-toggle { @apply flex min-h-11 items-center gap-2 text-left; }
+  .pool-toggle svg { @apply h-4 w-4 transition-transform duration-200; }
+  .pool-row td:last-child span { @apply block; }
+  .expanded-row > td { @apply p-0; }
+  .inline-form { @apply relative bg-g100 p-4 sm:p-6; }
+  .inline-form .amount-field { @apply py-0; }
+  .inline-form .amount-input { @apply text-xl; }
+
+  .pool-detail { @apply grid gap-6 pb-8 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)] sm:gap-10; }
+  .price-history { @apply min-w-0; }
+  .price-history-head { @apply flex min-h-8 flex-wrap items-baseline justify-between gap-x-4 gap-y-1 border-t border-ink pt-2; }
+  .price-history-empty { @apply py-6 text-sm text-g500; }
+  .price-history-plot { @apply mt-2 block w-full touch-none select-none; }
+  .price-history-plot .grid { stroke: var(--g300); stroke-width: 1; }
+  .price-history-plot .axis { fill: var(--g500); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .price-history-plot .series { fill: none; stroke: var(--ink); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .price-history-plot .marker { fill: var(--ink); stroke: var(--paper); stroke-width: 2; }
+  .price-history-plot .crosshair { stroke: var(--ink); stroke-width: 1; }
+  .price-history[data-loading='true'] .price-history-plot .series { stroke: var(--g500); }
+  .price-history[data-loading='true'] .price-history-plot .marker { fill: var(--g500); }
+  .price-history-foot { @apply flex justify-end pt-2; }
+  .price-table { @apply mt-3 w-full border-collapse text-sm; }
+  .price-table th { @apply border-b border-ink py-2 text-left font-normal text-g500; }
+  .price-table td { @apply border-b border-g300 py-2; }
+  .price-table th:nth-child(n + 2), .price-table td:nth-child(n + 2) { @apply text-right; }
+
+  .position-row { @apply border-b border-g300; }
+  .position-summary { @apply grid min-h-20 w-full grid-cols-[1fr_auto] items-center gap-4 py-4 text-left sm:grid-cols-[1fr_2fr_1fr_auto]; }
+  .position-summary > span { @apply min-w-0; }
+  .position-summary strong { @apply block; }
+  .position-summary small { @apply block text-xs font-normal text-g500; }
+  .position-summary svg { @apply h-4 w-4 transition-transform duration-200; }
+  .position-summary > span:nth-child(2), .position-summary > span:nth-child(3) { @apply hidden sm:block; }
+
+  .skeleton { @apply rounded bg-g100; animation: skeleton-pulse 1.4s ease-in-out infinite; }
+}
+
+@keyframes rule-sweep {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(400%); }
+}
+
+@keyframes skeleton-pulse {
+  0%, 100% { background-color: var(--g100); }
+  50% { background-color: var(--g300); }
+}
+
+@media (max-width: 639px) {
+  .amount-input { font-size: 1.75rem; }
+  .token-popover, .settings-popover, .connect-sheet, .unlock-sheet {
+    inset: auto 16px 16px 16px !important;
+    width: auto !important;
+    max-height: min(70dvh, 560px);
+  }
+  .token-popover, .connect-sheet, .unlock-sheet { border-bottom-left-radius: 4px; border-bottom-right-radius: 4px; }
+  .pools-table thead { @apply sr-only; }
+  .pools-table, .pools-table tbody { display: block; }
+  .pool-row { display: grid; grid-template-columns: 1fr auto; align-items: center; padding: 8px 0; }
+  .pool-row th, .pool-row td { display: flex; align-items: center; min-height: 44px; padding: 0; }
+  .pool-row td:nth-child(2) { justify-content: flex-end; text-align: right; }
+  .pool-row td:nth-child(3) { grid-column: 1 / -1; min-height: 0; display: block; padding-bottom: 8px; color: var(--g500); }
+  .pool-row td:nth-child(3) span { display: inline; }
+  .pool-row td:nth-child(3) span + span::before { content: ' · '; }
+  .expanded-row { display: block; }
+  .expanded-row > td { display: block; }
+}
+
+@media (max-width: 479px) {
+  .testnet-chip { display: none; }
+  .masthead { padding-inline: 12px; }
+  .wordmark { font-size: 1rem; }
+  .nav-tab { min-width: 44px; padding-inline: 8px; }
+  .masthead .ghost-button { padding-inline: 10px; }
+  .masthead .ghost-button svg { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; }
+  .flip-button svg { transform: none !important; }
+  .rule-sweep { display: none; }
+  ::view-transition-group(*), ::view-transition-old(*), ::view-transition-new(*) { animation: none !important; }
+}

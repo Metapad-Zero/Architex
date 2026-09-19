@@ -1,0 +1,16 @@
+Build the ArcSwap AMM contracts for this app ("Arc LP and DEX Platform") — max preset: full implementation, full Foundry test suite, security audit, and deploy to Arc Testnet in this turn.
+
+Binding inputs already in the workspace:
+- contracts/interfaces/IArcSwapFactory.sol, IArcSwapPair.sol, IArcSwapRouter.sol, IArcSwapLens.sol, ITestToken.sol — implement these EXACTLY (names, signatures, events, custom errors). The frontend ABIs are generated from them, so do not rename or add/remove external functions. You may add internal helpers and the IArcSwapCallee interface.
+- context/docs/CONTRACTS-SPEC.md — the full spec: contract list, constructor args, fee math (0.30%, 1/6 protocol share when feeTo is set), tests to write, and the exact deployment + seeding steps and the deployments/arc-testnet.json shape.
+
+Deliverables for this turn:
+1. contracts/ArcSwapFactory.sol, ArcSwapPair.sol, ArcSwapRouter.sol, ArcSwapLens.sol, TestToken.sol (Solidity ^0.8.28, OpenZeppelin 5.1 for ERC20/ERC20Permit/SafeERC20/Ownable, no Uniswap imports, custom errors, NatSpec).
+2. contracts/test/*.t.sol covering everything listed under "Tests" in the spec, including the K-invariant fuzz and an EIP-712 permit test. `forge test` must be green — paste the summary.
+3. Audit the pair/router for reentrancy, K-check correctness, rounding direction (pool must never lose), fee-on-transfer assumptions (document: not supported), permit front-running, and Lens gas bounds. Fix findings before deploying.
+4. Deploy to Arc Testnet (chain 5042002) per the spec: factory (feeToSetter = deployer), router, lens, the four test tokens, then create + seed the five pools with the deployer wallet. Write deployments/arc-testnet.json and deployments/abi/*.json exactly as specified.
+5. Update AGENTS.md "What This App Does" + Key Files with the contract set and addresses.
+
+Do NOT touch src/ (the frontend is being built separately against these interfaces). Do not deploy anything to Arc mainnet (5042).
+
+Report: forge test summary, audit findings + fixes, every deployed address with explorer link, pool seed tx hashes, and anything that could not be completed and why.

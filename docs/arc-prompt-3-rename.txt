@@ -1,0 +1,16 @@
+Fourth turn: the product is renamed from "ArcSwap" to "Architex". The round-trip files delivered with this turn are the RENAMED versions of contracts/, src/, index.html, AGENTS.md and deployments/abi/. No redeploy — the Arc Testnet contracts stay exactly as deployed (their on-chain LP token name remains "ArcSwap LP"; the frontend now reads the permit domain name from pair.name(), so that still works).
+
+Do, in order:
+1. Delete the OLD-named files that the rename supersedes (the new-named equivalents arrived with this turn):
+   contracts/ArcSwapFactory.sol, contracts/ArcSwapPair.sol, contracts/ArcSwapRouter.sol, contracts/ArcSwapLens.sol,
+   contracts/interfaces/IArcSwapFactory.sol, IArcSwapPair.sol, IArcSwapRouter.sol, IArcSwapLens.sol, IArcSwapCallee.sol,
+   contracts/test/ArcSwapFactory.t.sol, ArcSwapPair.t.sol, ArcSwapRouter.t.sol, ArcSwapLens.t.sol, ArcSwapInvariant.t.sol,
+   contracts/script/DeployArcSwap.s.sol,
+   deployments/abi/ArcSwapFactory.json, ArcSwapPair.json, ArcSwapRouter.json, ArcSwapLens.json.
+   Also `forge clean` so contracts/out has no stale ArcSwap artifacts.
+2. Confirm nothing still references the old names: `grep -rn "ArcSwap\|arcSwapCall" contracts src index.html AGENTS.md deployments` must return nothing (contract-metadata/*.json may keep historical paths — leave those).
+3. `forge build` (must succeed) and `forge test` (must stay 64/64: 62 unit + 2 invariant). Paste the summary. The renamed pair must compile with ERC20("Architex LP", "ATX-LP") ERC20Permit("Architex LP") and the flash-swap callback interface IArchitexCallee.architexCall.
+4. `bun run typecheck && bun run lint && bun test && bun run build` for the frontend; confirm the preview masthead now reads "Architex" and the tab title is "Architex".
+5. Update AGENTS.md's title/first line to Architex if the round-trip copy did not already.
+
+Do not change any logic, copy, or styling beyond the rename. Reply with: deleted files, grep result, forge build/test summary, frontend check results, what the preview masthead shows.

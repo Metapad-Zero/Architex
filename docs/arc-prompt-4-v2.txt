@@ -1,0 +1,16 @@
+Fifth turn: Architex v2 — the frontend gained a native wallet sheet (ConnectKit removed), dark variant, shareable swap URLs, a Recent ledger, pool detail with a real price-history chart read from the explorer logs API, keyboard shortcuts and human revert copy. The round-trip files delivered with this turn are the finished src/, index.html, vite.config.ts and AGENTS.md. Nothing changed in contracts/ or deployments/.
+
+Do, in order:
+1. `bun run typecheck && bun run lint && bun test && bun run build`. If anything fails ONLY because of this sandbox, make the smallest fix and list it. Do not restyle or rewrite anything — this is a reviewed, finished design.
+2. Report the production bundle sizes from `bun run build` (every chunk, raw and gzip).
+3. Start the preview and do a first-time-user walkthrough as a person who has never seen this app, in plain words:
+   a. Swap view: is it obvious what to do first? Type 0.01 with WBTC → WETH selected (use the token pickers). Read back the five receipt lines. Was anything confusing or unexplained?
+   b. Press ⌘K / Ctrl+K on the Swap view: does the "You pay" token picker open? Press Escape: does it close and return focus?
+   c. Click "Connect wallet": describe the connect sheet exactly as shown in the preview (it is expected to show "No wallet extension found…" inside the preview iframe — say whether that message and its "Get MetaMask" link appear, and whether Escape closes it).
+   d. Pools view: expand WBTC / WETH. Describe the detail block (Reserves / Price / LP supply / Your share) and the price-history chart (how many points, the readout at the top, "Show as table"). Hover the chart: does a crosshair and readout appear?
+   e. Load `#swap?in=WBTC&out=WETH&amount=0.01` directly: does the sheet come up pre-filled with a live quote?
+   f. If the preview lets you emulate dark mode (prefers-color-scheme: dark), describe the dark variant; otherwise say so.
+   Report every place you hesitated, every label you did not understand, and anything that looked broken — be blunt, this is the review we want.
+4. Update AGENTS.md Key Files: add src/components/ConnectSheet.tsx, src/hooks/useConnectSheet.tsx, src/components/PoolDetail.tsx, src/components/PriceHistory.tsx, src/hooks/usePriceHistory.ts (explorer logs API with a 2k-block RPC fallback), src/components/RecentLedger.tsx, src/lib/recent.ts, src/lib/swapUrl.ts, src/lib/errors.ts; remove any mention of ConnectKit.
+
+Reply with: check results and any sandbox-only diffs, the bundle table, the walkthrough findings (numbered, blunt), and the AGENTS.md change.

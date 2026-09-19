@@ -1,0 +1,9 @@
+Third turn on this app. The ArcSwap frontend was built and reviewed OUTSIDE this sandbox against contracts/interfaces/*.sol and is delivered with this turn as round-trip files: everything under src/ (components, hooks, lib, deployments, dev), plus index.html, package.json, tailwind.config.js and .oxlintrc.json. src/deployments/arc-testnet.json already contains the live addresses (same as deployments/arc-testnet.json).
+
+Do, in order:
+1. `bun install` (package.json gained @fontsource-variable/public-sans). Then `bun run typecheck && bun run lint && bun test && bun run build`. If anything fails ONLY because of this sandbox (paths, versions), make the smallest possible fix and list it. Do NOT redesign, restyle, rename, reorganize or "improve" the UI or copy — it is a finished, reviewed design. Do not touch contracts/ or deployments/.
+2. Start the dev preview and confirm in the preview: masthead "ArcSwap" with the Testnet chip, Swap view with the receipt rows (Rate / Price impact / Fee 0.30% / Minimum received / Route), Pools view listing the 5 pools with WBTC/WETH showing 0.1 WBTC / 2.4 WETH reserves. Report exactly what the Pools table shows.
+3. In the Swap view select WBTC as "You pay" and WETH as "You receive", type 0.01, and report the Rate, Price impact, Minimum received and Route lines the app computes (they must be non-empty since that pool has liquidity).
+4. Update AGENTS.md Key Files with: src/lib/amm.ts (local quoting), src/hooks/useSwap.ts (swap state machine), src/hooks/useLiquidity.ts (add/remove with EIP-2612 permit), src/components/SwapSheet.tsx, src/components/PoolsView.tsx, src/deployments/*.json, src/dev/burnerConnector.ts (dev-only), scripts/seed-usdc-pools.ts (seeds the USDC pools from a funded EOA), docs/MAINNET-DEPLOY.md.
+
+Reply with: check results, any sandbox-only diffs, what the preview shows for steps 2 and 3.

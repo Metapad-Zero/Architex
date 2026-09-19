@@ -1,0 +1,84 @@
+{
+  "chainId": 5042002,
+  "network": "Arc Testnet",
+  "explorerBase": "https://explorer.testnet.arc.io",
+  "factory": "0x6362f5a0fc007ab7d1e61f99d3f4eb04360d060a",
+  "router": "0xcb417bbb2c3ce02296229ca89b639bb3af2538e2",
+  "lens": "0x8ee79a8a702e7f8dd433b940d11b327e5153094b",
+  "seedPools": "0x207d7525edeeb63572b44f0414fe3b0730370be0",
+  "deployer": "0x5B12Ce46C7194aD57d143bC22847224047b1Ef42",
+  "tokens": [
+    {
+      "symbol": "USDC",
+      "name": "USD Coin",
+      "address": "0x3600000000000000000000000000000000000000",
+      "decimals": 6,
+      "faucet": false
+    },
+    {
+      "symbol": "WETH",
+      "name": "Wrapped Ether (test)",
+      "address": "0xf2bb050eb30a9cd4bd5df986c626765ae57d21e4",
+      "decimals": 18,
+      "faucet": true
+    },
+    {
+      "symbol": "WBTC",
+      "name": "Wrapped Bitcoin (test)",
+      "address": "0x34136a662681df7aacbf2aad5c35258db8f1a113",
+      "decimals": 8,
+      "faucet": true
+    },
+    {
+      "symbol": "ARC",
+      "name": "Arc Token (test)",
+      "address": "0x004925d26559de8823106e3cbf47ed870788d0d5",
+      "decimals": 18,
+      "faucet": true
+    },
+    {
+      "symbol": "EURC",
+      "name": "Euro Coin (test)",
+      "address": "0x07748023f41001efd73d7907d74f8222a76b2dc2",
+      "decimals": 6,
+      "faucet": true
+    }
+  ],
+  "pairs": [
+    {
+      "pair": "0xe269973e59cc31d899020527ee46dd96ea2d0d48",
+      "token0": "0x3600000000000000000000000000000000000000",
+      "token1": "0xf2bb050eb30a9cd4bd5df986c626765ae57d21e4"
+    },
+    {
+      "pair": "0x752f3018f709642cdb33102c2e1f199f251a5d7a",
+      "token0": "0x34136a662681df7aacbf2aad5c35258db8f1a113",
+      "token1": "0x3600000000000000000000000000000000000000"
+    },
+    {
+      "pair": "0x25bdec5b312aa3b4365dbc48eaea2081ffb8d420",
+      "token0": "0x004925d26559de8823106e3cbf47ed870788d0d5",
+      "token1": "0x3600000000000000000000000000000000000000"
+    },
+    {
+      "pair": "0x0ab4b2f723d8f64776f2cb9786c4b419be2cb370",
+      "token0": "0x07748023f41001efd73d7907d74f8222a76b2dc2",
+      "token1": "0x3600000000000000000000000000000000000000"
+    },
+    {
+      "pair": "0x02af642cd63f193aa75aee3de11999af01247093",
+      "token0": "0x34136a662681df7aacbf2aad5c35258db8f1a113",
+      "token1": "0xf2bb050eb30a9cd4bd5df986c626765ae57d21e4"
+    }
+  ],
+  "txs": {
+    "factory": "0x8a53b5793ea7113b250fd07b487c7d38a2a33132ea2f3634e4bc8cf5183f264e",
+    "router": "0xc07dd09841e2e3bb048eadb5f12ccc0c7c3f084e4df1001accbefc7e5b91eedc",
+    "lens": "0x7f629d86c0eefcdf4739e3e8f822b47b99997eb6141ecd10eea5cc6b66101f57",
+    "weth": "0xc8c7d2c73468628b09477a720755abe63c271ac996f6dffdda2f4cfaaebcf785",
+    "wbtc": "0xf515271e17ee6a109907a6708f5184121b50a230e22a11268b5affbfa2bf7865",
+    "arc": "0x42ea697e9b930e3f1b23b96a5b8115a468b4aebb39a13b769e620cf000d05c70",
+    "eurc": "0xb2b3bf489eed6463a1cb781d6e5548acffe7fabbedb3d067abcc7fa24cd7129d",
+    "seedPools": "0x622f0d4a1479b07c4777efde76ea9e3b17f07dd6439daa18b5eff8d403182464"
+  }
+}
