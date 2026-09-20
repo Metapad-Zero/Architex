@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react'
 import type { Address } from 'viem'
 import { useAccount, useSwitchChain } from 'wagmi'
 import { useConnectSheet } from '../hooks/useConnectSheet'
@@ -24,6 +24,9 @@ import { ReceiptLines } from './ReceiptLines'
 import { RecentLedger } from './RecentLedger'
 import { SettingsPopover } from './SettingsPopover'
 import { TxStatus } from './TxStatus'
+
+// Below the sheet and not needed to swap: kept out of the first chunk.
+const SwapPriceChart = lazy(() => import('./SwapPriceChart'))
 
 function findToken(tokens: readonly Token[], address: Address | undefined): Token | undefined {
   return tokens.find((token) => token.address.toLowerCase() === address?.toLowerCase())
@@ -253,6 +256,11 @@ export function SwapSheet() {
         <TxStatus status={swap.txStatus} />
         <div className="sr-only" aria-live="polite">{announcement}</div>
       </div>
+      {tokenIn && tokenOut && (
+        <Suspense fallback={null}>
+          <SwapPriceChart tokenIn={tokenIn} tokenOut={tokenOut} pairs={pairs} />
+        </Suspense>
+      )}
       <RecentLedger entries={recent} />
       {!isDeployed && (
         <p className="mt-6 border-t border-g300 pt-4 text-sm leading-6 text-g500">

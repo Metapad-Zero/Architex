@@ -1,10 +1,11 @@
+import { useMemo } from 'react'
 import { activeChain, addressExplorerUrl } from '../chain'
 import { quote as ratioQuote, reservesFor, type AmmPair } from '../lib/amm'
 import { formatAmount, formatPct, shortAddress } from '../lib/format'
 import type { Token } from '../lib/tokens'
 import { usePriceHistory } from '../hooks/usePriceHistory'
 import { ExternalLinkIcon } from './Icons'
-import { PriceHistory } from './PriceHistory'
+import { PriceHistory, pairSeries } from './PriceHistory'
 
 interface PoolDetailProps {
   pair: AmmPair
@@ -24,6 +25,7 @@ function orientation(token0: Token, token1: Token): { base: Token; quote: Token;
 export function PoolDetail({ pair, token0, token1, lpBalance = 0n }: PoolDetailProps) {
   const { base, quote, quoteIsToken1 } = orientation(token0, token1)
   const history = usePriceHistory(pair.pair)
+  const series = useMemo(() => pairSeries(history.data?.points ?? [], base, quote, quoteIsToken1), [base, history.data, quote, quoteIsToken1])
   const [reserveBase, reserveQuote] = reservesFor(pair, base.address)
   const spot = reserveBase > 0n && reserveQuote > 0n ? ratioQuote(10n ** BigInt(base.decimals), reserveBase, reserveQuote) : 0n
   const shareBps = pair.totalSupply > 0n ? (lpBalance * 10_000n) / pair.totalSupply : 0n
@@ -48,7 +50,7 @@ export function PoolDetail({ pair, token0, token1, lpBalance = 0n }: PoolDetailP
           <dd>{lpBalance > 0n ? `${formatPct(shareBps)} · ${formatAmount(pooledBase, base.decimals)} ${base.symbol} + ${formatAmount(pooledQuote, quote.decimals)} ${quote.symbol}` : 'None yet'}</dd>
         </div>
       </dl>
-      <PriceHistory points={history.data?.points ?? []} partial={history.data ? !history.data.complete : false} base={base} quote={quote} quoteIsToken1={quoteIsToken1} loading={history.isLoading} />
+      <PriceHistory series={series} title="Price history" unit={`${quote.symbol} per ${base.symbol}`} partial={history.data ? !history.data.complete : false} loading={history.isLoading} />
     </div>
   )
 }

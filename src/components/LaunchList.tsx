@@ -6,6 +6,7 @@ import { relativeTime } from '../lib/recent'
 import { shortAddress } from '../lib/format'
 import { useLaunches } from '../hooks/useLaunches'
 import { GhostButton } from './GhostButton'
+import { CheckIcon } from './Icons'
 import { LaunchMeter, LaunchTokenMark } from './LaunchBits'
 import { TableSkeleton } from './Skeleton'
 
@@ -77,7 +78,7 @@ function LaunchRow({ launch, now, onOpen }: { launch: LaunchRecord; now: number;
     <tr className="launch-row">
       <th scope="row">
         <button type="button" className="pool-toggle" onClick={() => onOpen(launch.token)}>
-          <LaunchTokenMark token={launch} uri={launch.metadataURI} />
+          <LaunchTokenMark token={{ address: launch.token, symbol: launch.symbol }} uri={launch.metadataURI} />
           <span className="min-w-0 text-left">
             <span className="block font-semibold">{launch.symbol}</span>
             <span className="block truncate text-xs font-normal text-g500">{launch.name} · {shortAddress(launch.token)}</span>
@@ -87,7 +88,7 @@ function LaunchRow({ launch, now, onOpen }: { launch: LaunchRecord; now: number;
       <td data-label="Market cap">{facts.cap}</td>
       <td data-label="Sold">
         {launch.graduated ? (
-          <a className="font-semibold underline" href={swapHref} onClick={(event) => event.stopPropagation()}>Graduated</a>
+          <a className="launch-graduated underline" href={swapHref} onClick={(event) => event.stopPropagation()}><CheckIcon className="h-4 w-4" />Graduated</a>
         ) : (
           <LaunchMeter tokensSold={launch.tokensSold} graduated={false} />
         )}

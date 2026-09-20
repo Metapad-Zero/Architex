@@ -1,14 +1,19 @@
 import { useState } from 'react'
-import { tokenMonogram, type Token } from '../lib/tokens'
+import type { Token } from '../lib/tokens'
 import { parseHttpsUrl, soldLabel } from '../lib/launch'
 import { progressBps } from '../lib/curve'
+import { CheckIcon } from './Icons'
+import { TokenMark } from './TokenMark'
 
-export function LaunchTokenMark({ token, uri, className }: { token: Pick<Token, 'symbol' | 'name'>; uri?: string; className?: string }) {
+export function LaunchTokenMark({ token, uri, className }: { token: Pick<Token, 'address' | 'symbol'>; uri?: string; className?: string }) {
   const https = uri ? parseHttpsUrl(uri) : undefined
   const [failed, setFailed] = useState(false)
-  const monogram = tokenMonogram({ address: '0x0000000000000000000000000000000000000001', symbol: token.symbol, name: token.name, decimals: 18, faucet: false })
-  if (https && !failed) {
-    return (
+  const [loaded, setLoaded] = useState(false)
+  if (!https || failed) return <TokenMark token={token} className={className} />
+  // The stamp holds the place, so a slow or broken image never leaves a hole; the image covers it once it has loaded.
+  return (
+    <span className="token-image">
+      <TokenMark token={token} className={className} />
       <img
         src={https}
         alt=""
@@ -17,13 +22,11 @@ export function LaunchTokenMark({ token, uri, className }: { token: Pick<Token, 
         referrerPolicy="no-referrer"
         loading="lazy"
         decoding="async"
+        data-loaded={loaded}
+        onLoad={() => setLoaded(true)}
         onError={() => setFailed(true)}
-        className={className ?? 'h-6 w-6 shrink-0 rounded object-cover'}
       />
-    )
-  }
-  return (
-    <span className={className ?? 'token-mark'} aria-hidden="true">{monogram}</span>
+    </span>
   )
 }
 
@@ -41,6 +44,7 @@ export function LaunchMeter({
       <div
         role="meter"
         className="launch-meter"
+        data-graduated={graduated}
         aria-valuemin={0}
         aria-valuemax={100}
         aria-valuenow={pct}
@@ -48,7 +52,11 @@ export function LaunchMeter({
       >
         <span style={{ width: `${pct}%` }} />
       </div>
-      <span>{label}</span>
+      {graduated ? (
+        <span className="launch-graduated"><CheckIcon className="h-4 w-4" />{label}</span>
+      ) : (
+        <span>{label}</span>
+      )}
     </div>
   )
 }

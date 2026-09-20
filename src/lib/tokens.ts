@@ -33,8 +33,23 @@ export interface TokenMetaResult {
   decimals: number
 }
 
-export function tokenMonogram(token: Token): string {
+export function tokenMonogram(token: Pick<Token, 'symbol'>): string {
   return token.symbol.replace(/[^a-z0-9]/gi, '').slice(0, 2).toUpperCase() || 'T'
+}
+
+/** How many spot colours token marks are stamped in (`.stamp-0` … in index.css). */
+export const STAMP_COUNT = 8
+
+// The tokens everyone knows keep a fixed stamp close to their own colour; every other token takes
+// one from its address, so the same token wears the same colour in every list and on every visit.
+const KNOWN_STAMPS: Record<string, number> = { USDC: 0, WETH: 1, WBTC: 3, ARC: 4, EURC: 5 }
+
+export function tokenStamp(token: Pick<Token, 'address' | 'symbol'>, canonical = isCanonicalToken(token.address)): number {
+  const known = canonical ? KNOWN_STAMPS[token.symbol.toUpperCase()] : undefined
+  if (known !== undefined) return known
+  let hash = 0
+  for (const char of token.address.toLowerCase().slice(2)) hash = (hash * 31 + char.charCodeAt(0)) >>> 0
+  return hash % STAMP_COUNT
 }
 
 export function buildTokenRegistry(pairs: readonly AmmPair[], meta: readonly TokenMetaResult[] = []): Token[] {

@@ -15,6 +15,16 @@
   --on-accent: #000000;
   --gain: #0b7a3b;
   --loss: #c81e1e;
+  /* Token stamps: spot colours for identity only. White initials on the light print, black on the dark. */
+  --stamp-0: #1f47d1;
+  --stamp-1: #6a3bc0;
+  --stamp-2: #b8206f;
+  --stamp-3: #c2500a;
+  --stamp-4: #0a756e;
+  --stamp-5: #1a6fa8;
+  --stamp-6: #5f6b10;
+  --stamp-7: #87481f;
+  --on-stamp: #ffffff;
   --radius: 4px;
   --unit: 8px;
   color-scheme: light dark;
@@ -33,6 +43,15 @@
     --g700: light-dark(#3d3d3a, #c9c9c5);
     --gain: light-dark(#0b7a3b, #4fcf7f);
     --loss: light-dark(#c81e1e, #ff6b62);
+    --stamp-0: light-dark(#1f47d1, #7d9bff);
+    --stamp-1: light-dark(#6a3bc0, #b79aff);
+    --stamp-2: light-dark(#b8206f, #ff8ac4);
+    --stamp-3: light-dark(#c2500a, #ff9d52);
+    --stamp-4: light-dark(#0a756e, #4fd1c5);
+    --stamp-5: light-dark(#1a6fa8, #6cc4ff);
+    --stamp-6: light-dark(#5f6b10, #c5d34a);
+    --stamp-7: light-dark(#87481f, #e0a476);
+    --on-stamp: light-dark(#ffffff, #000000);
   }
 }
 
@@ -133,6 +152,11 @@ input[type='checkbox'], input[type='radio'], input[type='range'] { accent-color:
 
   .token-trigger { @apply min-w-[7rem] shrink-0 px-3 text-base; }
   .token-mark { @apply inline-flex h-6 w-6 shrink-0 items-center justify-center rounded border border-current text-2xs font-semibold leading-none tracking-[-0.02em]; }
+  .token-image { @apply relative inline-flex shrink-0; }
+  .token-image > img { @apply absolute inset-0 h-full w-full rounded object-cover opacity-0; }
+  .token-image > img[data-loaded='true'] { @apply opacity-100; }
+  /* A pool's two stamps, side by side like franking marks. */
+  .pair-marks { @apply inline-flex shrink-0 gap-0.5; }
   .token-popover, .settings-popover, .connect-sheet {
     @apply fixed z-50 m-0 max-h-[min(520px,calc(100dvh-32px))] overflow-hidden rounded border border-ink bg-paper p-0 text-ink;
   }
@@ -213,8 +237,17 @@ input[type='checkbox'], input[type='radio'], input[type='range'] { accent-color:
   .price-history-plot .series { fill: none; stroke: var(--ink); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
   .price-history-plot .marker { fill: var(--ink); stroke: var(--paper); stroke-width: 2; }
   .price-history-plot .crosshair { stroke: var(--ink); stroke-width: 1; }
+  /* The series takes the direction of the window drawn; the arrow and the signed figure say it first. */
+  .price-history[data-trend='up'] .price-history-plot .series { stroke: var(--gain); }
+  .price-history[data-trend='down'] .price-history-plot .series { stroke: var(--loss); }
+  .price-history-change { @apply ml-2 inline-flex items-center gap-0.5 align-bottom font-semibold; }
+  .price-history[data-trend='up'] .price-history-change { color: var(--gain); }
+  .price-history[data-trend='down'] .price-history-change { color: var(--loss); }
+  /* Where the price is now: the signal colour, ringed in ink so it holds on white paper. */
+  .price-history-plot .marker-now { fill: var(--accent); stroke: var(--ink); stroke-width: 2; }
   .price-history[data-loading='true'] .price-history-plot .series { stroke: var(--g500); }
   .price-history[data-loading='true'] .price-history-plot .marker { fill: var(--g500); }
+  .price-history[data-loading='true'] .price-history-plot .marker-now { fill: var(--g300); stroke: var(--g500); }
   .price-history-foot { @apply flex justify-end pt-2; }
   .price-table { @apply mt-3 w-full border-collapse text-sm; }
   .price-table th { @apply border-b border-ink py-2 text-left font-normal text-g500; }
@@ -244,8 +277,22 @@ input[type='checkbox'], input[type='radio'], input[type='range'] { accent-color:
   .launch-sold { @apply flex items-center justify-end gap-3 whitespace-nowrap; }
   .launch-sold > span { @apply min-w-[7.5rem] text-right; }
   .launch-meter { @apply h-2 w-24 shrink-0 overflow-hidden border border-ink bg-paper; }
-  .launch-meter > span { @apply block h-full bg-ink; }
-  .launch-detail { @apply grid gap-6 sm:grid-cols-2 sm:items-start sm:gap-10; }
+  .launch-meter > span { display: block; height: 100%; background: var(--accent); border-right: 1px solid var(--ink); }
+  .launch-meter[data-graduated='true'] > span { background: var(--gain); border-right: 0; }
+  /* The side of a trade: the word carries it, the ink repeats it. */
+  .trade-buy { @apply font-semibold; color: var(--gain); }
+  .trade-sell { @apply font-semibold; color: var(--loss); }
+  .launch-graduated { @apply inline-flex items-center justify-end gap-1 font-semibold; color: var(--gain); }
+  /* On a phone the order is chart, trade, facts: the trade sheet must not sit under a list of figures.
+     From 640px the chart and facts share the left column and the trade sheet holds the right one. */
+  .launch-detail { @apply grid gap-6 sm:grid-cols-2 sm:items-start sm:gap-x-10; grid-template-areas: 'chart' 'trade' 'facts'; }
+  .launch-chart { grid-area: chart; }
+  .launch-trade { grid-area: trade; }
+  .launch-facts { grid-area: facts; }
+  @media (min-width: 640px) {
+    /* The tall trade sheet spans both rows; `auto 1fr` sends its extra height to the second row, so the facts sit right under the chart. */
+    .launch-detail { grid-template-areas: 'chart trade' 'facts trade'; grid-template-rows: auto 1fr; }
+  }
   /* Grid and flex children refuse to shrink below their content unless told to: the amount row is wide. */
   .launch-detail > * { @apply min-w-0; }
   .token-static { @apply inline-flex min-h-11 shrink-0 items-center gap-2 text-base font-semibold; }
@@ -314,3 +361,15 @@ input[type='checkbox'], input[type='radio'], input[type='range'] { accent-color:
   .rule-sweep { display: none; }
   ::view-transition-group(*), ::view-transition-old(*), ::view-transition-new(*) { animation: none !important; }
 }
+
+/* Token stamps. The class is built at run time (`stamp-${n}`), which Tailwind's scanner cannot see,
+   so these rules live outside the purged layers. */
+.token-mark[class*='stamp-'] { border-color: transparent; color: var(--on-stamp); }
+.stamp-0 { background: var(--stamp-0); }
+.stamp-1 { background: var(--stamp-1); }
+.stamp-2 { background: var(--stamp-2); }
+.stamp-3 { background: var(--stamp-3); }
+.stamp-4 { background: var(--stamp-4); }
+.stamp-5 { background: var(--stamp-5); }
+.stamp-6 { background: var(--stamp-6); }
+.stamp-7 { background: var(--stamp-7); }

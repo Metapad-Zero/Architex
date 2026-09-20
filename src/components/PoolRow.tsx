@@ -4,6 +4,7 @@ import type { Token } from '../lib/tokens'
 import { ChevronIcon } from './Icons'
 import { AddLiquidityForm } from './AddLiquidityForm'
 import { PoolDetail } from './PoolDetail'
+import { PairMarks } from './TokenMark'
 
 interface PoolRowProps {
   pair: AmmPair
@@ -24,6 +25,7 @@ export function PoolRow({ pair, token0, token1, tvl, expanded, balances, allowan
       <tr className="pool-row" data-expanded={expanded}>
         <th scope="row">
           <button type="button" className="pool-toggle" onClick={onToggle} aria-expanded={expanded}>
+            <PairMarks token0={token0} token1={token1} />
             <span className="font-semibold">{token0.symbol} / {token1.symbol}</span>
             <ChevronIcon className={expanded ? 'rotate-180' : ''} />
           </button>

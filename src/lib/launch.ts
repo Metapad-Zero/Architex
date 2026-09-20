@@ -33,6 +33,9 @@ export interface LaunchTrade {
   block: number
   /** Position in the block; tells apart two trades made by one transaction. */
   logIndex?: number
+  /** The curve's virtual reserves right after this trade: enough to price the token at that moment. */
+  virtualUsdc?: bigint
+  virtualTokens?: bigint
 }
 
 export function curveStateOf(launch: Pick<LaunchRecord, 'virtualUsdc' | 'virtualTokens' | 'tokensSold'>): CurveState {

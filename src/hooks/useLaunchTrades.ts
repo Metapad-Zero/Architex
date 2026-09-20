@@ -67,6 +67,8 @@ async function fromExplorer(token: Address, createdAt: number | undefined, signa
         txHash: log.txHash,
         block: log.block,
         logIndex: log.logIndex,
+        virtualUsdc: decoded.args.virtualUsdc,
+        virtualTokens: decoded.args.virtualTokens,
       })
     } catch {
       // skip undecodable explorer rows
@@ -116,6 +118,8 @@ export function useLaunchTrades(token: Address | undefined, createdAt: number | 
             txHash: log.transactionHash,
             block: Number(log.blockNumber),
             logIndex: log.logIndex ?? 0,
+            virtualUsdc: log.args.virtualUsdc,
+            virtualTokens: log.args.virtualTokens,
           }))
           .sort(byNewest)
         return { trades: trades.slice(0, MAX_TRADES), complete: complete || trades.length >= MAX_TRADES, source: 'rpc' }
@@ -124,8 +128,18 @@ export function useLaunchTrades(token: Address | undefined, createdAt: number | 
   })
 
   if (fixtureOn) {
-    return { trades: token && api ? api.trades(token) : [], historyComplete: true, isLoading: false, error: null, version: fixtureVersion }
+    return { trades: token && api ? api.trades(token) : [], historyComplete: true, reachesCreation: false, isLoading: false, error: null, version: fixtureVersion }
   }
 
-  return { trades: query.data?.trades ?? [], historyComplete: query.data?.complete ?? true, isLoading: query.isLoading, error: query.error, version: 0 }
+  const trades = query.data?.trades ?? []
+  const historyComplete = query.data?.complete ?? true
+  return {
+    trades,
+    historyComplete,
+    /** True when `trades` is every trade since the token was created, not just the newest page of them. */
+    reachesCreation: Boolean(query.data) && historyComplete && trades.length < MAX_TRADES,
+    isLoading: query.isLoading,
+    error: query.error,
+    version: 0,
+  }
 }

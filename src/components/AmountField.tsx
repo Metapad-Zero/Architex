@@ -2,7 +2,7 @@ import { formatUnits } from 'viem'
 import { formatAmount } from '../lib/format'
 import type { Token } from '../lib/tokens'
 import { TokenSelect } from './TokenSelect'
-import { tokenMonogram } from '../lib/tokens'
+import { TokenMark } from './TokenMark'
 
 interface AmountFieldProps {
   id: string
@@ -101,7 +101,7 @@ export function AmountField({
         />
         {disableTokenSelect && token ? (
           <span className="token-static">
-            <span className="token-mark" aria-hidden="true">{tokenMonogram(token)}</span>
+            <TokenMark token={token} />
             <span>{token.symbol}</span>
           </span>
         ) : (

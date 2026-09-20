@@ -1,15 +1,17 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { Address } from 'viem'
 import { addressExplorerUrl, txExplorerUrl } from '../chain'
 import { useLaunch } from '../hooks/useLaunch'
 import { useLaunchTrades } from '../hooks/useLaunchTrades'
 import { formatAmount, shortAddress } from '../lib/format'
+import { INITIAL_CURVE, marketCap } from '../lib/curve'
 import { GRADUATES_AT_USD, launchFacts } from '../lib/launch'
 import { relativeTime } from '../lib/recent'
 import { ExternalLinkIcon } from './Icons'
 import { GhostButton } from './GhostButton'
 import { LaunchMeter, LaunchTokenMark } from './LaunchBits'
 import { LaunchTradeSheet } from './LaunchTradeSheet'
+import { PriceHistory, type SeriesPoint } from './PriceHistory'
 import { TableSkeleton } from './Skeleton'
 
 interface LaunchDetailProps {
@@ -17,9 +19,23 @@ interface LaunchDetailProps {
   onBack: () => void
 }
 
+function formatCap(value: number): string {
+  return `$${value.toLocaleString('en-US', { maximumFractionDigits: value >= 100 ? 0 : 2 })}`
+}
+
 export function LaunchDetail({ token, onBack }: LaunchDetailProps) {
   const { launch, token: launchToken, usdc, tokenBalance, usdcBalance, usdcAllowance, isLoading, unknown, refetch } = useLaunch(token)
-  const { trades, historyComplete } = useLaunchTrades(token, launch ? Number(launch.createdAt) : undefined)
+  const { trades, historyComplete, reachesCreation, isLoading: tradesLoading } = useLaunchTrades(token, launch ? Number(launch.createdAt) : undefined)
+  // Market cap after each trade, oldest first. The creation point is only drawn when every trade since is known.
+  const capSeries = useMemo<SeriesPoint[]>(() => {
+    const usdcOf = (virtualUsdc: bigint, virtualTokens: bigint) => Number(marketCap({ virtualUsdc, virtualTokens, tokensSold: 0n })) / 1e6
+    const points = trades
+      .filter((trade) => trade.virtualUsdc !== undefined && trade.virtualTokens !== undefined)
+      .map((trade) => ({ value: usdcOf(trade.virtualUsdc!, trade.virtualTokens!), time: trade.time, block: trade.block }))
+      .reverse()
+    if (launch && reachesCreation) points.unshift({ value: usdcOf(INITIAL_CURVE.virtualUsdc, INITIAL_CURVE.virtualTokens), time: Number(launch.createdAt), block: 0 })
+    return points
+  }, [launch, reachesCreation, trades])
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 30_000)
@@ -62,7 +78,20 @@ export function LaunchDetail({ token, onBack }: LaunchDetailProps) {
       </div>
 
       <div className="launch-detail">
-        <dl className="receipt-lines">
+        <div className="launch-chart">
+          <PriceHistory
+            series={capSeries}
+            title="Market cap"
+            unit="USDC"
+            formatValue={formatCap}
+            loading={tradesLoading}
+            partial={!historyComplete}
+            loadingText="Reading the trades…"
+            emptyText="No trades yet — the first buy starts the chart."
+            partialText="No recent trades. Older history could not be loaded."
+          />
+        </div>
+        <dl className="receipt-lines launch-facts">
           <div><dt>Price</dt><dd>{facts.price}</dd></div>
           <div><dt>Market cap</dt><dd>{facts.cap}</dd></div>
           <div>
@@ -90,15 +119,17 @@ export function LaunchDetail({ token, onBack }: LaunchDetailProps) {
             </dd>
           </div>
         </dl>
-        <LaunchTradeSheet
-          launch={launch}
-          token={launchToken}
-          usdc={usdc}
-          tokenBalance={tokenBalance}
-          usdcBalance={usdcBalance}
-          usdcAllowance={usdcAllowance}
-          onConfirmed={refresh}
-        />
+        <div className="launch-trade">
+          <LaunchTradeSheet
+            launch={launch}
+            token={launchToken}
+            usdc={usdc}
+            tokenBalance={tokenBalance}
+            usdcBalance={usdcBalance}
+            usdcAllowance={usdcAllowance}
+            onConfirmed={refresh}
+          />
+        </div>
       </div>
 
       <section className="ledger" aria-label="Trades">
@@ -115,7 +146,7 @@ export function LaunchDetail({ token, onBack }: LaunchDetailProps) {
               <li key={`${trade.txHash}:${trade.logIndex ?? 0}`} className="ledger-row">
                 <span className="min-w-0 flex-1">
                   <span className="block truncate">
-                    {trade.isBuy ? 'Buy' : 'Sell'} {formatAmount(trade.tokenAmount, 18)} {launch.symbol} · {formatAmount(trade.isBuy ? trade.usdcAmount : trade.usdcAmount - trade.fee, 6)} USDC
+                    <span className={trade.isBuy ? 'trade-buy' : 'trade-sell'}>{trade.isBuy ? 'Buy' : 'Sell'}</span> {formatAmount(trade.tokenAmount, 18)} {launch.symbol} · {formatAmount(trade.isBuy ? trade.usdcAmount : trade.usdcAmount - trade.fee, 6)} USDC
                   </span>
                   <span className="block text-xs text-g500">{shortAddress(trade.trader)} · {relativeTime(trade.time * 1000, now)}</span>
                 </span>

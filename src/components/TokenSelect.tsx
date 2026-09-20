@@ -1,7 +1,8 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, KeyboardEvent } from 'react'
 import type { Token } from '../lib/tokens'
-import { isCanonicalToken, tokenMonogram } from '../lib/tokens'
+import { isCanonicalToken } from '../lib/tokens'
+import { TokenMark } from './TokenMark'
 import { formatAmount, shortAddress } from '../lib/format'
 import { hidePopover, showPopover } from '../lib/popover'
 import { ChevronIcon, SearchIcon } from './Icons'
@@ -109,7 +110,7 @@ export function TokenSelect({ token, tokens, balances, onSelect, disabled = fals
       >
         {token ? (
           <>
-            <span className="token-mark" aria-hidden="true">{tokenMonogram(token)}</span>
+            <TokenMark token={token} />
             <span>{token.symbol}</span>
           </>
         ) : (
@@ -157,7 +158,7 @@ export function TokenSelect({ token, tokens, balances, onSelect, disabled = fals
                   close()
                 }}
               >
-                <span className="token-mark" aria-hidden="true">{tokenMonogram(item)}</span>
+                <TokenMark token={item} />
                 <span className="min-w-0 text-left">
                   <span className="block font-semibold">{item.symbol || shortAddress(item.address)}</span>
                   <span className="block truncate text-xs text-g500 group-data-[selected=true]:text-paper">
