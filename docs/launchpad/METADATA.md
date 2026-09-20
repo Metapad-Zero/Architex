@@ -19,6 +19,12 @@ the address of a one-block file is just a framed SHA-256 of its bytes (`src/lib/
   own gateways have a "hot swap" feature that maps one address to other content; the check defeats it.
 - **The server is not trusted either.** The browser builds the same file, works out the address it must
   have, and refuses an answer that names any other (`src/lib/saveDetails.ts`).
+- **Visitors contact nobody but us.** Files are read from `GET /api/ipfs/<cid>` on our own domain
+  (`server/ipfsProxy.ts`): fetched from the pinning service once, verified, answered as immutable, and
+  served by the CDN from then on (first request about 4 s, later ones about 0.2 s). It serves only files
+  pinned through our own uploader, so it is not a general IPFS proxy, and unpinning a file takes it down
+  there too. Measured 2026-09-19: `ipfs.io`, `dweb.link` and `w3s.link` refuse browsers outright, and
+  Pinata's public gateway takes about six seconds, which is why the app does not rely on them.
 - **Creators cannot track visitors.** Nothing is ever loaded from a host a creator chose. Images are
   fetched from gateways we pick, verified, and shown as `blob:` URLs. The earlier design loaded any
   `https` image URL, which let one creator log the IP of every visitor to the launch list.
@@ -66,6 +72,9 @@ leaves their machine.
    vercel env add IPFS_GATEWAY production
    ```
 
+   Only `PINATA_JWT` is read. If the API key and API secret were added as well, remove them: they are
+   unused, and an unused secret is only a liability (`vercel env rm PINATA_API_KEY production`).
+
 4. Redeploy. `GET /api/metadata` then answers `{"enabled":true,…}` and the create form shows its
    Details fields. Until then the form offers name and symbol only, and everything else works.
 
@@ -78,7 +87,8 @@ leaves their machine.
 | `src/lib/ipfs.ts` | Verified reads through gateways: size cap, timeout, hash check, fallbacks |
 | `src/lib/prepareImage.ts`, `saveDetails.ts` | The creator's side: resize and re-encode, save, check the answer |
 | `server/metadataService.ts` | The upload service. Same-origin JSON only, size caps, byte sniffing, a per-address limit; it rebuilds the file from checked fields and only reports a verified address |
-| `server/pinata.ts` | The pinning provider. Swapping providers means writing this one file |
+| `server/pinata.ts` | The pinning provider. Swapping providers means writing this one file. Verified live: JSON, PNG and WebP pin, and Pinata's addresses equal the SHA-256 addresses computed from the bytes |
+| `server/ipfsProxy.ts`, `api/ipfs/[cid].ts` | Our own verified, immutable file server; see above |
 | `api/metadata.ts` | The Vercel function. Imports carry `.js` extensions because Vercel runs native Node modules |
 | `server/devMetadata.ts` | `vite dev` only: an in-memory pinning service and `/ipfs/` gateway, so the whole flow runs locally with no key |
 | `scripts/metadata-cleanup.ts` | Lists pinned files no token points to; unpins them only with `--delete` |
@@ -90,6 +100,16 @@ which costs the launch fee. The per-address limit is best effort (each server in
 If the endpoint is ever hammered, add a rate-limit rule in Vercel's firewall for `POST /api/metadata`;
 orphaned files are found and removed with the cleanup script. Moderation is a display decision in the
 app (hide an image or a description), never a change to the token, which stays permissionless.
+
+## Proven live
+
+Token `0xd13a5676Acf317CDC2f8773982636Bc2653aEBE2` on Arc Testnet stores `ipfs://bafkreihn7n5m36k76bvaa6p2xs5zv4qcjvjtf2ngxlmtma27fklpnewu44`.
+Its page on architex.fun fetched the details file and the image from our own domain only, verified both,
+and rendered the image, the description, the links and the creator note.
+
+One oddity: Pinata answered `400 File size must be greater than 0` to an 80-byte hand-built PNG, while
+accepting a 52-byte JSON file and every image produced by a real encoder. Browsers always re-encode, so
+users cannot hit it.
 
 ## Not done
 
