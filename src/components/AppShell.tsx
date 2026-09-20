@@ -13,7 +13,7 @@ interface AppShellProps {
 
 export function AppShell({ route, onRoute, children }: AppShellProps) {
   return (
-    <div className="min-h-dvh bg-paper text-ink">
+    <div className="min-h-dvh overflow-x-hidden bg-paper text-ink">
       <header className="masthead">
         <div className="flex min-w-0 items-center gap-3 sm:gap-6">
           <button type="button" className="wordmark" onClick={() => onRoute({ view: 'swap' })}>
@@ -25,7 +25,7 @@ export function AppShell({ route, onRoute, children }: AppShellProps) {
           </button>
           <span className="testnet-chip">{activeChain.isTestnet ? 'Testnet' : 'Beta'}</span>
           <nav className="ml-1 flex h-14 items-stretch sm:ml-4" aria-label="Primary">
-            {(['swap', 'pools', ...(isLaunchViewAvailable ? (['launch'] as const) : [])] as const).map((view) => (
+            {(['swap', 'pools', ...(isLaunchViewAvailable ? (['launch'] as const) : []), 'bridge'] as const).map((view) => (
               <button
                 key={view}
                 type="button"
@@ -34,7 +34,7 @@ export function AppShell({ route, onRoute, children }: AppShellProps) {
                 aria-current={(view === 'launch' ? route.view === 'launch' || route.view === 'launch-new' : route.view === view) ? 'page' : undefined}
                 onClick={() => onRoute(view === 'launch' ? { view: 'launch' } : { view })}
               >
-                {view === 'swap' ? 'Swap' : view === 'pools' ? 'Pools' : 'Launch'}
+                {view === 'swap' ? 'Swap' : view === 'pools' ? 'Pools' : view === 'launch' ? 'Launch' : 'Bridge'}
               </button>
             ))}
           </nav>

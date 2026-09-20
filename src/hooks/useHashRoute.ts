@@ -6,11 +6,13 @@ export type AppRoute =
   | { view: 'pools'; pair?: Address }
   | { view: 'launch'; token?: Address }
   | { view: 'launch-new' }
+  | { view: 'bridge' }
 
 function hashFor(next: AppRoute): string {
   if (next.view === 'swap') return '#swap'
   if (next.view === 'pools') return next.pair ? `#pools/${next.pair}` : '#pools'
   if (next.view === 'launch-new') return '#launch/new'
+  if (next.view === 'bridge') return '#bridge'
   return next.token ? `#launch/${next.token}` : '#launch'
 }
 
@@ -24,6 +26,7 @@ function readRoute(): AppRoute {
     return isAddress(token) ? { view: 'launch', token } : { view: 'launch' }
   }
   if (hash === '#launch') return { view: 'launch' }
+  if (hash === '#bridge' || hash.startsWith('#bridge?')) return { view: 'bridge' }
   return { view: 'swap' }
 }
 

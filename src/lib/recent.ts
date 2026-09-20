@@ -1,13 +1,11 @@
 import { useEffect, useState } from 'react'
-import type { Hash } from 'viem'
-
 /**
  * The "Recent" ledger: transactions confirmed from this browser, kept per chain in localStorage.
  * It is a printed record of what this user did here, never a substitute for chain data.
  */
 export interface RecentEntry {
-  hash: Hash
-  kind: 'swap' | 'add' | 'remove' | 'faucet' | 'launch'
+  hash: string
+  kind: 'swap' | 'add' | 'remove' | 'faucet' | 'launch' | 'bridge'
   summary: string
   time: number
 }

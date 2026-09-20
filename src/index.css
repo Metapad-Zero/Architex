@@ -348,20 +348,20 @@ input[type='checkbox'], input[type='radio'], input[type='range'] { accent-color:
   .launch-sold { justify-content: flex-start; }
 }
 
-@media (max-width: 479px) {
+@media (max-width: 639px) {
   .testnet-chip { display: none; }
-  .masthead { padding-inline: 12px; }
+  .masthead { padding-inline: 12px; gap: 8px; }
   .wordmark { font-size: 1rem; }
   /* On a phone the mark stands alone; the name stays for screen readers. */
   .wordmark-text { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .wordmark { position: relative; min-width: 44px; min-height: 44px; justify-content: center; }
   .wordmark-mark { width: 1.625rem; height: 1.625rem; }
-  .masthead { gap: 8px; }
-  .masthead > div:first-child { gap: 8px; }
-  .nav-tab { min-width: 44px; padding-inline: 6px; }
-  .masthead nav { margin-left: 0; }
-  .masthead .ghost-button { padding-inline: 8px; white-space: nowrap; font-size: 0.8125rem; }
+  .masthead > div:first-child { gap: 8px; min-width: 0; }
+  .nav-tab { min-width: 44px; padding-inline: 8px; }
+  .masthead nav { margin-left: 0; overflow-x: auto; }
+  .masthead .ghost-button { max-width: 7.5rem; overflow: hidden; text-overflow: ellipsis; padding-inline: 8px; white-space: nowrap; font-size: 0.8125rem; }
   .masthead .ghost-button svg { display: none; }
+  .choice-button { padding-inline: 4px; font-size: 0.8125rem; }
 }
 
 @media (prefers-reduced-motion: reduce) {

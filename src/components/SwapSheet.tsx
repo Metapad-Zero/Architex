@@ -253,6 +253,14 @@ export function SwapSheet() {
           {swap.label}
         </PrimaryButton>
         {swap.hint && <p className="hint-line" role="status">{swap.hint}</p>}
+        {account && (balances.get(activeChain.usdc.toLowerCase()) ?? 0n) === 0n && (
+          <p className="hint-line" role="status">
+            No USDC on Arc.{' '}
+            <button type="button" className="font-semibold underline" onClick={() => { window.location.hash = '#bridge' }}>
+              Bridge from Ethereum or Solana
+            </button>
+          </p>
+        )}
         <TxStatus status={swap.txStatus} />
         <div className="sr-only" aria-live="polite">{announcement}</div>
       </div>

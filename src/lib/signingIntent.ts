@@ -1,5 +1,6 @@
-import { decodeFunctionData, hexToString, isHex, maxUint256, zeroAddress, type Address, type Hex, type TypedDataDefinition } from 'viem'
+import { decodeFunctionData, hexToString, isHex, maxUint256, parseAbi, zeroAddress, type Address, type Hex, type TypedDataDefinition } from 'viem'
 import { factoryAbi, launchpadAbi, routerAbi, testTokenAbi } from './abi'
+import { bytes32ToAddress, domainLabel, isMessenger, isTransmitter } from './cctp'
 import { deployment } from './deployment'
 import { formatAmount, shortAddress } from './format'
 import { rememberedToken, type Token } from './tokens'
@@ -51,6 +52,8 @@ function contractName(address: string | undefined, tokens: readonly Token[]): st
   if (!address) return 'Contract creation'
   if (same(address, deployment.router)) return 'Architex router'
   if (same(address, deployment.factory)) return 'Architex factory'
+  if (isMessenger(address)) return 'USDC bridge'
+  if (isTransmitter(address)) return 'USDC bridge mint'
   if (deployment.launchpad !== zeroAddress && same(address, deployment.launchpad)) return 'Architex launchpad'
   if (deployment.pairs.some((pair) => same(pair.pair, address))) return 'Architex pool'
   const token = tokenFor(address, tokens)
@@ -220,6 +223,28 @@ function describeTransaction(tx: TxRequest, tokens: readonly Token[]): SigningIn
     if (call?.functionName === 'transfer') {
       const [to, sent] = call.args
       return { title: `Send ${symbol(tx.to, tokens)}`, lines: [{ label: 'Amount', value: amount(sent, tx.to, tokens) }, { label: 'To', value: shortAddress(to) }] }
+    }
+  }
+
+  if (data && isMessenger(tx.to)) {
+    const burnV2 = decode(parseAbi(['function depositForBurn(uint256 amount, uint32 destinationDomain, bytes32 mintRecipient, address burnToken, bytes32 destinationCaller, uint256 maxFee, uint32 minFinalityThreshold) returns (uint64)']), data)
+    const burn = burnV2 ?? decode(parseAbi(['function depositForBurn(uint256 amount, uint32 destinationDomain, bytes32 mintRecipient, address burnToken) returns (uint64)']), data)
+    if (burn?.functionName === 'depositForBurn') {
+      const [paid, domain, recipient, token] = burn.args as [bigint, number, Hex, Address]
+      return {
+        title: 'Bridge USDC',
+        lines: [
+          { label: 'You send', value: amount(paid, token, tokens) },
+          { label: 'To', value: domainLabel(Number(domain)) },
+          { label: 'Recipient', value: shortAddress(bytes32ToAddress(recipient)) },
+        ],
+      }
+    }
+  }
+  if (data && isTransmitter(tx.to)) {
+    const receive = decode(parseAbi(['function receiveMessage(bytes message, bytes attestation) returns (bool)']), data)
+    if (receive?.functionName === 'receiveMessage') {
+      return { title: 'Claim bridged USDC', lines: [{ label: 'On', value: contractName(tx.to, tokens) }] }
     }
   }
 

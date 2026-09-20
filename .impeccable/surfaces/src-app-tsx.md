@@ -38,6 +38,7 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
 - Shareable swap URL (`#swap?in=&out=&amount=`), remembered pair, ⌘K token picker, Enter-to-act, approve→swap step hint, pool-share context on price impact, human revert copy.
 - Recent ledger under the sheet (this browser's confirmed transactions).
 - Pool detail: stats receipt + real price-history line from the pair's Sync logs (explorer API, RPC fallback), crosshair/keyboard readout, table view.
+- Bridge tab: native USDC in and out of Arc over Circle CCTP v2 (Ethereum and Solana). Same swap-sheet grammar; App Kit loads only on this view. Stuck burns are claimable from the burn hash.
 
 ## Unresolved
 

@@ -7,6 +7,7 @@ import { isLaunchViewAvailable } from './lib/deployment'
 
 const PoolsView = lazy(() => import('./components/PoolsView').then((module) => ({ default: module.PoolsView })))
 const LaunchView = lazy(() => import('./components/LaunchView').then((module) => ({ default: module.LaunchView })))
+const BridgeView = lazy(() => import('./components/BridgeView').then((module) => ({ default: module.BridgeView })))
 
 export default function App() {
   const { route, setRoute } = useHashRoute()
@@ -26,6 +27,10 @@ export default function App() {
             onCreate={() => setRoute({ view: 'launch-new' })}
             onCreated={(token) => setRoute({ view: 'launch', token })}
           />
+        </Suspense>
+      ) : route.view === 'bridge' ? (
+        <Suspense fallback={<div className="pools-page"><TableSkeleton rows={5} /></div>}>
+          <BridgeView />
         </Suspense>
       ) : (
         <SwapSheet />

@@ -110,7 +110,7 @@ export function AmountField({
       </div>
       <div className="mt-2 flex min-h-6 items-center justify-between gap-3 text-sm">
         <span className="text-g500">{usdValue ?? ''}</span>
-        {token && (
+        {token && (checkBalance || balances.has(token.address.toLowerCase())) && (
           <span className={overBalance ? 'text-loss' : 'text-g500'}>
             {overBalance ? `Not enough ${token.symbol}` : `Balance ${formatAmount(balance, token.decimals)}`}
             {checkBalance && !readOnly && balance > 0n && (

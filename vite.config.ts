@@ -51,6 +51,9 @@ export default defineConfig({
           ) {
             return 'vendor-web3'
           }
+          if (id.includes('/node_modules/@circle-fin/') || id.includes('/node_modules/@solana/')) {
+            return 'vendor-cctp'
+          }
         },
       },
     },
