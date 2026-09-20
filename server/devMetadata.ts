@@ -55,7 +55,8 @@ export function devMetadata(): Plugin {
             return
           }
 
-          const match = /^\/ipfs\/([a-z2-7]{59})$/.exec(url.pathname)
+          // Both the production path (`/api/ipfs/`) and a gateway-style path, from the same memory.
+          const match = /^(?:\/api)?\/ipfs\/([a-z2-7]{59})$/.exec(url.pathname)
           if (match) {
             const file = files.get(match[1])
             if (!file || !(await bytesMatchCid(file.bytes, match[1]))) {

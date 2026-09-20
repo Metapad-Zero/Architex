@@ -25,7 +25,7 @@ async function failure(response: Response, what: string): Promise<Error> {
   return new Error(`${what} failed with status ${response.status}${reason ? `: ${reason}` : ''}`)
 }
 
-export function pinata(jwt: string): Pinner & { list(labels: Record<string, string>, limit: number): Promise<PinataListedFile[]> } {
+export function pinata(jwt: string): Pinner & { has(cid: string, labels: Record<string, string>): Promise<boolean>; list(labels: Record<string, string>, limit: number): Promise<PinataListedFile[]> } {
   const auth = { Authorization: `Bearer ${jwt}` }
   return {
     async pin(file: FileToPin): Promise<PinnedFile> {
@@ -45,6 +45,16 @@ export function pinata(jwt: string): Pinner & { list(labels: Record<string, stri
     async unpin(id: string): Promise<void> {
       const response = await fetch(`${API_URL}/files/public/${encodeURIComponent(id)}`, { method: 'DELETE', headers: auth })
       if (!response.ok && response.status !== 404) throw await failure(response, 'Unpinning')
+    },
+
+    /** Whether a file with this address and these labels is pinned on the account. */
+    async has(cid: string, labels: Record<string, string>): Promise<boolean> {
+      const params = new URLSearchParams({ cid, limit: '1' })
+      for (const [key, value] of Object.entries(labels)) params.set(`metadata[${key}]`, value)
+      const response = await fetch(`${API_URL}/files/public?${params.toString()}`, { headers: auth })
+      if (!response.ok) throw await failure(response, 'Lookup')
+      const body = (await response.json()) as { data?: { files?: { cid?: unknown }[] } }
+      return (body.data?.files ?? []).some((file) => file.cid === cid)
     },
 
     async list(labels: Record<string, string>, limit: number): Promise<PinataListedFile[]> {

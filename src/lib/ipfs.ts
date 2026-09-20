@@ -2,14 +2,19 @@ import { MAX_BLOCK_BYTES, bytesMatchCid } from './cid'
 import { sniffImageType } from './tokenMetadata'
 
 /**
- * Reading one-block files from IPFS through ordinary https gateways, without trusting them.
+ * Reading one-block files from IPFS over https, without trusting whoever serves them.
  *
- * A gateway is only a courier: whatever it returns is hashed and compared with the address before it
- * is used, so a gateway that is wrong, compromised or configured to swap content is simply skipped.
- * The first gateway is the pinning account's own (fast, and it has the file the moment it is pinned);
- * the public ones are the fallback. A creator never chooses where a visitor's browser connects.
+ * A source is only a courier: whatever it returns is hashed and compared with the address before it is
+ * used, so a source that is wrong, compromised or configured to swap content is simply skipped.
+ *
+ * The first source is our own domain (`/api/ipfs/<cid>`, server/ipfsProxy.ts): it answers from the CDN,
+ * and it means a visitor's browser contacts nobody else. The rest are fallbacks, in the order they have
+ * proved usable: the pinning account's gateway if one is configured, the pinning service's public
+ * gateway (slow, but it has a file the moment it is pinned), then the general public gateways, which
+ * rate limit browsers heavily. A creator never chooses where a visitor's browser connects.
  */
-const PUBLIC_GATEWAYS = ['https://ipfs.io', 'https://dweb.link']
+const OWN_DOMAIN = '/api'
+const PUBLIC_GATEWAYS = ['https://gateway.pinata.cloud', 'https://dweb.link', 'https://ipfs.io']
 const TIMEOUT_MS = 8_000
 
 export interface MetadataStatus {
@@ -81,7 +86,7 @@ export function fetchVerified(cid: string, signal?: AbortSignal): Promise<Uint8A
   if (known) return known
   const attempt = (async () => {
     const { gateway } = await metadataStatus()
-    for (const source of [...(gateway ? [gateway] : []), ...PUBLIC_GATEWAYS]) {
+    for (const source of [OWN_DOMAIN, ...(gateway ? [gateway] : []), ...PUBLIC_GATEWAYS]) {
       const bytes = await fetchFrom(source, cid, signal)
       if (bytes) return bytes
       if (signal?.aborted) break
