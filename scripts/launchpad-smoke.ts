@@ -3,6 +3,7 @@
  *
  *   bun run scripts/launchpad-smoke.ts                 # read-only: wiring and constants
  *   BURNER_KEY=0x… bun run scripts/launchpad-smoke.ts  # also trades: needs about 12 test USDC, keeps most of it
+ *   SMOKE_BUY=2 BURNER_KEY=0x… bun run …               # smaller buys: needs about 6
  *
  * Arc's USDC moves balances through a chain-native precompile that a local fork cannot execute, so
  * this is the only place the launchpad meets the real token: allowance and transferFrom on the
@@ -96,7 +97,9 @@ async function checkCurve(label: string, token: Address, expected: CurveState) {
   return curve
 }
 
-const BUY = 5_000_000n
+// USDC per buy. SMOKE_BUY=2 runs the same checks on a wallet that holds less.
+const BUY = BigInt(Math.round(Number(process.env.SMOKE_BUY ?? '5') * 1e6))
+if (BUY < 1_000_000n) throw new Error('SMOKE_BUY must be at least 1 (USDC).')
 const startNative = await nativeOf(account.address)
 console.log(`\ntrader ${account.address}: ${formatUnits(startNative, 18)} USDC`)
 const needed = launchFee + 2n * BUY + 1_000_000n // two buys, the launch fee, and 1 USDC of gas headroom

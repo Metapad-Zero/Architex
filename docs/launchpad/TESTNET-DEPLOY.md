@@ -102,7 +102,7 @@ From the second review. Testnet needs none of these; mainnet needs all of them.
       28 checks, every number equal to the model, trader-side checks exact with gas; first token
       `0xBe20432D6645aEC36FfAf40d7FDFB10Af363a923`)
 - [ ] One token taken all the way to graduation on testnet, then traded on the Swap tab. Graduation needs
-      about 8,794 USDC on the curve and the faucet gives 20 at a time, so this needs either a large
+      about 25,126 USDC on the curve and the faucet gives 20 at a time, so this needs either a large
       testnet grant or a rehearsal build with the constants scaled down. The pieces are each proven:
       graduation against the deployed pair bytecode (fork suite), real USDC through the launchpad
       (smoke test) and real USDC through the pair (`scripts/amm-smoke.ts`)

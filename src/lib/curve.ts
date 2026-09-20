@@ -11,7 +11,8 @@ export const CURVE = {
   CURVE_SUPPLY: 800_000_000n * E18,
   POOL_SUPPLY: 200_000_000n * E18,
   VIRTUAL_TOKENS_0: 1_066_666_667n * E18,
-  VIRTUAL_USDC_0: 2_916_666_667n,
+  // A curve raises 3x this: 25,000 USDC, the USDC side of the pool that opens at graduation.
+  VIRTUAL_USDC_0: 8_333_333_333n,
   FEE_BPS: 50n,
 } as const
 

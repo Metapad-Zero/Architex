@@ -100,7 +100,7 @@ contract ArchitexLaunchpadTest is Test {
     uint256 constant CURVE_SUPPLY   = 800_000_000e18;
     uint256 constant POOL_SUPPLY    = 200_000_000e18;
     uint256 constant VIRTUAL_TOKENS_0 = 1_066_666_667e18;
-    uint256 constant VIRTUAL_USDC_0   = 2_916_666_667;
+    uint256 constant VIRTUAL_USDC_0   = 8_333_333_333;
     uint256 constant FEE_BPS        = 50;
     address constant DEAD = 0x000000000000000000000000000000000000dEaD;
 
@@ -458,12 +458,11 @@ contract ArchitexLaunchpadTest is Test {
         token = pad.createToken("GradCoin", "GRAD", "ipfs://g", 0, 0);
         // Need to buy all 800M tokens.
         // Buying in large chunks; the exact-fill handles the last trade.
-        // Approximate total USDC needed: ~8750 USDC + fees
-        // Buy 8800e6 in one shot — should graduate
-        usdc.mint(alice, 10_000e6);
+        // A sell-out costs about 25,126 USDC; 30,000 in one shot graduates.
+        usdc.mint(alice, 30_000e6);
         vm.prank(alice); usdc.approve(address(pad), type(uint256).max);
         vm.prank(alice);
-        pad.buy(token, 10_000e6, 0, alice);
+        pad.buy(token, 30_000e6, 0, alice);
     }
 
     function test_graduation_basic() public {
@@ -557,10 +556,10 @@ contract ArchitexLaunchpadTest is Test {
         // Pair exists and was reused (not a fresh one that might cause issues)
         assertNotEq(c.pair, address(0));
         // Graduation should work normally
-        usdc.mint(alice, 10_000e6);
+        usdc.mint(alice, 30_000e6);
         vm.prank(alice); usdc.approve(address(pad), type(uint256).max);
         vm.prank(alice);
-        pad.buy(token, 10_000e6, 0, alice);
+        pad.buy(token, 30_000e6, 0, alice);
         assertTrue(pad.curves(token).graduated);
     }
 
@@ -576,10 +575,10 @@ contract ArchitexLaunchpadTest is Test {
         IArchitexPair(pairAddr).sync();
 
         // Now graduate — must work (direct mint is immune to sync)
-        usdc.mint(alice, 10_000e6);
+        usdc.mint(alice, 30_000e6);
         vm.prank(alice); usdc.approve(address(pad), type(uint256).max);
         vm.prank(alice);
-        pad.buy(token, 10_000e6, 0, alice);
+        pad.buy(token, 30_000e6, 0, alice);
         assertTrue(pad.curves(token).graduated);
         assertGt(IArchitexPair(pairAddr).totalSupply(), 0);
     }
@@ -593,10 +592,10 @@ contract ArchitexLaunchpadTest is Test {
         address token = pad.createToken("ExactCoin", "EXACT", "ipfs://e", 0, 0);
 
         // Buy most of the curve first
-        usdc.mint(alice, 9_000e6);
+        usdc.mint(alice, 26_000e6);
         vm.prank(alice); usdc.approve(address(pad), type(uint256).max);
         vm.prank(alice);
-        pad.buy(token, 8_000e6, 0, alice);
+        pad.buy(token, 24_000e6, 0, alice);
 
         IArchitexLaunchpad.Curve memory c = pad.curves(token);
         assertFalse(c.graduated);
@@ -956,7 +955,7 @@ contract LaunchpadInvariantTest is Test {
     address alice  = makeAddr("alice");
     address bob    = makeAddr("bob");
 
-    uint256 constant VIRTUAL_USDC_0 = 2_916_666_667;
+    uint256 constant VIRTUAL_USDC_0 = 8_333_333_333;
     uint256 constant CURVE_SUPPLY   = 800_000_000e18;
 
     function setUp() public {

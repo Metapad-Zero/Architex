@@ -11,7 +11,7 @@ import "../interfaces/IArchitexPair.sol";
 import "../interfaces/ILaunchToken.sol";
 import "./LaunchToken.sol";
 
-/// @title ArchitexLaunchpad v1.1
+/// @title ArchitexLaunchpad v1.2
 /// @notice Bonding-curve token launches that graduate into Architex AMM pools.
 ///
 /// Each token gets a constant-product virtual reserve curve:
@@ -49,7 +49,11 @@ contract ArchitexLaunchpad is IArchitexLaunchpad, ReentrancyGuard {
     /// @inheritdoc IArchitexLaunchpad
     uint256 public constant VIRTUAL_TOKENS_0 = 1_066_666_667e18;
     /// @inheritdoc IArchitexLaunchpad
-    uint256 public constant VIRTUAL_USDC_0 = 2_916_666_667;
+    /// @dev Sets the scale of every curve. A curve raises 3x this (the virtual token reserve falls to a
+    ///      quarter as the 800M sell, so virtual USDC quadruples): 25,000 USDC, which opens the pool at
+    ///      25,000 USDC x 200M tokens. v1.1 used 2_916_666_667 (8,750 USDC); the owner judged that pool too
+    ///      thin. The shape is unchanged: a 16x price rise, from a 6,250 to a 100,000 USDC market cap.
+    uint256 public constant VIRTUAL_USDC_0 = 8_333_333_333;
     /// @inheritdoc IArchitexLaunchpad
     uint256 public constant FEE_BPS = 50;
     /// @inheritdoc IArchitexLaunchpad

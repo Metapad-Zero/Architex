@@ -71,9 +71,10 @@ function seedLaunch(
 }
 
 function initialStore(): FixtureStore {
-  const mid = stateAfter(2_000n * USDC)
-  const high = stateAfter(7_000n * USDC)
-  const low = stateAfter(50n * USDC)
+  // Scaled to a 25,000 USDC curve: about half sold, nearly sold out, and barely started.
+  const mid = stateAfter(5_700n * USDC)
+  const high = stateAfter(20_000n * USDC)
+  const low = stateAfter(150n * USDC)
   const done = quoteBuy(INITIAL_CURVE, 1_000_000n * USDC)
   const launches: FixtureLaunch[] = [
     seedLaunch(addr(1), 'Doge on Arc', 'DOGE', 'https://example.com/doge.png', mid, false, NOW - 3_600n),
@@ -84,7 +85,7 @@ function initialStore(): FixtureStore {
     seedLaunch(addr(6), 'Fresh mint', 'MINT', 'https://example.com/mint.png', INITIAL_CURVE, false, NOW - 30n),
   ]
   const trades = new Map<string, LaunchTrade[]>()
-  const dogeBuy = quoteBuy(INITIAL_CURVE, 2_000n * USDC)
+  const dogeBuy = quoteBuy(INITIAL_CURVE, 5_700n * USDC)
   trades.set(addr(1).toLowerCase(), [
     {
       trader: CREATOR,

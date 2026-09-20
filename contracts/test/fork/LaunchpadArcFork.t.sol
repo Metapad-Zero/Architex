@@ -99,16 +99,16 @@ contract LaunchpadArcForkTest is Test {
         IArchitexPair pair = IArchitexPair(pad.curves(token).pair);
 
         vm.prank(bob);
-        (uint256 tokensOut, uint256 spent) = pad.buy(token, 10_000e6, 0, bob);
+        (uint256 tokensOut, uint256 spent) = pad.buy(token, 30_000e6, 0, bob);
         assertEq(tokensOut, CURVE_SUPPLY);
-        assertEq(spent, 8793969841);
+        assertEq(spent, 25125628109);
         assertTrue(pad.curves(token).graduated);
 
-        assertEq(usdc.balanceOf(address(pair)), 8749999991);
+        assertEq(usdc.balanceOf(address(pair)), 24999999968);
         assertEq(IERC20(token).balanceOf(address(pair)), POOL_SUPPLY);
         (uint112 r0, uint112 r1,) = pair.getReserves();
         (uint256 rUsdc, uint256 rToken) = pair.token0() == address(usdc) ? (r0, r1) : (r1, r0);
-        assertEq(rUsdc, 8749999991, "reserves synced to the seed");
+        assertEq(rUsdc, 24999999968, "reserves synced to the seed");
         assertEq(rToken, POOL_SUPPLY);
         assertEq(pair.balanceOf(DEAD), pair.totalSupply(), "every LP unit is locked");
         assertEq(usdc.balanceOf(address(pad)), pad.pendingFees(), "only fees remain");
@@ -117,7 +117,7 @@ contract LaunchpadArcForkTest is Test {
     function test_fork_graduatedPoolTradesThroughTheDeployedRouter() public onlyFork {
         address token = _create();
         vm.prank(bob);
-        pad.buy(token, 10_000e6, 0, bob);
+        pad.buy(token, 30_000e6, 0, bob);
 
         address[] memory buyPath = new address[](2);
         buyPath[0] = address(usdc);
@@ -170,7 +170,7 @@ contract LaunchpadArcForkTest is Test {
         address token = _create();
         vm.startPrank(alice);
         (uint256 tokens,) = pad.buy(token, 100e6, 0, alice);
-        assertEq(tokens, 35188152739604558463877487);
+        assertEq(tokens, 12585726430898500955823408);
         uint256 out = pad.sell(token, tokens, 0, alice);
         vm.stopPrank();
         assertEq(out, 99002499);

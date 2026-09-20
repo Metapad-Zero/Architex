@@ -6,7 +6,7 @@ export const NAME_MAX_BYTES = 32
 export const SYMBOL_MAX_BYTES = 10
 export const METADATA_MAX_BYTES = 256
 export const PAGE_SIZE = 50n
-export const GRADUATES_AT_USD = '$35,000'
+export const GRADUATES_AT_USD = '$100,000'
 
 export interface LaunchRecord {
   token: Address

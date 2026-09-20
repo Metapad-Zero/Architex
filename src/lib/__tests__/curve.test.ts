@@ -14,14 +14,14 @@ function stream(seed: number) {
 }
 
 describe('bonding curve', () => {
-  test('opens near a $2,187 market cap and a first $100 buys about 3.5% of supply', () => {
-    expect(marketCap(INITIAL_CURVE)).toBe(2_187_499_999n)
+  test('opens near a $6,250 market cap and a first $100 buys about 1.26% of supply', () => {
+    expect(marketCap(INITIAL_CURVE)).toBe(6_249_999_997n)
     const quote = quoteBuy(INITIAL_CURVE, 100n * USDC)
     expect(quote.fee).toBe(500_000n)
     expect(quote.usdcSpent).toBe(100n * USDC)
     expect(quote.graduates).toBe(false)
     const percentOfSupplyX1000 = (quote.tokensOut * 100_000n) / CURVE.TOTAL_SUPPLY
-    expect(percentOfSupplyX1000 > 3_400n && percentOfSupplyX1000 < 3_600n).toBe(true)
+    expect(percentOfSupplyX1000 > 1_200n && percentOfSupplyX1000 < 1_300n).toBe(true)
   })
 
   test('the buy that sells out fills exactly the remainder and is charged only for it', () => {
@@ -29,16 +29,16 @@ describe('bonding curve', () => {
     expect(quote.tokensOut).toBe(CURVE.CURVE_SUPPLY)
     expect(quote.graduates).toBe(true)
     expect(quote.next.tokensSold).toBe(CURVE.CURVE_SUPPLY)
-    // about 8,750 USDC raised plus the 0.5% fee on top, nowhere near the 1,000,000 offered
-    expect(quote.usdcSpent > 8_793n * USDC && quote.usdcSpent < 8_795n * USDC).toBe(true)
-    expect(realUsdc(quote.next) > 8_749n * USDC && realUsdc(quote.next) <= 8_750n * USDC).toBe(true)
+    // about 25,000 USDC raised plus the 0.5% fee on top, nowhere near the 1,000,000 offered
+    expect(quote.usdcSpent > 25_125n * USDC && quote.usdcSpent < 25_126n * USDC).toBe(true)
+    expect(realUsdc(quote.next) > 24_999n * USDC && realUsdc(quote.next) <= 25_000n * USDC).toBe(true)
     expect(progressBps(quote.next)).toBe(10_000n)
   })
 
-  test('graduation lands on a $35,000 market cap and the pool opens at the same price', () => {
+  test('graduation lands on a $100,000 market cap and the pool opens at the same price', () => {
     const end = quoteBuy(INITIAL_CURVE, 1_000_000n * USDC).next
     const cap = marketCap(end)
-    expect(cap > 34_999n * USDC && cap < 35_001n * USDC).toBe(true)
+    expect(cap > 99_999n * USDC && cap < 100_001n * USDC).toBe(true)
     // pool price = raised USDC / POOL_SUPPLY, compared with the curve's final spot price
     const poolPrice = (realUsdc(end) * 10n ** 36n) / CURVE.POOL_SUPPLY
     const curvePrice = spotPrice(end)
@@ -98,8 +98,8 @@ describe('bonding curve', () => {
 
   test('the smallest sell-out buy is never charged more than it offered', () => {
     // walk down to the smallest input that still sells out the whole curve
-    let low = 8_000n * USDC
-    let high = 9_000n * USDC
+    let low = 25_000n * USDC
+    let high = 26_000n * USDC
     while (high - low > 1n) {
       const mid = (low + high) / 2n
       if (quoteBuy(INITIAL_CURVE, mid).graduates) high = mid

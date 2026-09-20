@@ -40,7 +40,7 @@ other tabs. Lazy-load the whole view like `PoolsView` (keep the entry bundle whe
    Market cap · Sold (a flat ruled meter + "412M / 800M") · Age. Graduated rows say "Graduated" and
    link to `#swap?in=USDC&out=<token>`. Empty state: "No launches yet. Create the first token."
 2. **Detail**: two columns from 640px (facts left, trade sheet right), one column below.
-   Facts as `receipt-lines`: Price · Market cap · Sold · Raised · Graduates at $35,000 · Creator ·
+   Facts as `receipt-lines`: Price · Market cap · Sold · Raised · Graduates at $100,000 · Creator ·
    Contract (ArcScan links). The meter is information, not decoration: one 8px ruled bar, ink fill,
    no animation beyond width. Trade sheet = the swap sheet's grammar: Buy | Sell `choice-button`s,
    `AmountField`, receipt (You receive · Price impact · Fee 0.50% · Minimum received), primary button

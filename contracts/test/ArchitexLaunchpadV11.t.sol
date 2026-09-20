@@ -133,7 +133,7 @@ contract AccountingHandler is Test {
 }
 
 contract LaunchpadAccountingInvariant is Test {
-    uint256 constant VIRTUAL_USDC_0 = 2_916_666_667;
+    uint256 constant VIRTUAL_USDC_0 = 8_333_333_333;
     uint256 constant VIRTUAL_TOKENS_0 = 1_066_666_667e18;
 
     BlockableUSDC usdc;
@@ -169,7 +169,7 @@ contract LaunchpadAccountingInvariant is Test {
 contract ArchitexLaunchpadV11Test is Test {
     uint256 constant CURVE_SUPPLY = 800_000_000e18;
     uint256 constant POOL_SUPPLY = 200_000_000e18;
-    uint256 constant VIRTUAL_USDC_0 = 2_916_666_667;
+    uint256 constant VIRTUAL_USDC_0 = 8_333_333_333;
     uint256 constant VIRTUAL_TOKENS_0 = 1_066_666_667e18;
     address constant DEAD = 0x000000000000000000000000000000000000dEaD;
 
@@ -221,8 +221,8 @@ contract ArchitexLaunchpadV11Test is Test {
 
     function test_vector_start() public {
         address token = _create();
-        assertEq(pad.spotPrice(token), 2734374999458007812);
-        assertEq(pad.marketCap(token), 2187499999);
+        assertEq(pad.spotPrice(token), 7812499997246093750);
+        assertEq(pad.marketCap(token), 6249999997);
         assertEq(pad.progressBps(token), 0);
     }
 
@@ -231,7 +231,7 @@ contract ArchitexLaunchpadV11Test is Test {
         (uint256 qTokens, uint256 qFee, uint256 qSpent, bool qGraduates) = pad.quoteBuy(token, 100_000_000);
         vm.prank(alice);
         (uint256 tokensOut, uint256 spent) = pad.buy(token, 100_000_000, 0, alice);
-        assertEq(tokensOut, 35188152739604558463877487);
+        assertEq(tokensOut, 12585726430898500955823408);
         assertEq(spent, 100_000_000);
         assertEq(pad.pendingFees(), 500_000);
         assertEq(qTokens, tokensOut);
@@ -239,8 +239,8 @@ contract ArchitexLaunchpadV11Test is Test {
         assertEq(qSpent, spent);
         assertFalse(qGraduates);
         IArchitexLaunchpad.Curve memory c = pad.curves(token);
-        assertEq(c.virtualUsdc, 3016166667);
-        assertEq(c.virtualTokens, 1031478514260395441536122513);
+        assertEq(c.virtualUsdc, 8432833333);
+        assertEq(c.virtualTokens, 1054080940569101499044176592);
 
         (uint256 qOut, uint256 qSellFee) = pad.quoteSell(token, tokensOut);
         vm.prank(alice);
@@ -259,35 +259,35 @@ contract ArchitexLaunchpadV11Test is Test {
         vm.prank(alice);
         (uint256 tokensOut, uint256 spent) = pad.buy(token, 1_000_000_000_000, 0, alice);
         assertEq(tokensOut, CURVE_SUPPLY);
-        assertEq(spent, 8793969841);
-        assertEq(before - usdc.balanceOf(alice), 8793969841, "pulled exactly usdcSpent");
-        assertEq(pad.pendingFees(), 43969850);
+        assertEq(spent, 25125628109);
+        assertEq(before - usdc.balanceOf(alice), 25125628109, "pulled exactly usdcSpent");
+        assertEq(pad.pendingFees(), 125628141);
         IArchitexLaunchpad.Curve memory c = pad.curves(token);
         assertTrue(c.graduated);
-        assertEq(c.virtualUsdc, 11666666658);
-        assertEq(usdc.balanceOf(c.pair), 8749999991, "usdcSeeded");
+        assertEq(c.virtualUsdc, 33333333301);
+        assertEq(usdc.balanceOf(c.pair), 24999999968, "usdcSeeded");
         assertEq(IERC20(token).balanceOf(c.pair), POOL_SUPPLY);
         // The views keep answering after graduation with the curve's final numbers.
-        assertEq(pad.marketCap(token), 34999999930);
-        assertEq(pad.spotPrice(token), 43749999912812500108);
+        assertEq(pad.marketCap(token), 99999999778);
+        assertEq(pad.spotPrice(token), 124999999722500000346);
         assertEq(pad.progressBps(token), 10_000);
     }
 
     function test_vector_V4_smallestSellOutInput() public {
         address token = _create();
-        (,,, bool graduatesOneLess) = pad.quoteBuy(token, 8793969840);
+        (,,, bool graduatesOneLess) = pad.quoteBuy(token, 25125628108);
         assertFalse(graduatesOneLess);
-        (uint256 tokensOut,, uint256 spent, bool graduates) = pad.quoteBuy(token, 8793969841);
+        (uint256 tokensOut,, uint256 spent, bool graduates) = pad.quoteBuy(token, 25125628109);
         assertTrue(graduates);
         assertEq(tokensOut, CURVE_SUPPLY);
-        assertEq(spent, 8793969841);
+        assertEq(spent, 25125628109);
     }
 
     function test_vector_V5_dust() public {
         address token = _create();
         (uint256 tokensOut, uint256 fee,,) = pad.quoteBuy(token, 199);
         assertEq(fee, 1);
-        assertEq(tokensOut, 72411423670080333291);
+        assertEq(tokensOut, 25343999406760334071);
         vm.expectRevert(IArchitexLaunchpad.ZeroAmount.selector);
         pad.quoteBuy(token, 1);
     }
@@ -358,7 +358,7 @@ contract ArchitexLaunchpadV11Test is Test {
         vm.prank(alice);
         pad.buy(a, 1_000_000e6, 0, alice);
         assertTrue(pad.curves(a).graduated);
-        assertEq(usdc.balanceOf(pad.curves(a).pair), 8749999991, "A's pool got only A's raise");
+        assertEq(usdc.balanceOf(pad.curves(a).pair), 24999999968, "A's pool got only A's raise");
         assertEq(_realUsdc(b), floatB, "B's float untouched");
         assertEq(usdc.balanceOf(address(pad)), pad.pendingFees() + floatB);
 
@@ -376,7 +376,7 @@ contract ArchitexLaunchpadV11Test is Test {
     function test_createTokenThatBuysOutTheWholeCurve() public {
         vm.prank(alice);
         uint256 gasBefore = gasleft();
-        address token = pad.createToken("AllIn", "ALL", "", 10_000e6, CURVE_SUPPLY);
+        address token = pad.createToken("AllIn", "ALL", "", 30_000e6, CURVE_SUPPLY);
         uint256 gasUsed = gasBefore - gasleft();
         emit log_named_uint("gas: createToken + createPair + sell-out + graduation", gasUsed);
         assertLt(gasUsed, 30_000_000);
@@ -411,7 +411,7 @@ contract ArchitexLaunchpadV11Test is Test {
         vm.prank(alice);
         pad.buy(token, 1_000_000e6, 0, alice);
         assertTrue(pad.curves(token).graduated);
-        assertEq(usdc.balanceOf(pair), 8749999991 + 1_000e6);
+        assertEq(usdc.balanceOf(pair), 24999999968 + 1_000e6);
         assertGt(IArchitexPair(pair).balanceOf(DEAD), 1000);
     }
 
@@ -578,18 +578,18 @@ contract ArchitexLaunchpadV11Test is Test {
         address below = _create();
         uint256 before = usdc.balanceOf(alice);
         vm.prank(alice);
-        (uint256 tokensBelow, uint256 spentBelow) = pad.buy(below, 8793969840, 0, alice);
-        assertEq(spentBelow, 8793969840);
-        assertEq(before - usdc.balanceOf(alice), 8793969840);
+        (uint256 tokensBelow, uint256 spentBelow) = pad.buy(below, 25125628108, 0, alice);
+        assertEq(spentBelow, 25125628108);
+        assertEq(before - usdc.balanceOf(alice), 25125628108);
         assertLt(tokensBelow, CURVE_SUPPLY);
         assertFalse(pad.curves(below).graduated);
 
         address at = _create();
         before = usdc.balanceOf(bob);
         vm.prank(bob);
-        (uint256 tokensAt, uint256 spentAt) = pad.buy(at, 8793969841, 0, bob);
-        assertEq(spentAt, 8793969841);
-        assertEq(before - usdc.balanceOf(bob), 8793969841);
+        (uint256 tokensAt, uint256 spentAt) = pad.buy(at, 25125628109, 0, bob);
+        assertEq(spentAt, 25125628109);
+        assertEq(before - usdc.balanceOf(bob), 25125628109);
         assertEq(tokensAt, CURVE_SUPPLY);
         assertTrue(pad.curves(at).graduated);
     }
@@ -598,7 +598,7 @@ contract ArchitexLaunchpadV11Test is Test {
         address token = _create();
         vm.prank(alice);
         (uint256 tokensOut, uint256 spent) = pad.buy(token, 199, 0, alice);
-        assertEq(tokensOut, 72411423670080333291);
+        assertEq(tokensOut, 25343999406760334071);
         assertEq(spent, 199);
         assertEq(pad.pendingFees(), 1);
         vm.prank(alice);
@@ -662,19 +662,19 @@ contract ArchitexLaunchpadV11Test is Test {
         vm.prank(setter);
         pad.setLaunchFee(5e6);
         vm.prank(alice);
-        address token = pad.createToken("Paid", "PAID", "", 10_000e6, CURVE_SUPPLY);
+        address token = pad.createToken("Paid", "PAID", "", 30_000e6, CURVE_SUPPLY);
         assertTrue(pad.curves(token).graduated);
-        assertEq(pad.pendingFees(), 5e6 + 43969850);
+        assertEq(pad.pendingFees(), 5e6 + 125628141);
         assertEq(usdc.balanceOf(address(pad)), pad.pendingFees(), "after graduation only fees remain");
-        assertEq(pad.collectFees(), 5e6 + 43969850);
-        assertEq(usdc.balanceOf(feeTo), 5e6 + 43969850);
+        assertEq(pad.collectFees(), 5e6 + 125628141);
+        assertEq(usdc.balanceOf(feeTo), 5e6 + 125628141);
         assertEq(usdc.balanceOf(address(pad)), 0);
     }
 
     function test_allLiquidityIsLockedAndGasIsBounded() public {
         vm.prank(alice);
         uint256 gasBefore = gasleft();
-        address token = pad.createToken("Gas", "GAS", "", 10_000e6, CURVE_SUPPLY);
+        address token = pad.createToken("Gas", "GAS", "", 30_000e6, CURVE_SUPPLY);
         uint256 gasUsed = gasBefore - gasleft();
         assertLt(gasUsed, 3_500_000, "create + pair + sell-out + graduation");
         IArchitexPair pair = IArchitexPair(pad.curves(token).pair);

@@ -2,7 +2,7 @@
 
 Bonding-curve token launches that graduate into Architex pools. Adapted from the owner's draft
 (`docs/launchpad/MemeDEX-design.md`): same economics (1B fixed supply, 800M on the curve, graduation at
-a $35,000 market cap measured on the 800M, 0.5% platform fee, flat launch fee), but the AMM is the
+a $100,000 market cap measured on the 800M (v1.2; v1.1 graduated at $35,000), 0.5% platform fee, flat launch fee), but the AMM is the
 existing Architex factory/pair instead of a second pool implementation. LP staking / epoch fee
 distribution and dynamic AMM fees are **out of scope for v1**.
 
@@ -24,7 +24,7 @@ is built against it. Solidity 0.8.28, OpenZeppelin 5.1.0, EVM `paris`, `via_ir`,
 | `CURVE_SUPPLY` | 800_000_000e18 (sold on the curve) |
 | `POOL_SUPPLY` | 200_000_000e18 (seeds the Architex pair at graduation) |
 | `VIRTUAL_TOKENS_0` | 1_066_666_667e18 |
-| `VIRTUAL_USDC_0` | 2_916_666_667 (2,916.666667 USDC, 6 decimals) |
+| `VIRTUAL_USDC_0` | 8_333_333_333 (8,333.333333 USDC, 6 decimals). Sets the scale: a curve raises 3× this. v1.1 used 2_916_666_667 (an 8,750 USDC raise), which the owner judged too thin a pool |
 | `FEE_BPS` | 50 (0.5%), `MAX_LAUNCH_FEE` = 100e6 |
 | `DEAD` | 0x000000000000000000000000000000000000dEaD |
 
@@ -59,8 +59,9 @@ Spot price = `virtualUsdc / virtualTokens`.
   Never read `balanceOf` or `address(this).balance` for accounting; every amount comes from the
   curve's own stored numbers. No `receive`/`fallback`.
 - Reference vectors (must match to the unit; they come from `src/lib/curve.ts`): see "Test vectors".
-- With these constants, selling out the curve ends at price 0.00004375 USDC (= $35,000 on 800M),
-  having raised ≈ 8,750 USDC, and `8,750 / 200M` is the same price: the pool opens where the curve ends.
+- With these constants a curve opens at a $6,250 market cap and selling it out ends at price 0.000125 USDC
+  (= $100,000 on 800M, a 16× rise), having raised ≈ 25,000 USDC, and `25,000 / 200M` is the same price:
+  the pool opens where the curve ends, holding 25,000 USDC × 200M tokens.
 
 ## Lifecycle
 
@@ -122,7 +123,7 @@ enforced and rendering rules live in `FRONTEND-BRIEF.md`.
 
 ```text
 spotPrice   = virtualUsdc * 1e36 / virtualTokens          // USDC units (6 dec) per WHOLE token, 1e18-scaled
-marketCap   = virtualUsdc * CURVE_SUPPLY / virtualTokens  // USDC 6 dec; about 35_000e6 at graduation
+marketCap   = virtualUsdc * CURVE_SUPPLY / virtualTokens  // USDC 6 dec; about 100_000e6 at graduation
 progressBps = tokensSold * 10_000 / CURVE_SUPPLY          // multiply first
 ```
 
@@ -134,12 +135,12 @@ the event are post-trade.
 
 | Case | Input | Expected |
 |---|---|---|
-| start | — | `spotPrice` 2734374999458007812, `marketCap` 2187499999 |
-| V1 buy from start | `usdcIn` 100000000 | `tokensOut` 35188152739604558463877487, `fee` 500000, `usdcSpent` 100000000, then `virtualUsdc` 3016166667, `virtualTokens` 1031478514260395441536122513 |
-| V3 sell all of V1's tokens | `tokensIn` 35188152739604558463877487 | gross 99499999, `fee` 497500, `usdcOut` 99002499 |
-| V2 buy from start, sells out | `usdcIn` 1000000000000 | `tokensOut` 800000000000000000000000000, `usdcSpent` 8793969841, `fee` 43969850, graduates, `usdcSeeded` 8749999991, `marketCap` 34999999930, `spotPrice` 43749999912812500108 |
-| V4 smallest sell-out input | `usdcIn` 8793969841 | graduates with `usdcSpent` 8793969841; `usdcIn` 8793969840 does not graduate |
-| V5 dust | `usdcIn` 199 | `fee` 1, `tokensOut` 72411423670080333291; `usdcIn` 1 reverts `ZeroAmount` |
+| start | — | `spotPrice` 7812499997246093750, `marketCap` 6249999997 |
+| V1 buy from start | `usdcIn` 100000000 | `tokensOut` 12585726430898500955823408, `fee` 500000, `usdcSpent` 100000000, then `virtualUsdc` 8432833333, `virtualTokens` 1054080940569101499044176592 |
+| V3 sell all of V1's tokens | `tokensIn` 12585726430898500955823408 | gross 99499999, `fee` 497500, `usdcOut` 99002499 |
+| V2 buy from start, sells out | `usdcIn` 1000000000000 | `tokensOut` 800000000000000000000000000, `usdcSpent` 25125628109, `fee` 125628141, graduates, `usdcSeeded` 24999999968, `marketCap` 99999999778, `spotPrice` 124999999722500000346 |
+| V4 smallest sell-out input | `usdcIn` 25125628109 | graduates with `usdcSpent` 25125628109; `usdcIn` 25125628108 does not graduate |
+| V5 dust | `usdcIn` 199 | `fee` 1, `tokensOut` 25343999406760334071; `usdcIn` 1 reverts `ZeroAmount` |
 
 ## Deployment
 
