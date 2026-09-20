@@ -69,7 +69,7 @@ export function LaunchDetail({ token, onBack }: LaunchDetailProps) {
   }
 
   const facts = launchFacts(launch)
-  const about = details.data?.metadata
+  const about = details.metadata
   const links = [['Website', about?.external_link], ['X', about?.twitter], ['Telegram', about?.telegram]].flatMap(([label, url]) => (label && url ? [[label, url] as const] : []))
 
   return (

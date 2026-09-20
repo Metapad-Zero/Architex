@@ -18,7 +18,7 @@ export function LaunchTokenMark({ token, uri, className }: { token: Pick<Token, 
     return () => observer.disconnect()
   }, [seen])
   const details = useTokenMetadata(uri, seen)
-  const imageUrl = details.data?.imageUrl
+  const imageUrl = details.imageUrl
   // The stamp holds the place, so a slow or missing image never leaves a hole. The image is a `blob:` URL of
   // bytes already checked against their address; nothing is ever loaded from a host the creator chose.
   return (
