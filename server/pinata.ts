@@ -19,9 +19,10 @@ export interface PinataListedFile {
 }
 
 async function failure(response: Response, what: string): Promise<Error> {
-  // The body can name the account; keep it out of anything a visitor might see.
-  await response.body?.cancel()
-  return new Error(`${what} failed with status ${response.status}`)
+  // The reason goes into the error for the server's own log. Callers never pass an error's text on to a
+  // visitor (the service answers with a fixed sentence), because the body can describe the account.
+  const reason = (await response.text().catch(() => '')).replace(/\s+/g, ' ').slice(0, 300)
+  return new Error(`${what} failed with status ${response.status}${reason ? `: ${reason}` : ''}`)
 }
 
 export function pinata(jwt: string): Pinner & { list(labels: Record<string, string>, limit: number): Promise<PinataListedFile[]> } {
