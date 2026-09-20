@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
+import { isHiddenDetails } from '../lib/hiddenDetails'
 import { fetchVerified, verifiedImageUrl } from '../lib/ipfs'
 import { cidOfIpfsUri, parseMetadataJson, type TokenMetadata } from '../lib/tokenMetadata'
 
@@ -18,7 +19,8 @@ export interface TokenDetails {
  * for the picture, which on a first-ever view can take seconds to arrive.
  */
 export function useTokenMetadata(uri: string | undefined, enabled = true): TokenDetails {
-  const cid = uri ? cidOfIpfsUri(uri) : undefined
+  const address = uri ? cidOfIpfsUri(uri) : undefined
+  const cid = address && !isHiddenDetails(address) ? address : undefined
   const file = useQuery<TokenMetadata | null>({
     queryKey: ['tokenMetadata', cid],
     enabled: enabled && Boolean(cid),

@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
-import { cidForBytes } from '../../src/lib/cid'
+import { cidForBytes, isVerifiableCid } from '../../src/lib/cid'
+import { HIDDEN_DETAILS } from '../../src/lib/hiddenDetails'
 import { buildMetadataJson } from '../../src/lib/tokenMetadata'
 import { createIpfsProxy } from '../ipfsProxy'
 
@@ -54,6 +55,10 @@ describe('serving a launch\'s files from our own domain', () => {
 })
 
 describe('what it will not serve', () => {
+  test('the hide list holds only addresses the app could otherwise show', () => {
+    for (const cid of HIDDEN_DETAILS) expect(isVerifiableCid(cid)).toBe(true)
+  })
+
   test('an address it cannot verify, without asking anyone', async () => {
     const { fetcher, asked } = gateway({})
     const serve = createIpfsProxy({ isOurs: yes, sources: ['https://a.example'], fetcher })
@@ -76,6 +81,14 @@ describe('what it will not serve', () => {
     const cid = await cidForBytes(PNG)
     const { fetcher, asked } = gateway({ [`https://a.example/ipfs/${cid}`]: PNG })
     const response = await createIpfsProxy({ isOurs: () => Promise.reject(new Error('lookup down')), sources: ['https://a.example'], fetcher })(cid)
+    expect(response.status).toBe(404)
+    expect(asked).toHaveLength(0)
+  })
+
+  test('a file on the hide list, even though it is ours and a source has it', async () => {
+    const hidden = [...HIDDEN_DETAILS][0]
+    const { fetcher, asked } = gateway({ [`https://a.example/ipfs/${hidden}`]: PNG })
+    const response = await createIpfsProxy({ isOurs: yes, sources: ['https://a.example'], fetcher })(hidden)
     expect(response.status).toBe(404)
     expect(asked).toHaveLength(0)
   })

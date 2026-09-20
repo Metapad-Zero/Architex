@@ -48,28 +48,28 @@ describe('links a creator types', () => {
   })
 
   test('X handles: a name, an @name or a link, always stored as x.com', () => {
-    expect(cleanX('@architex')).toBe('https://x.com/architex')
-    expect(cleanX('architex')).toBe('https://x.com/architex')
-    expect(cleanX('https://twitter.com/architex/')).toBe('https://x.com/architex')
-    expect(cleanX('https://x.com/architex')).toBe('https://x.com/architex')
-    expect(cleanX('https://evil.example/architex')).toBe(undefined)
-    expect(cleanX('https://x.com/architex/status/1')).toBe(undefined)
+    expect(cleanX('@architexdex')).toBe('https://x.com/architexdex')
+    expect(cleanX('architexdex')).toBe('https://x.com/architexdex')
+    expect(cleanX('https://twitter.com/architexdex/')).toBe('https://x.com/architexdex')
+    expect(cleanX('https://x.com/architexdex')).toBe('https://x.com/architexdex')
+    expect(cleanX('https://evil.example/architexdex')).toBe(undefined)
+    expect(cleanX('https://x.com/architexdex/status/1')).toBe(undefined)
     expect(cleanX('a'.repeat(16))).toBe(undefined)
     expect(cleanX('bad handle')).toBe(undefined)
   })
 
   test('Telegram names', () => {
-    expect(cleanTelegram('@architex')).toBe('https://t.me/architex')
-    expect(cleanTelegram('https://t.me/architex_chat')).toBe('https://t.me/architex_chat')
+    expect(cleanTelegram('@examplegroup')).toBe('https://t.me/examplegroup')
+    expect(cleanTelegram('https://t.me/examplegroup_chat')).toBe('https://t.me/examplegroup_chat')
     expect(cleanTelegram('abc')).toBe(undefined) // too short for Telegram
     expect(cleanTelegram('https://t.me/+invitecode')).toBe(undefined)
-    expect(cleanTelegram('https://telegram.example/architex')).toBe(undefined)
+    expect(cleanTelegram('https://telegram.example/examplegroup')).toBe(undefined)
   })
 
   test('a link is labelled by where it really goes', () => {
     expect(linkLabel('https://www.example.com/about')).toBe('example.com')
-    expect(linkLabel('https://x.com/architex')).toBe('@architex')
-    expect(linkLabel('https://t.me/architex')).toBe('@architex')
+    expect(linkLabel('https://x.com/architexdex')).toBe('@architexdex')
+    expect(linkLabel('https://t.me/examplegroup')).toBe('@examplegroup')
   })
 })
 
@@ -88,9 +88,9 @@ describe('descriptions', () => {
 
 describe('writing the file', () => {
   test('the same details always give the same bytes, keys in one order, empty fields left out', () => {
-    const json = buildMetadataJson({ name: ' Smoke ', symbol: 'SMK', x: '@architex', description: 'A test.', imageCid: IMAGE_CID, website: 'example.com' })
+    const json = buildMetadataJson({ name: ' Smoke ', symbol: 'SMK', x: '@architexdex', description: 'A test.', imageCid: IMAGE_CID, website: 'example.com' })
     expect(json).toBe(
-      `{"name":"Smoke","symbol":"SMK","description":"A test.","image":"ipfs://${IMAGE_CID}","external_link":"https://example.com/","twitter":"https://x.com/architex"}`,
+      `{"name":"Smoke","symbol":"SMK","description":"A test.","image":"ipfs://${IMAGE_CID}","external_link":"https://example.com/","twitter":"https://x.com/architexdex"}`,
     )
     expect(buildMetadataJson({ name: 'Smoke', symbol: 'SMK' })).toBe('{"name":"Smoke","symbol":"SMK"}')
   })
@@ -106,29 +106,29 @@ describe('writing the file', () => {
     expect(() => buildMetadataJson({ name: 'A', symbol: 'A', website: 'javascript:alert(1)' })).toThrow('not valid')
     expect(metadataErrors({ name: 'A', symbol: 'A', website: 'javascript:alert(1)', x: 'not a handle', telegram: 'x', imageCid: 'Qm123' })).toEqual({
       website: 'Enter an https address, like example.com.',
-      x: 'Enter an X handle, like @architex.',
-      telegram: 'Enter a Telegram name, like @architex.',
+      x: 'Enter an X handle, like @architexdex.',
+      telegram: 'Enter a Telegram name, like @yourgroup.',
       image: 'That image could not be prepared. Try another file.',
     })
   })
 
   test('knows when there is nothing to save', () => {
     expect(hasMetadata({ name: 'A', symbol: 'A', description: '  ' })).toBe(false)
-    expect(hasMetadata({ name: 'A', symbol: 'A', telegram: '@architex' })).toBe(true)
+    expect(hasMetadata({ name: 'A', symbol: 'A', telegram: '@examplegroup' })).toBe(true)
   })
 })
 
 describe('reading a file written by a stranger', () => {
   test('reads back exactly what the writer wrote', () => {
-    const input = { name: 'Smoke', symbol: 'SMK', description: 'A test.', imageCid: IMAGE_CID, website: 'example.com', x: 'architex', telegram: 'architex' }
+    const input = { name: 'Smoke', symbol: 'SMK', description: 'A test.', imageCid: IMAGE_CID, website: 'example.com', x: 'architexdex', telegram: 'examplegroup' }
     expect(parseMetadataJson(bytes(buildMetadataJson(input)))).toEqual({
       name: 'Smoke',
       symbol: 'SMK',
       description: 'A test.',
       image: `ipfs://${IMAGE_CID}`,
       external_link: 'https://example.com/',
-      twitter: 'https://x.com/architex',
-      telegram: 'https://t.me/architex',
+      twitter: 'https://x.com/architexdex',
+      telegram: 'https://t.me/examplegroup',
     })
   })
 
@@ -145,7 +145,7 @@ describe('reading a file written by a stranger', () => {
           description: 'Fine.',
           image: 'https://tracker.example/pixel.png',
           external_link: 'javascript:alert(1)',
-          twitter: 'https://evil.example/architex',
+          twitter: 'https://evil.example/architexdex',
           telegram: { nested: true },
           unknown: '<script>alert(1)</script>',
         }),

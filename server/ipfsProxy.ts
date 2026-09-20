@@ -1,4 +1,5 @@
 import { MAX_BLOCK_BYTES, bytesMatchCid, isVerifiableCid } from '../src/lib/cid.js'
+import { isHiddenDetails } from '../src/lib/hiddenDetails.js'
 import { parseMetadataJson, sniffImageType } from '../src/lib/tokenMetadata.js'
 
 /**
@@ -12,7 +13,8 @@ import { parseMetadataJson, sniffImageType } from '../src/lib/tokenMetadata.js'
  * It is not a general IPFS proxy, which would let anyone serve anything from our domain:
  *   - only one-block addresses, which can be verified;
  *   - only files pinned through our own uploader (`isOurs`), so unpinning a file takes it down here too;
- *   - only what the app displays: a details file that parses, or a PNG, JPEG, WebP or GIF by its bytes.
+ *   - only what the app displays: a details file that parses, or a PNG, JPEG, WebP or GIF by its bytes;
+ *   - nothing on the hide list (src/lib/hiddenDetails.ts).
  * Everything is sent `nosniff` under a sandboxing policy, so nothing served here can run as a page.
  */
 export interface IpfsProxyOptions {
@@ -58,6 +60,7 @@ export function createIpfsProxy(options: IpfsProxyOptions) {
   const fetcher = options.fetcher ?? fetch
   return async function serve(cid: string): Promise<Response> {
     if (!isVerifiableCid(cid)) return refuse(400, 'Not an address this server can verify.')
+    if (isHiddenDetails(cid)) return refuse(404, 'Not found.')
     if (!(await options.isOurs(cid).catch(() => false))) return refuse(404, 'Not found.')
 
     for (const source of options.sources) {

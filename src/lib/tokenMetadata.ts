@@ -124,8 +124,8 @@ export function metadataErrors(input: MetadataInput): MetadataErrors {
   const errors: MetadataErrors = {}
   if (input.description?.trim() && !cleanDescription(input.description)) errors.description = `Keep the description to ${METADATA_LIMITS.descriptionChars} characters.`
   if (input.website?.trim() && !cleanWebsite(input.website)) errors.website = 'Enter an https address, like example.com.'
-  if (input.x?.trim() && !cleanX(input.x)) errors.x = 'Enter an X handle, like @architex.'
-  if (input.telegram?.trim() && !cleanTelegram(input.telegram)) errors.telegram = 'Enter a Telegram name, like @architex.'
+  if (input.x?.trim() && !cleanX(input.x)) errors.x = 'Enter an X handle, like @architexdex.'
+  if (input.telegram?.trim() && !cleanTelegram(input.telegram)) errors.telegram = 'Enter a Telegram name, like @yourgroup.'
   if (input.imageCid && !isVerifiableCid(input.imageCid)) errors.image = 'That image could not be prepared. Try another file.'
   return errors
 }

@@ -34,7 +34,7 @@ function post(body: unknown, headers: Record<string, string> = {}) {
   })
 }
 
-const details = { name: 'Smoke', symbol: 'SMK', description: 'A test.', x: '@architex', image: base64(PNG) }
+const details = { name: 'Smoke', symbol: 'SMK', description: 'A test.', x: '@architexdex', image: base64(PNG) }
 
 describe('saving a launch\'s details', () => {
   test('pins the image, then a file that names it, and answers with a string that fits on-chain', async () => {
@@ -52,7 +52,7 @@ describe('saving a launch\'s details', () => {
     expect(image.labels).toEqual({ app: 'architex', kind: 'image' })
     expect(file.labels).toEqual({ app: 'architex', kind: 'metadata', image: answer.imageCid })
     expect(await bytesMatchCid(file.bytes, answer.cid)).toBe(true)
-    expect(parseMetadataJson(file.bytes)).toEqual({ name: 'Smoke', symbol: 'SMK', description: 'A test.', image: `ipfs://${answer.imageCid}`, twitter: 'https://x.com/architex' })
+    expect(parseMetadataJson(file.bytes)).toEqual({ name: 'Smoke', symbol: 'SMK', description: 'A test.', image: `ipfs://${answer.imageCid}`, twitter: 'https://x.com/architexdex' })
   })
 
   test('stores what it checked, not what it was sent', async () => {
