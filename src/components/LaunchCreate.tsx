@@ -1,4 +1,4 @@
-import { useMemo, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from 'react'
 import type { Address } from 'viem'
 import { useAccount, useSwitchChain } from 'wagmi'
 import { activeChain } from '../chain'
@@ -7,7 +7,12 @@ import { useCreateToken } from '../hooks/useCreateToken'
 import { useLaunch } from '../hooks/useLaunch'
 import { useSettings } from '../hooks/useSettings'
 import { formatAmount, parseAmount } from '../lib/format'
-import { METADATA_MAX_BYTES, NAME_MAX_BYTES, SYMBOL_MAX_BYTES, parseHttpsUrl, utf8ByteLength } from '../lib/launch'
+import { metadataStatus } from '../lib/ipfs'
+import { NAME_MAX_BYTES, SYMBOL_MAX_BYTES, utf8ByteLength } from '../lib/launch'
+import { prepareImage, type PreparedImage } from '../lib/prepareImage'
+import { saveTokenDetails } from '../lib/saveDetails'
+import { METADATA_LIMITS, hasMetadata, metadataErrors, type MetadataInput } from '../lib/tokenMetadata'
+import { GhostButton } from './GhostButton'
 import { PrimaryButton } from './PrimaryButton'
 import { TxStatus } from './TxStatus'
 
@@ -25,24 +30,44 @@ export function LaunchCreate({ onCreated }: LaunchCreateProps) {
   const { usdc, usdcBalance, usdcAllowance, refetch } = useLaunch(undefined)
   const [name, setName] = useState('')
   const [symbol, setSymbol] = useState('')
-  const [imageUrl, setImageUrl] = useState('')
+  const [description, setDescription] = useState('')
+  const [website, setWebsite] = useState('')
+  const [x, setX] = useState('')
+  const [telegram, setTelegram] = useState('')
+  const [image, setImage] = useState<PreparedImage>()
+  const [imageName, setImageName] = useState('')
+  const [imageProblem, setImageProblem] = useState<string>()
+  const [detailsEnabled, setDetailsEnabled] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [saveProblem, setSaveProblem] = useState<string>()
+  const fileInput = useRef<HTMLInputElement>(null)
+  // The same details are not pinned twice when the wallet prompt is cancelled and the creator tries again.
+  const saved = useRef<{ key: string; uri: string }>()
+
+  useEffect(() => {
+    let live = true
+    void metadataStatus().then((status) => live && setDetailsEnabled(status.enabled))
+    return () => {
+      live = false
+    }
+  }, [])
+  useEffect(() => () => {
+    if (image) URL.revokeObjectURL(image.previewUrl)
+  }, [image])
   const [firstBuy, setFirstBuy] = useState('')
   const [submitted, setSubmitted] = useState(false)
 
   const nameBytes = utf8ByteLength(name.trim())
   const symbolBytes = utf8ByteLength(symbol.trim())
-  const imageBytes = utf8ByteLength(imageUrl.trim())
   const nameError = name.trim() === '' || nameBytes < 1 || nameBytes > NAME_MAX_BYTES
     ? 'Name must be 1 to 32 bytes.'
     : undefined
   const symbolError = symbol.trim() === '' || symbolBytes < 1 || symbolBytes > SYMBOL_MAX_BYTES
     ? 'Symbol must be 1 to 10 bytes.'
     : undefined
-  const imageError = imageUrl.trim()
-    ? imageBytes > METADATA_MAX_BYTES
-      ? 'Image URL must be 256 bytes or fewer.'
-      : parseHttpsUrl(imageUrl) ? undefined : 'Image URL must be https.'
-    : undefined
+  const details: MetadataInput = { name: name.trim(), symbol: symbol.trim(), description, website, x, telegram }
+  const detailErrors = detailsEnabled ? metadataErrors(details) : {}
+  const wantsDetails = detailsEnabled && (Boolean(image) || hasMetadata(details))
 
   const initialBuyUsdc = useMemo(() => {
     try {
@@ -52,12 +77,12 @@ export function LaunchCreate({ onCreated }: LaunchCreateProps) {
     }
   }, [firstBuy, usdc.decimals])
 
-  const valid = !nameError && !symbolError && !imageError
+  const valid = !nameError && !symbolError && Object.keys(detailErrors).length === 0 && !imageProblem
 
   const create = useCreateToken({
     name: name.trim(),
     symbol: symbol.trim(),
-    metadataURI: imageUrl.trim(),
+    metadataURI: '',
     valid,
     initialBuyUsdc,
     slippageBps: settings.slippageBps,
@@ -82,7 +107,42 @@ export function LaunchCreate({ onCreated }: LaunchCreateProps) {
       return
     }
     if (!valid) return
-    await create.execute()
+    // Details are pinned at the last moment, on the press that creates the token, never on the approval press.
+    if (create.buttonState !== 'ready' || !wantsDetails) {
+      await create.execute()
+      return
+    }
+    setSaveProblem(undefined)
+    const key = JSON.stringify([details, image?.cid])
+    let uri = saved.current?.key === key ? saved.current.uri : undefined
+    if (!uri) {
+      setSaving(true)
+      try {
+        uri = await saveTokenDetails(details, image)
+        saved.current = { key, uri }
+      } catch (error) {
+        setSaveProblem(error instanceof Error ? error.message : 'The details could not be saved. Try again.')
+        return
+      } finally {
+        setSaving(false)
+      }
+    }
+    await create.execute(uri)
+  }
+
+  const pickImage = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+    setImageProblem(undefined)
+    try {
+      setImage(await prepareImage(file))
+      setImageName(file.name)
+    } catch (error) {
+      setImage(undefined)
+      setImageName('')
+      setImageProblem(error instanceof Error ? error.message : 'That image could not be read. Try another file.')
+    }
   }
 
   const receive = create.firstBuy ? `${formatAmount(create.firstBuy.tokensOut, 18)} ${symbol.trim() || 'TOKEN'}` : GHOST
@@ -136,25 +196,72 @@ export function LaunchCreate({ onCreated }: LaunchCreateProps) {
             {submitted && symbolError && <p id="launch-symbol-error" className="mt-2 text-sm text-loss" role="alert">{symbolError}</p>}
           </div>
 
-          <div>
-            <label className="block text-sm text-g500" htmlFor="launch-image">Image URL</label>
-            <div className="field-with-suffix mt-1">
-              <input
-                id="launch-image"
-                name="image"
-                type="url"
-                inputMode="url"
-                autoComplete="off"
-                placeholder="https://"
-                value={imageUrl}
-                onChange={(event) => setImageUrl(event.target.value)}
-                aria-invalid={submitted && Boolean(imageError)}
-                aria-describedby={submitted && imageError ? 'launch-image-error' : 'launch-image-hint'}
-              />
-            </div>
-            <p id="launch-image-hint" className="mt-2 text-xs leading-5 text-g500">Optional. Only https URLs are shown as images.</p>
-            {submitted && imageError && <p id="launch-image-error" className="mt-2 text-sm text-loss" role="alert">{imageError}</p>}
-          </div>
+          {detailsEnabled && (
+            <fieldset className="launch-details">
+              <legend className="text-sm font-semibold">Details</legend>
+              <p className="mt-1 text-xs leading-5 text-g500">All optional. They are stored on IPFS and cannot be changed after launch.</p>
+
+              <div className="mt-5">
+                <span className="block text-sm text-g500" id="launch-image-label">Image</span>
+                <div className="mt-2 flex min-w-0 items-center gap-3">
+                  {image && <img src={image.previewUrl} alt="" width={44} height={44} className="h-11 w-11 shrink-0 rounded border border-g300 object-cover" />}
+                  <input ref={fileInput} type="file" accept="image/png,image/jpeg,image/webp,image/gif" className="sr-only" tabIndex={-1} aria-hidden="true" onChange={(event) => void pickImage(event)} />
+                  <GhostButton type="button" aria-describedby="launch-image-label launch-image-hint" onClick={() => fileInput.current?.click()}>{image ? 'Change image' : 'Choose image'}</GhostButton>
+                  {image && (
+                    <>
+                      <span className="min-w-0 flex-1 truncate text-sm text-g500">{imageName}</span>
+                      <button type="button" className="shrink-0 text-sm underline" onClick={() => { setImage(undefined); setImageName('') }}>Remove</button>
+                    </>
+                  )}
+                </div>
+                <p id="launch-image-hint" className="mt-2 text-xs leading-5 text-g500">PNG, JPEG, WebP or GIF. Resized to 512px; location data in the photo is removed.</p>
+                {imageProblem && <p className="mt-2 text-sm text-loss" role="alert">{imageProblem}</p>}
+              </div>
+
+              <div className="mt-5">
+                <label className="block text-sm text-g500" htmlFor="launch-description">Description</label>
+                <div className="field-with-suffix mt-1 items-start">
+                  <textarea
+                    id="launch-description"
+                    name="description"
+                    rows={3}
+                    value={description}
+                    onChange={(event) => setDescription(event.target.value)}
+                    aria-invalid={submitted && Boolean(detailErrors.description)}
+                    aria-describedby={submitted && detailErrors.description ? 'launch-description-error' : undefined}
+                  />
+                  <span>{[...description.trim()].length}/{METADATA_LIMITS.descriptionChars}</span>
+                </div>
+                {submitted && detailErrors.description && <p id="launch-description-error" className="mt-2 text-sm text-loss" role="alert">{detailErrors.description}</p>}
+              </div>
+
+              {([
+                ['website', 'Website', 'example.com', website, setWebsite, 'url'],
+                ['x', 'X', '@handle', x, setX, 'text'],
+                ['telegram', 'Telegram', '@name', telegram, setTelegram, 'text'],
+              ] as const).map(([key, label, placeholder, value, setValue, mode]) => (
+                <div className="mt-5" key={key}>
+                  <label className="block text-sm text-g500" htmlFor={`launch-${key}`}>{label}</label>
+                  <div className="field-with-suffix mt-1">
+                    <input
+                      id={`launch-${key}`}
+                      name={key}
+                      inputMode={mode}
+                      autoComplete="off"
+                      autoCapitalize="none"
+                      spellCheck={false}
+                      placeholder={placeholder}
+                      value={value}
+                      onChange={(event) => setValue(event.target.value)}
+                      aria-invalid={submitted && Boolean(detailErrors[key])}
+                      aria-describedby={submitted && detailErrors[key] ? `launch-${key}-error` : undefined}
+                    />
+                  </div>
+                  {submitted && detailErrors[key] && <p id={`launch-${key}-error`} className="mt-2 text-sm text-loss" role="alert">{detailErrors[key]}</p>}
+                </div>
+              ))}
+            </fieldset>
+          )}
 
           <div>
             <label className="block text-sm text-g500" htmlFor="launch-first-buy">Your first buy</label>
@@ -191,11 +298,12 @@ export function LaunchCreate({ onCreated }: LaunchCreateProps) {
         <PrimaryButton
           type="submit"
           className="mt-6 w-full"
-          loading={create.isLoading}
-          disabled={create.isDisabled}
+          loading={create.isLoading || saving}
+          disabled={create.isDisabled || saving}
         >
-          {create.label}
+          {saving ? 'Saving details…' : create.label}
         </PrimaryButton>
+        {saveProblem && <p className="mt-3 text-sm text-loss" role="alert">{saveProblem}</p>}
         {create.hint && <p className="hint-line" role="status">{create.hint}</p>}
         <TxStatus status={create.txStatus} />
       </form>

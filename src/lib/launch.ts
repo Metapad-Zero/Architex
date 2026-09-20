@@ -46,19 +46,6 @@ export function utf8ByteLength(value: string): number {
   return new TextEncoder().encode(value).length
 }
 
-/** Image URLs are attacker-controlled; only https: may be loaded. */
-export function parseHttpsUrl(value: string): string | undefined {
-  const trimmed = value.trim()
-  if (!trimmed) return undefined
-  try {
-    const url = new URL(trimmed)
-    if (url.protocol !== 'https:') return undefined
-    return url.href
-  } catch {
-    return undefined
-  }
-}
-
 export function formatCurveSold(tokensSold: bigint): string {
   const whole = tokensSold / (10n ** 18n)
   const millions = whole / 1_000_000n

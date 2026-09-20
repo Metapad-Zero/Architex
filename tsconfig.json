@@ -31,6 +31,6 @@
       ]
     }
   },
-  "include": ["src", "scripts"],
+  "include": ["src", "scripts", "server", "api"],
   "exclude": ["scripts/compass-deploy.ts", "scripts/compass-deploy-helpers.ts", "scripts/seed-pools.ts"]
 }

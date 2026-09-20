@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { encodeFunctionData, getAddress, type Hex } from 'viem'
 import { launchpadAbi } from '../abi'
 import { explainRevert } from '../errors'
-import { formatCurveSold, parseHttpsUrl, soldLabel, utf8ByteLength } from '../launch'
+import { formatCurveSold, soldLabel, utf8ByteLength } from '../launch'
 import { describeLaunchpadCall } from '../signingIntent'
 import type { Token } from '../tokens'
 
@@ -31,14 +31,6 @@ describe('launchpad copy and validation', () => {
     expect(utf8ByteLength('DOGE')).toBe(4)
     expect(utf8ByteLength('é')).toBe(2)
     expect(utf8ByteLength('😀')).toBe(4)
-  })
-
-  test('only https URLs are accepted as images', () => {
-    expect(parseHttpsUrl('https://example.com/a.png')).toBe('https://example.com/a.png')
-    expect(parseHttpsUrl('http://example.com/a.png')).toBe(undefined)
-    expect(parseHttpsUrl('javascript:alert(1)')).toBe(undefined)
-    expect(parseHttpsUrl('<img src=x onerror=alert(1)>')).toBe(undefined)
-    expect(parseHttpsUrl('')).toBe(undefined)
   })
 
   test('formats sold as millions of the 800M curve', () => {

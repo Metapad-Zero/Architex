@@ -152,6 +152,12 @@ input[type='checkbox'], input[type='radio'], input[type='range'] { accent-color:
 
   .token-trigger { @apply min-w-[7rem] shrink-0 px-3 text-base; }
   .token-mark { @apply inline-flex h-6 w-6 shrink-0 items-center justify-center rounded border border-current text-2xs font-semibold leading-none tracking-[-0.02em]; }
+  /* What the creator says about the token: set apart by rules, and signed as theirs. */
+  .launch-about { @apply mb-10 max-w-2xl space-y-3 border-y border-g300 py-5 text-sm leading-6; }
+  .launch-about ul { @apply flex flex-wrap gap-x-5 gap-y-2; }
+  .launch-details { @apply m-0 min-w-0 border-0 border-t border-g300 p-0 pt-6; }
+  /* The mark at the head of a token's own page. */
+  .token-mark.token-mark-lg { @apply h-12 w-12 text-sm; }
   .token-image { @apply relative inline-flex shrink-0; }
   .token-image > img { @apply absolute inset-0 h-full w-full rounded object-cover opacity-0; }
   .token-image > img[data-loaded='true'] { @apply opacity-100; }
@@ -201,6 +207,9 @@ input[type='checkbox'], input[type='radio'], input[type='range'] { accent-color:
   .field-with-suffix { @apply flex h-11 items-center rounded border border-ink bg-paper; }
   .field-with-suffix input { @apply min-w-0 flex-1 border-0 bg-transparent px-3 outline-none; }
   .field-with-suffix > span { @apply border-l border-g300 px-3 text-sm text-g500; }
+  .field-with-suffix:has(textarea) { @apply h-auto items-stretch; }
+  .field-with-suffix textarea { @apply min-h-24 min-w-0 flex-1 resize-y border-0 bg-transparent px-3 py-2 outline-none; }
+  .field-with-suffix:has(textarea) > span { @apply flex items-end pb-2; }
   .field-toggle { @apply h-full shrink-0 rounded-r border-l border-g300 px-3 text-sm font-semibold text-g700 hover:bg-g100 active:bg-ink active:text-paper disabled:text-g500; }
 
   .pools-page { @apply mx-auto w-full max-w-[1008px] px-4 pb-24 pt-12 sm:px-6 sm:pt-16; }

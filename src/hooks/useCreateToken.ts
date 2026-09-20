@@ -109,8 +109,10 @@ export function useCreateToken({
     }
   }, [buttonState])
 
-  const execute = useCallback(async () => {
+  /** `savedDetails` is the `ipfs://` string of details saved just before this call; it replaces `metadataURI`, which a state update could not deliver in time. */
+  const execute = useCallback(async (savedDetails?: string) => {
     if (!account) return
+    const uri = savedDetails ?? metadataURI
     setTxStatus(undefined)
     try {
       if (buttonState === 'needsApproval') {
@@ -139,7 +141,7 @@ export function useCreateToken({
       if (fixtureOn) {
         const api = launchFixtureApi()
         if (!api) return
-        const result = api.create(account, name, symbol, metadataURI, initialBuyUsdc)
+        const result = api.create(account, name, symbol, uri, initialBuyUsdc)
         token = result.token
         hash = result.hash
       } else {
@@ -148,7 +150,7 @@ export function useCreateToken({
           address: deployment.launchpad,
           abi: launchpadAbi,
           functionName: 'createToken',
-          args: [name, symbol, metadataURI, initialBuyUsdc, minTokensOut],
+          args: [name, symbol, uri, initialBuyUsdc, minTokensOut],
         })
         setTxStatus({ kind: 'pending', hash })
         const receipt = await publicClient.waitForTransactionReceipt({ hash })

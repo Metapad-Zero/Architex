@@ -3,10 +3,12 @@ import type { Address } from 'viem'
 import { addressExplorerUrl, txExplorerUrl } from '../chain'
 import { useLaunch } from '../hooks/useLaunch'
 import { useLaunchTrades } from '../hooks/useLaunchTrades'
+import { useTokenMetadata } from '../hooks/useTokenMetadata'
 import { formatAmount, shortAddress } from '../lib/format'
 import { INITIAL_CURVE, marketCap } from '../lib/curve'
 import { GRADUATES_AT_USD, launchFacts } from '../lib/launch'
 import { relativeTime } from '../lib/recent'
+import { linkLabel } from '../lib/tokenMetadata'
 import { ExternalLinkIcon } from './Icons'
 import { GhostButton } from './GhostButton'
 import { LaunchMeter, LaunchTokenMark } from './LaunchBits'
@@ -36,6 +38,7 @@ export function LaunchDetail({ token, onBack }: LaunchDetailProps) {
     if (launch && reachesCreation) points.unshift({ value: usdcOf(INITIAL_CURVE.virtualUsdc, INITIAL_CURVE.virtualTokens), time: Number(launch.createdAt), block: 0 })
     return points
   }, [launch, reachesCreation, trades])
+  const details = useTokenMetadata(launch?.metadataURI)
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 30_000)
@@ -66,16 +69,36 @@ export function LaunchDetail({ token, onBack }: LaunchDetailProps) {
   }
 
   const facts = launchFacts(launch)
+  const about = details.data?.metadata
+  const links = [['Website', about?.external_link], ['X', about?.twitter], ['Telegram', about?.telegram]].flatMap(([label, url]) => (label && url ? [[label, url] as const] : []))
 
   return (
     <div className="pools-page">
       <div className="mb-10 flex items-start gap-4">
-        <LaunchTokenMark token={launchToken} uri={launch.metadataURI} />
+        <LaunchTokenMark token={launchToken} uri={launch.metadataURI} className="token-mark-lg" />
         <div className="min-w-0">
           <h1 className="text-xl font-semibold tracking-[-0.02em]">{launch.symbol}</h1>
           <p className="mt-1 text-sm text-g500">{launch.name} · {shortAddress(launch.token)}</p>
         </div>
       </div>
+
+      {about && (about.description || links.length > 0) && (
+        <section className="launch-about" aria-label="From the creator">
+          {about.description && <p className="whitespace-pre-line">{about.description}</p>}
+          {links.length > 0 && (
+            <ul>
+              {links.map(([label, url]) => (
+                <li key={url}>
+                  <a className="inline-flex items-center gap-1 underline" href={url} target="_blank" rel="noopener noreferrer nofollow ugc">
+                    {label} · {linkLabel(url)} <ExternalLinkIcon className="h-4 w-4" />
+                  </a>
+                </li>
+              ))}
+            </ul>
+          )}
+          <p className="text-xs text-g500">Written by the creator. Architex has not checked it.</p>
+        </section>
+      )}
 
       <div className="launch-detail">
         <div className="launch-chart">
