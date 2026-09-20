@@ -5,7 +5,7 @@
   "factory": "0x6362f5a0fc007ab7d1e61f99d3f4eb04360d060a",
   "router": "0xcb417bbb2c3ce02296229ca89b639bb3af2538e2",
   "lens": "0x8ee79a8a702e7f8dd433b940d11b327e5153094b",
-  "launchpad": "0xd9a7b70085AFE91c4868587899824048d933736e",
+  "launchpad": "0x94296CDaa1BF6D02d32368b2d5Fac2B79afd84FD",
   "seedPools": "0x207d7525edeeb63572b44f0414fe3b0730370be0",
   "deployer": "0x5B12Ce46C7194aD57d143bC22847224047b1Ef42",
   "tokens": [
@@ -81,6 +81,6 @@
     "arc": "0x42ea697e9b930e3f1b23b96a5b8115a468b4aebb39a13b769e620cf000d05c70",
     "eurc": "0xb2b3bf489eed6463a1cb781d6e5548acffe7fabbedb3d067abcc7fa24cd7129d",
     "seedPools": "0x622f0d4a1479b07c4777efde76ea9e3b17f07dd6439daa18b5eff8d403182464",
-    "launchpad": "0x2a58a650627cc74c2f3e1475041ea377bdab16fa840c3a15b6c60e660fc43822"
+    "launchpad": "0x6a59f99cf0f5d49dabf9b8ef765f6bbdd159f1d47e2a4c1b9fe78916870ad5c2"
   }
 }

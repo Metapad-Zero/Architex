@@ -1,13 +1,16 @@
 # Launchpad: deploying to Arc Testnet
 
-**Deployed 2026-09-19:** [`0xd9a7b70085AFE91c4868587899824048d933736e`](https://explorer.testnet.arc.io/address/0xd9a7b70085AFE91c4868587899824048d933736e)
+**Deployed 2026-09-19 (v1.2, a 25,000 USDC curve):** [`0x94296CDaa1BF6D02d32368b2d5Fac2B79afd84FD`](https://explorer.testnet.arc.io/address/0x94296CDaa1BF6D02d32368b2d5Fac2B79afd84FD)
 by Arc Studio's testnet deployer, launch fee 1 USDC, `feeTo` and `feeToSetter` = the dev burner
 `0x7212fA4Fe663d063A7a83dA0467d592ed3A51D46` (testnet only; mainnet uses a hardware wallet).
-The on-chain code was checked byte for byte against the local build:
+The on-chain code was checked byte for byte against the local build, and the contract itself reports
+`VIRTUAL_USDC_0 = 8333333333`:
 
 ```bash
-bun run scripts/verify-bytecode.ts 0xd9a7b70085AFE91c4868587899824048d933736e ArchitexLaunchpad
+bun run scripts/verify-bytecode.ts 0x94296CDaa1BF6D02d32368b2d5Fac2B79afd84FD ArchitexLaunchpad
 ```
+
+The v1.1 launchpad (an 8,750 USDC curve) stays at `0xd9a7b70085AFE91c4868587899824048d933736e` with its one test token; the app no longer reads it.
 
 The launchpad is one contract, `ArchitexLaunchpad`, deployed next to the existing Architex factory.
 It deploys each `LaunchToken` itself, so there is nothing else to deploy.
@@ -21,6 +24,7 @@ It deploys each `LaunchToken` itself, so there is nothing else to deploy.
 | Two red-team reviews (`GROK-REVIEW-1.md`, `GROK-REVIEW-2.md`) | Every finding closed |
 | Against the factory, pair and router bytecode **actually deployed** on Arc Testnet | 5 fork tests pass: pair creation, graduation seeding, trading the graduated pool through the live router, the pair lock |
 | Deploy simulation on Arc Testnet | ~3.54M gas, about 0.19 USDC. Runtime size 11.9 KB of the 24 KB limit |
+| Live on Arc Testnet with real USDC (`scripts/launchpad-smoke.ts`) | 28 checks pass on v1.2: create, buy, sell, collect, every number equal to the model |
 
 Run the fork suite yourself (it is skipped without the variable, so `forge test` stays offline):
 
@@ -99,8 +103,8 @@ From the second review. Testnet needs none of these; mainnet needs all of them.
 - [x] Suite run against the deployed Architex bytecode on Arc (fork suite above)
 - [x] Deployed to Arc Testnet, bytecode verified against the local build, read-only smoke passes
 - [x] Live trading smoke test passes on Arc Testnet with real USDC (2026-09-19: create, buy, sell, collect;
-      28 checks, every number equal to the model, trader-side checks exact with gas; first token
-      `0xBe20432D6645aEC36FfAf40d7FDFB10Af363a923`)
+      28 checks, every number equal to the model, trader-side checks exact with gas; run again on v1.2,
+      first token `0x95e6197455Ed751747c2A8314F31df4d97099d9a`)
 - [ ] One token taken all the way to graduation on testnet, then traded on the Swap tab. Graduation needs
       about 25,126 USDC on the curve and the faucet gives 20 at a time, so this needs either a large
       testnet grant or a rehearsal build with the constants scaled down. The pieces are each proven:

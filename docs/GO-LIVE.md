@@ -103,7 +103,7 @@ Passkeys made on `localhost` or a `*.vercel.app` preview do not exist on the rea
       gas included; pair reserves equal the chain-native balance to the wei. Before this, no USDC had
       ever passed through an Architex pair, and USDC/EURC is the first mainnet pool.
 - [ ] Launchpad (bonding curves that graduate into Architex pairs): built, reviewed twice, 152 tests,
-      proven against the deployed testnet bytecode. LIVE ON TESTNET (0xd9a7…736e, bytecode verified).
+      proven against the deployed testnet bytecode. LIVE ON TESTNET as v1.2, a 25,000 USDC curve (0x9429…84FD, bytecode verified, live smoke test passes).
       Mainnet only after the "Before mainnet" list: `docs/launchpad/TESTNET-DEPLOY.md`.
 - [ ] Later, not blocking: third-party audit,
       full `connect-src` CSP (hosts in `docs/MAINNET-DEPLOY.md`), Google/email sign-in (Privy or Circle
