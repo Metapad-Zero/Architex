@@ -87,10 +87,17 @@ export function LaunchTradeSheet({
   if (launch.graduated) {
     return (
       <div className="swap-sheet">
-        <p className="py-7 text-sm leading-6 text-g700">This curve sold out. Its liquidity is locked in an Architex pool.</p>
-        <GhostButton className="w-full" onClick={() => { window.location.hash = formatSwapUrl({ in: 'USDC', out: launch.token }) }}>
-          Trade on Swap
-        </GhostButton>
+        <p className="py-7 text-sm leading-6 text-g700">
+          This curve sold out. Its liquidity is locked in an Architex pool for good, and every swap leaves its fee there. Anyone can add more and earn a share of those fees.
+        </p>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <GhostButton className="w-full" onClick={() => { window.location.hash = formatSwapUrl({ in: 'USDC', out: launch.token }) }}>
+            Trade on Swap
+          </GhostButton>
+          <GhostButton className="w-full" onClick={() => { window.location.hash = `#pools/${launch.pair}` }}>
+            Add liquidity
+          </GhostButton>
+        </div>
       </div>
     )
   }
