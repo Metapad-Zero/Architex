@@ -1,7 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 import { formatBridgeUrl, parseBridgeUrl } from '../bridgeUrl'
 import { totalUsdcFees } from '../bridgeKit'
-import { BRIDGE_CHAINS, destChain, domainLabel, irisMessagesUrl, isMessenger, sourceChain } from '../cctp'
+import { activeChain } from '../../chain'
+import { BRIDGE_CHAINS, destChain, domainLabel, irisMessagesUrl, isMessenger, sourceChain, switchEvmChain } from '../cctp'
 
 describe('bridge URL', () => {
   test('defaults to Ethereum into Arc', () => {
@@ -57,5 +58,42 @@ describe('bridge fees', () => {
       ],
       gasFees: [],
     })).toBe(42_500n)
+  })
+})
+
+describe('adding Arc to a wallet during a claim', () => {
+  function walletError(code: number): Error {
+    return Object.assign(new Error(`wallet error ${code}`), { code })
+  }
+
+  function recorder(switchError: Error | undefined) {
+    const calls: { method: string; params: unknown }[] = []
+    let first = true
+    const provider = {
+      request: ({ method, params }: { method: string; params: unknown }): Promise<null> => {
+        calls.push({ method, params })
+        if (method === 'wallet_switchEthereumChain' && first && switchError) {
+          first = false
+          return Promise.reject(switchError)
+        }
+        return Promise.resolve(null)
+      },
+    }
+    return { calls, provider: provider as never }
+  }
+
+  test("adds Arc with the app's own RPC, never a hard-coded one", async () => {
+    const { calls, provider } = recorder(walletError(4902))
+    await switchEvmChain(provider, BRIDGE_CHAINS.arc)
+    const add = calls.find((call) => call.method === 'wallet_addEthereumChain')
+    const [params] = add?.params as [{ chainId: string; rpcUrls: string[] }]
+    expect(params.chainId).toBe(`0x${BRIDGE_CHAINS.arc.chainId?.toString(16)}`)
+    expect(params.rpcUrls).toEqual([activeChain.rpc])
+  })
+
+  test('a rejected switch is not answered by asking to add the chain', async () => {
+    const { calls, provider } = recorder(walletError(4001))
+    await expect(switchEvmChain(provider, BRIDGE_CHAINS.arc)).rejects.toThrow('wallet error 4001')
+    expect(calls.some((call) => call.method === 'wallet_addEthereumChain')).toBe(false)
   })
 })

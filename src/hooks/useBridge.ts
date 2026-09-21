@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { Address, EIP1193Provider, Hash, Hex } from 'viem'
-import { useAccount, useChainId, useSwitchChain } from 'wagmi'
+import { useAccount, useSwitchChain } from 'wagmi'
 import { activeChain } from '../chain'
 import { destinationContext, evmAdapter, getAppKit, solanaAdapter, sourceContext, totalUsdcFees, type EstimateKitResult } from '../lib/bridgeKit'
 import { formatBridgeUrl, parseBridgeUrl } from '../lib/bridgeUrl'
@@ -19,6 +19,7 @@ import {
 import { isUserRejection, revertReason } from '../lib/errors'
 import { parseAmount } from '../lib/format'
 import { pushRecent } from '../lib/recent'
+import { spendableBalance } from '../lib/gasReserve'
 
 export type BridgeButtonState =
   | 'disconnected'
@@ -26,6 +27,7 @@ export type BridgeButtonState =
   | 'wrongChain'
   | 'enterAmount'
   | 'insufficientBalance'
+  | 'balanceUnavailable'
   | 'estimating'
   | 'ready'
   | 'bridging'
@@ -58,8 +60,7 @@ function solanaProvider(): SolanaWallet | undefined {
 }
 
 export function useBridge() {
-  const { address, connector, isConnected } = useAccount()
-  const chainId = useChainId()
+  const { address, connector, isConnected, chainId } = useAccount()
   const { switchChainAsync } = useSwitchChain()
   const initial = useMemo(() => parseBridgeUrl(window.location.hash), [])
   const [side, setSide] = useState<BridgeSide>(initial.side)
@@ -67,6 +68,7 @@ export function useBridge() {
   const [amount, setAmount] = useState(initial.amount ?? '')
   const [solanaAddress, setSolanaAddress] = useState<string | undefined>(() => solanaProvider()?.publicKey?.toString())
   const [sourceBalance, setSourceBalance] = useState<bigint>(0n)
+  const [balanceUnavailable, setBalanceUnavailable] = useState(false)
   const [estimate, setEstimate] = useState<EstimateKitResult>()
   const [estimateError, setEstimateError] = useState<string>()
   const [phase, setPhase] = useState<'idle' | 'estimating' | 'bridging'>('idle')
@@ -95,6 +97,7 @@ export function useBridge() {
 
   const refreshBalance = useCallback(async () => {
     let next = 0n
+    let failed = false
     try {
       if (source.kind === 'solana' && solanaAddress) next = await fetchSplUsdcBalance(source, solanaAddress)
       else if (address && source.id === 'arc') {
@@ -105,8 +108,9 @@ export function useBridge() {
         next = await fetchEvmUsdcBalance(source, address)
       }
     } catch {
-      next = 0n
+      failed = true
     }
+    setBalanceUnavailable(failed)
     setSourceBalance(next)
   }, [address, solanaAddress, source])
 
@@ -135,7 +139,7 @@ export function useBridge() {
           const provider = (await connector?.getProvider()) as EIP1193Provider | undefined
           if (!provider) throw new Error('Connect a wallet first')
           const evm = await evmAdapter(provider)
-          const fromAdapter = source.kind === 'solana' ? await solanaAdapter(solanaProvider()) : evm
+          const fromAdapter = source.kind === 'solana' ? await solanaAdapter(solanaProvider(), source.rpc) : evm
           const toAdapter = dest.kind === 'solana' ? undefined : evm
           const quoted = await kit.estimateBridge({
             from: sourceContext(fromAdapter, source, source.kind === 'solana' ? solanaAddress : address),
@@ -173,10 +177,11 @@ export function useBridge() {
     if (side === 'out' && chainId !== activeChain.id) return 'wrongChain'
     if (phase === 'bridging') return 'bridging'
     if (parsed === 0n) return 'enterAmount'
-    if (parsed > sourceBalance) return 'insufficientBalance'
+    if (balanceUnavailable) return 'balanceUnavailable'
+    if (parsed > spendableBalance(source.usdc, sourceBalance)) return 'insufficientBalance'
     if (phase === 'estimating') return 'estimating'
     return 'ready'
-  }, [address, chainId, isConnected, parsed, phase, side, solanaAddress, sourceBalance, usesSolana])
+  }, [address, balanceUnavailable, chainId, isConnected, parsed, phase, side, solanaAddress, source.usdc, sourceBalance, usesSolana])
 
   const label = useMemo(() => {
     switch (buttonState) {
@@ -190,6 +195,8 @@ export function useBridge() {
         return 'Enter amount'
       case 'insufficientBalance':
         return 'Not enough USDC'
+      case 'balanceUnavailable':
+        return `Couldn't read your ${source.label} balance`
       case 'estimating':
         return 'Quoting…'
       case 'bridging':
@@ -197,7 +204,7 @@ export function useBridge() {
       default:
         return side === 'in' ? `Bridge to ${dest.label}` : `Bridge to ${dest.label}`
     }
-  }, [buttonState, dest.label, side, txStatus?.label])
+  }, [buttonState, dest.label, side, source.label, txStatus?.label])
 
   const connectSolana = useCallback(async () => {
     const wallet = solanaProvider()
@@ -214,7 +221,7 @@ export function useBridge() {
       const kit = await getAppKit()
       const provider = (await connector.getProvider()) as EIP1193Provider
       const evm = await evmAdapter(provider)
-      const fromAdapter = source.kind === 'solana' ? await solanaAdapter(solanaProvider()) : evm
+      const fromAdapter = source.kind === 'solana' ? await solanaAdapter(solanaProvider(), source.rpc) : evm
       const toAdapter = dest.kind === 'solana' ? undefined : evm
       const result = await kit.bridge({
         from: sourceContext(fromAdapter, source, source.kind === 'solana' ? solanaAddress : address),

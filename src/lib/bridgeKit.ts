@@ -40,9 +40,11 @@ export async function evmAdapter(provider: EIP1193Provider) {
   return createViemAdapterFromProvider({ provider })
 }
 
-export async function solanaAdapter(provider: unknown) {
+export async function solanaAdapter(provider: unknown, rpc: string | undefined) {
   const { createSolanaAdapterFromProvider } = await import('@circle-fin/adapter-solana')
-  return createSolanaAdapterFromProvider({ provider: provider as never })
+  if (!rpc) return createSolanaAdapterFromProvider({ provider: provider as never })
+  const { Connection } = await import('@solana/web3.js')
+  return createSolanaAdapterFromProvider({ provider: provider as never, connection: new Connection(rpc, 'confirmed') })
 }
 
 export function destinationContext(adapter: unknown, chain: BridgeChain, recipient?: string) {

@@ -1,4 +1,4 @@
-import type { BridgeSide, ForeignChain } from './cctp'
+import { FOREIGN_CHAINS, type BridgeSide, type ForeignChain } from './cctp'
 
 export interface BridgeUrlState {
   side: BridgeSide
@@ -7,7 +7,7 @@ export interface BridgeUrlState {
 }
 
 function isForeign(value: string | null): value is ForeignChain {
-  return value === 'ethereum' || value === 'solana'
+  return (FOREIGN_CHAINS as readonly (string | null)[]).includes(value)
 }
 
 export function parseBridgeUrl(hash: string): BridgeUrlState {

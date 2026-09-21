@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useState } from 'react'
 import { parseEventLogs, type Address } from 'viem'
-import { useAccount, useChainId, usePublicClient, useReadContract, useWriteContract } from 'wagmi'
+import { useAccount, usePublicClient, useReadContract, useWriteContract } from 'wagmi'
 import { activeChain } from '../chain'
 import { erc20Abi, launchpadAbi } from '../lib/abi'
 import { INITIAL_CURVE, quoteBuy } from '../lib/curve'
@@ -10,6 +10,7 @@ import { formatAmount } from '../lib/format'
 import { minReceived } from '../lib/amm'
 import { pushRecent } from '../lib/recent'
 import { launchFixtureApi } from '../lib/launchFixtureApi'
+import { spendableBalance } from '../lib/gasReserve'
 import type { SwapTxStatus } from './useSwap'
 
 const fixtureOn = import.meta.env.DEV && import.meta.env.VITE_LAUNCHPAD_FIXTURE === '1'
@@ -49,8 +50,7 @@ export function useCreateToken({
   usdcDecimals,
   onCreated,
 }: UseCreateTokenArgs) {
-  const { address: account, isConnected } = useAccount()
-  const chainId = useChainId()
+  const { address: account, isConnected, chainId } = useAccount()
   const publicClient = usePublicClient()
   const { writeContractAsync } = useWriteContract()
   const [phase, setPhase] = useState<'idle' | 'approving' | 'pending'>('idle')
@@ -83,7 +83,7 @@ export function useCreateToken({
     if (phase === 'approving') return 'approving'
     if (phase === 'pending') return 'pending'
     if (!valid) return 'invalid'
-    if (usdcBalance < totalUsdc) return 'insufficientBalance'
+    if (spendableBalance(activeChain.usdc, usdcBalance) < totalUsdc) return 'insufficientBalance'
     if (usdcAllowance < totalUsdc) return 'needsApproval'
     return 'ready'
   }, [account, chainId, isConnected, phase, totalUsdc, usdcAllowance, usdcBalance, valid])
@@ -122,6 +122,7 @@ export function useCreateToken({
         } else {
           if (!publicClient) return
           const hash = await writeContractAsync({
+            chainId: activeChain.id,
             address: activeChain.usdc,
             abi: erc20Abi,
             functionName: 'approve',
@@ -147,6 +148,7 @@ export function useCreateToken({
       } else {
         if (!publicClient) return
         hash = await writeContractAsync({
+          chainId: activeChain.id,
           address: deployment.launchpad,
           abi: launchpadAbi,
           functionName: 'createToken',

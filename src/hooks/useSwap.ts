@@ -1,8 +1,9 @@
 import { useCallback, useMemo, useState } from 'react'
 import type { Hash } from 'viem'
-import { useAccount, useChainId, usePublicClient, useWriteContract } from 'wagmi'
+import { useAccount, usePublicClient, useWriteContract } from 'wagmi'
 import { activeChain } from '../chain'
 import { isUserRejection, revertReason } from '../lib/errors'
+import { spendableBalance } from '../lib/gasReserve'
 import { pushRecent } from '../lib/recent'
 import { erc20Abi, routerAbi } from '../lib/abi'
 import { deployment } from '../lib/deployment'
@@ -58,8 +59,7 @@ export function useSwap({
   onConfirmed,
   onClear,
 }: UseSwapArgs) {
-  const { address: account, isConnected } = useAccount()
-  const chainId = useChainId()
+  const { address: account, isConnected, chainId } = useAccount()
   const publicClient = usePublicClient()
   const { writeContractAsync } = useWriteContract()
   const [phase, setPhase] = useState<'idle' | 'approving' | 'quoteMoved' | 'pending'>('idle')
@@ -79,10 +79,10 @@ export function useSwap({
       if (reason === 'InsufficientLiquidity') return 'insufficientLiquidity'
       return 'enterAmount'
     }
-    if (balance < requiredApproval) return 'insufficientBalance'
+    if (!tokenIn || spendableBalance(tokenIn.address, balance) < requiredApproval) return 'insufficientBalance'
     if (allowance < requiredApproval) return 'needsApproval'
     return 'ready'
-  }, [account, allowance, balance, chainId, isConnected, phase, quote, reason, requiredApproval])
+  }, [account, allowance, balance, chainId, isConnected, phase, quote, reason, requiredApproval, tokenIn])
 
   const label = useMemo(() => {
     switch (buttonState) {
@@ -124,6 +124,7 @@ export function useSwap({
       if (buttonState === 'needsApproval') {
         setPhase('approving')
         const hash = await writeContractAsync({
+          chainId: activeChain.id,
           address: tokenIn.address,
           abi: erc20Abi,
           functionName: 'approve',
@@ -168,12 +169,14 @@ export function useSwap({
       const hash =
         mode === 'exactIn'
           ? await writeContractAsync({
+              chainId: activeChain.id,
               address: deployment.router,
               abi: routerAbi,
               functionName: 'swapExactTokensForTokens',
               args: [quote.amountIn, quote.minReceived, quote.path, account, deadline],
             })
           : await writeContractAsync({
+              chainId: activeChain.id,
               address: deployment.router,
               abi: routerAbi,
               functionName: 'swapTokensForExactTokens',

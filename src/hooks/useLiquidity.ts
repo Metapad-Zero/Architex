@@ -20,6 +20,8 @@ interface AddLiquidityArgs {
   tokenB: Address
   amountA: bigint
   amountB: bigint
+  /** The deposit sets the price: take no slippage, so a pool someone else seeded first makes it revert instead of filling at their price. */
+  creatingPool: boolean
   slippageBps: number
   deadlineMinutes: number
 }
@@ -61,6 +63,7 @@ export function useLiquidity(onConfirmed: () => void | Promise<void>) {
       try {
         setStatus({ kind: 'pending', label: `Approving ${symbol}…` })
         const hash = await writeContractAsync({
+          chainId: activeChain.id,
           address: token,
           abi: erc20Abi,
           functionName: 'approve',
@@ -79,12 +82,13 @@ export function useLiquidity(onConfirmed: () => void | Promise<void>) {
   )
 
   const addLiquidity = useCallback(
-    async ({ tokenA, tokenB, amountA, amountB, slippageBps, deadlineMinutes }: AddLiquidityArgs) => {
+    async ({ tokenA, tokenB, amountA, amountB, creatingPool, slippageBps, deadlineMinutes }: AddLiquidityArgs) => {
       if (!account) return
       try {
         setStatus({ kind: 'pending', label: 'Adding liquidity…' })
         const deadline = BigInt(Math.floor(Date.now() / 1_000) + deadlineMinutes * 60)
         const hash = await writeContractAsync({
+          chainId: activeChain.id,
           address: deployment.router,
           abi: routerAbi,
           functionName: 'addLiquidity',
@@ -93,8 +97,8 @@ export function useLiquidity(onConfirmed: () => void | Promise<void>) {
             tokenB,
             amountA,
             amountB,
-            minReceived(amountA, slippageBps),
-            minReceived(amountB, slippageBps),
+            creatingPool ? amountA : minReceived(amountA, slippageBps),
+            creatingPool ? amountB : minReceived(amountB, slippageBps),
             account,
             deadline,
           ],
@@ -137,6 +141,9 @@ export function useLiquidity(onConfirmed: () => void | Promise<void>) {
 
       try {
         setStatus({ kind: 'pending', label: 'Signing permit…' })
+        // Fall back to approve + removeLiquidity only if the permit path fails before anything is
+        // broadcast. Once a removal is on chain, retrying could remove the same liquidity twice.
+        let permitHash: Hash | undefined
         try {
           // The EIP-712 domain name is the LP token's own name(): deployments made before the
           // rename say "ArcSwap LP", newer ones "Architex LP" — reading it keeps both valid.
@@ -164,20 +171,25 @@ export function useLiquidity(onConfirmed: () => void | Promise<void>) {
             message: { owner: account, spender: deployment.router, value: liquidity, nonce, deadline },
           })
           const { v, r, s } = parseSignature(signature)
-          const hash = await writeContractAsync({
+          permitHash = await writeContractAsync({
+            chainId: activeChain.id,
             address: deployment.router,
             abi: routerAbi,
             functionName: 'removeLiquidityWithPermit',
             args: [...commonArgs, false, Number(v), r, s],
           })
-          await waitFor(hash, 'Removing liquidity…', 'Removed liquidity', 'remove')
-          return
         } catch (permitError) {
           if (isUserRejection(permitError)) throw permitError
         }
 
+        if (permitHash) {
+          await waitFor(permitHash, 'Removing liquidity…', 'Removed liquidity', 'remove')
+          return
+        }
+
         if (routerAllowance < liquidity) {
           const approvalHash = await writeContractAsync({
+            chainId: activeChain.id,
             address: pair,
             abi: erc20Abi,
             functionName: 'approve',
@@ -186,6 +198,7 @@ export function useLiquidity(onConfirmed: () => void | Promise<void>) {
           await publicClient.waitForTransactionReceipt({ hash: approvalHash })
         }
         const hash = await writeContractAsync({
+          chainId: activeChain.id,
           address: deployment.router,
           abi: routerAbi,
           functionName: 'removeLiquidity',

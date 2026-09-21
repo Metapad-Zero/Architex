@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { formatAmount, formatPct, parseAmount, shortAddress } from '../format'
+import { formatAmount, formatLp, formatPct, parseAmount, shortAddress } from '../format'
 
 describe('amount parsing and formatting', () => {
   test('round trips six-decimal values', () => {
@@ -30,5 +30,26 @@ describe('amount parsing and formatting', () => {
     expect(formatPct(50)).toBe('0.50%')
     const value = `0x${'1'.repeat(40)}`
     expect(shortAddress(value)).toBe('0x1111…1111')
+  })
+})
+
+describe('six-decimal amounts under one', () => {
+  test('keep their fraction instead of collapsing to 0', () => {
+    expect(formatAmount(855_000n, 6)).toBe('0.855')
+    expect(formatAmount(100_000n, 6)).toBe('0.1')
+    expect(formatAmount(1n, 6)).toBe('0.000001')
+    expect(formatAmount(999_999n, 6)).toBe('0.999999')
+  })
+})
+
+describe('LP amounts', () => {
+  test('a six-decimal pair mints LP below 0.000001 and it still reads as a number', () => {
+    // sqrt(1,000 USDC * 855 EURC) at 6 decimals each, minus MINIMUM_LIQUIDITY
+    expect(formatLp(924_661_054n)).toBe('0.000000000924661')
+  })
+
+  test('large LP amounts format like any other 18-decimal amount', () => {
+    expect(formatLp(1_500_000_000_000_000_000n)).toBe(formatAmount(1_500_000_000_000_000_000n, 18))
+    expect(formatLp(0n)).toBe('0')
   })
 })

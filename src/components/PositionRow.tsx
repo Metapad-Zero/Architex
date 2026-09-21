@@ -1,10 +1,10 @@
 import { useMemo, useState } from 'react'
 import { formatUnits } from 'viem'
-import { useAccount, useChainId, useSwitchChain } from 'wagmi'
+import { useAccount, useSwitchChain } from 'wagmi'
 import { useConnectSheet } from '../hooks/useConnectSheet'
 import { activeChain } from '../chain'
 import { removeAmounts } from '../lib/amm'
-import { formatAmount, formatPct, parseAmount } from '../lib/format'
+import { formatAmount, formatLp, formatPct, parseAmount } from '../lib/format'
 import type { Token } from '../lib/tokens'
 import type { PositionInfo } from '../hooks/usePositions'
 import { useLiquidity } from '../hooks/useLiquidity'
@@ -25,8 +25,7 @@ interface PositionRowProps {
 }
 
 export function PositionRow({ position, token0, token1, onConfirmed }: PositionRowProps) {
-  const { address } = useAccount()
-  const chainId = useChainId()
+  const { address, chainId } = useAccount()
   const { open } = useConnectSheet()
   const { switchChainAsync } = useSwitchChain()
   const settings = useSettings()
@@ -67,7 +66,7 @@ export function PositionRow({ position, token0, token1, onConfirmed }: PositionR
   return (
     <article className="position-row">
       <button type="button" className="position-summary" onClick={() => setExpanded((value) => !value)} aria-expanded={expanded}>
-        <span><strong>{token0.symbol} / {token1.symbol}</strong><small>{formatAmount(position.lpBalance, 18)} LP</small></span>
+        <span><strong>{token0.symbol} / {token1.symbol}</strong><small>{formatLp(position.lpBalance)} LP</small></span>
         <span><small>Pooled amounts</small>{formatAmount(pooled0, token0.decimals)} {token0.symbol} · {formatAmount(pooled1, token1.decimals)} {token1.symbol}</span>
         <span><small>Your share</small>{formatPct(shareBps)}</span>
         <ChevronIcon className={expanded ? 'rotate-180' : ''} />

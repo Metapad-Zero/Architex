@@ -1,10 +1,11 @@
 import { useMemo, useState } from 'react'
 import { formatUnits, type Address } from 'viem'
-import { useAccount, useChainId, useSwitchChain } from 'wagmi'
+import { useAccount, useSwitchChain } from 'wagmi'
 import { useConnectSheet } from '../hooks/useConnectSheet'
 import { activeChain } from '../chain'
-import { liquidityMinted, liquidityShareBps, quote as ratioQuote, reservesFor, type AmmPair } from '../lib/amm'
-import { formatAmount, formatPct, parseAmount } from '../lib/format'
+import { liquidityMinted, liquidityShareBps, pairFor, quote as ratioQuote, reservesFor, type AmmPair } from '../lib/amm'
+import { formatAmount, formatLp, formatPct, parseAmount } from '../lib/format'
+import { spendableBalance } from '../lib/gasReserve'
 import type { Token } from '../lib/tokens'
 import { useLiquidity } from '../hooks/useLiquidity'
 import { useSettings } from '../hooks/useSettings'
@@ -14,6 +15,8 @@ import { TxStatus } from './TxStatus'
 
 interface AddLiquidityFormProps {
   pair?: AmmPair
+  /** For the standalone create form: lets it notice that the chosen tokens already have a pool. */
+  pairs?: readonly AmmPair[]
   tokens: readonly Token[]
   balances: ReadonlyMap<string, bigint>
   allowances: ReadonlyMap<string, bigint>
@@ -27,9 +30,8 @@ function editable(value: bigint, decimals: number): string {
   return result.includes('.') ? result.replace(/0+$/, '').replace(/\.$/, '') : result
 }
 
-export function AddLiquidityForm({ pair, tokens, balances, allowances, tokenA: fixedA, tokenB: fixedB, onConfirmed }: AddLiquidityFormProps) {
-  const { address: account } = useAccount()
-  const chainId = useChainId()
+export function AddLiquidityForm({ pair: fixedPair, pairs, tokens, balances, allowances, tokenA: fixedA, tokenB: fixedB, onConfirmed }: AddLiquidityFormProps) {
+  const { address: account, chainId } = useAccount()
   const { open } = useConnectSheet()
   const { switchChainAsync } = useSwitchChain()
   const settings = useSettings()
@@ -49,10 +51,20 @@ export function AddLiquidityForm({ pair, tokens, balances, allowances, tokenA: f
   const parsedB = useMemo(() => {
     try { return tokenB ? parseAmount(amountB, tokenB.decimals) : 0n } catch { return 0n }
   }, [amountB, tokenB])
+  const found = fixedPair ?? (pairs && tokenA && tokenB ? pairFor(pairs, tokenA.address, tokenB.address) : undefined)
+  // A pair anyone created without depositing has no price yet: treat it like a new pool, not an existing one.
+  const pair = found && found.reserve0 > 0n && found.reserve1 > 0n ? found : undefined
   const expectedLp = pair ? liquidityMinted(parsedA, parsedB, ...reservesFor(pair, tokenA?.address ?? pair.token0), pair.totalSupply) : liquidityMinted(parsedA, parsedB, 0n, 0n, 0n)
   const shareBps = liquidityShareBps(expectedLp, pair?.totalSupply ?? 0n)
   const allowanceA = tokenA ? allowances.get(tokenA.address.toLowerCase()) ?? 0n : 0n
   const allowanceB = tokenB ? allowances.get(tokenB.address.toLowerCase()) ?? 0n : 0n
+  const spendableA = tokenA ? spendableBalance(tokenA.address, balances.get(tokenA.address.toLowerCase()) ?? 0n) : 0n
+  const spendableB = tokenB ? spendableBalance(tokenB.address, balances.get(tokenB.address.toLowerCase()) ?? 0n) : 0n
+  const shortA = parsedA > spendableA
+  const shortB = parsedB > spendableB
+  const initialPrice = !pair && tokenA && tokenB && parsedA > 0n && parsedB > 0n
+    ? `1 ${tokenA.symbol} = ${formatAmount((parsedB * 10n ** BigInt(tokenA.decimals)) / parsedA, tokenB.decimals)} ${tokenB.symbol}`
+    : undefined
 
   const updateA = (value: string) => {
     setAmountA(value)
@@ -84,7 +96,9 @@ export function AddLiquidityForm({ pair, tokens, balances, allowances, tokenA: f
       ? activeChain.isTestnet ? 'Switch to Arc Testnet' : 'Switch to Arc'
       : parsedA === 0n || parsedB === 0n
         ? 'Enter amounts'
-        : allowanceA < parsedA
+        : shortA || shortB
+          ? `Not enough ${(shortA ? tokenA : tokenB)?.symbol ?? 'balance'}`
+          : allowanceA < parsedA
           ? `Approve ${tokenA?.symbol ?? 'token'}`
           : allowanceB < parsedB
             ? `Approve ${tokenB?.symbol ?? 'token'}`
@@ -93,7 +107,7 @@ export function AddLiquidityForm({ pair, tokens, balances, allowances, tokenA: f
   const submit = async () => {
     if (!account) return open()
     if (chainId !== activeChain.id) return void switchChainAsync({ chainId: activeChain.id })
-    if (!tokenA || !tokenB || parsedA === 0n || parsedB === 0n) return
+    if (!tokenA || !tokenB || parsedA === 0n || parsedB === 0n || shortA || shortB) return
     if (allowanceA < parsedA) return void liquidity.approve(tokenA.address, parsedA, tokenA.symbol)
     if (allowanceB < parsedB) return void liquidity.approve(tokenB.address, parsedB, tokenB.symbol)
     await liquidity.addLiquidity({
@@ -101,6 +115,7 @@ export function AddLiquidityForm({ pair, tokens, balances, allowances, tokenA: f
       tokenB: tokenB.address,
       amountA: parsedA,
       amountB: parsedB,
+      creatingPool: !pair,
       slippageBps: settings.slippageBps,
       deadlineMinutes: settings.deadlineMinutes,
     })
@@ -111,7 +126,7 @@ export function AddLiquidityForm({ pair, tokens, balances, allowances, tokenA: f
   return (
     <div className="inline-form">
       {pending && <span className="rule-sweep" aria-hidden="true" />}
-      {!pair && <p className="mb-6 text-sm leading-6 text-g700">You are creating this pool — the ratio you enter sets the initial price.</p>}
+      {!pair && <p className="mb-6 text-sm leading-6 text-g700">You are creating this pool — the ratio you enter sets the initial price. Match the market rate: if it's off, arbitrageurs trade the difference out of your deposit.</p>}
       <div className="grid gap-8 sm:grid-cols-2">
         <AmountField
           id={`liquidity-a-${pair?.pair ?? 'new'}`}
@@ -137,10 +152,11 @@ export function AddLiquidityForm({ pair, tokens, balances, allowances, tokenA: f
         />
       </div>
       <dl className="receipt-lines mt-6">
-        <div><dt>Expected LP</dt><dd>{formatAmount(expectedLp, 18)}</dd></div>
+        {initialPrice && <div><dt>Initial price</dt><dd>{initialPrice}</dd></div>}
+        <div><dt>Expected LP</dt><dd>{formatLp(expectedLp)}</dd></div>
         <div><dt>Your share</dt><dd>{formatPct(shareBps)}</dd></div>
       </dl>
-      <PrimaryButton className="mt-6 w-full sm:w-auto sm:min-w-56" loading={pending} disabled={pending || (Boolean(account) && chainId === activeChain.id && parsedA === 0n)} onClick={() => void submit()}>{pending ? liquidity.status?.label : label}</PrimaryButton>
+      <PrimaryButton className="mt-6 w-full sm:w-auto sm:min-w-56" loading={pending} disabled={pending || (Boolean(account) && chainId === activeChain.id && (parsedA === 0n || parsedB === 0n || shortA || shortB))} onClick={() => void submit()}>{pending ? liquidity.status?.label : label}</PrimaryButton>
       <TxStatus status={liquidity.status} />
     </div>
   )

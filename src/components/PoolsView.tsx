@@ -77,7 +77,7 @@ export function PoolsView({ selectedPair, onSelectPair }: PoolsViewProps) {
       {creating && (
         <section className="mb-14 border-t border-ink">
           <div className="section-heading-row"><h2>Create a pool</h2></div>
-          <AddLiquidityForm tokens={tokens} balances={balances} allowances={allowances} onConfirmed={refresh} />
+          <AddLiquidityForm pairs={pairs} tokens={tokens} balances={balances} allowances={allowances} onConfirmed={refresh} />
         </section>
       )}
 

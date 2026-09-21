@@ -1,4 +1,4 @@
-import { useAccount, useChainId, useSwitchChain } from 'wagmi'
+import { useAccount, useSwitchChain } from 'wagmi'
 import { activeChain } from '../chain'
 import { shortAddress } from '../lib/format'
 import { useConnectSheet } from '../hooks/useConnectSheet'
@@ -6,8 +6,7 @@ import { WalletIcon } from './Icons'
 import { GhostButton } from './GhostButton'
 
 export function WalletButton() {
-  const { address, isConnected, isConnecting } = useAccount()
-  const chainId = useChainId()
+  const { address, isConnected, isConnecting, chainId } = useAccount()
   const { switchChain } = useSwitchChain()
   const { isOpen, open, close, triggerRef } = useConnectSheet()
   const wrongChain = isConnected && chainId !== activeChain.id

@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useState } from 'react'
 import type { Address } from 'viem'
-import { useAccount, useChainId, usePublicClient, useWriteContract } from 'wagmi'
+import { useAccount, usePublicClient, useWriteContract } from 'wagmi'
 import { activeChain } from '../chain'
 import { erc20Abi, launchpadAbi } from '../lib/abi'
 import { quoteBuy, quoteSell } from '../lib/curve'
@@ -12,6 +12,7 @@ import { minReceived } from '../lib/amm'
 import { pushRecent } from '../lib/recent'
 import type { Token } from '../lib/tokens'
 import { launchFixtureApi } from '../lib/launchFixtureApi'
+import { spendableBalance } from '../lib/gasReserve'
 import type { SwapTxStatus } from './useSwap'
 
 const fixtureOn = import.meta.env.DEV && import.meta.env.VITE_LAUNCHPAD_FIXTURE === '1'
@@ -67,8 +68,7 @@ export function useLaunchTrade({
   onConfirmed,
   onClear,
 }: UseLaunchTradeArgs) {
-  const { address: account, isConnected } = useAccount()
-  const chainId = useChainId()
+  const { address: account, isConnected, chainId } = useAccount()
   const publicClient = usePublicClient()
   const { writeContractAsync } = useWriteContract()
   const [phase, setPhase] = useState<'idle' | 'approving' | 'quoteMoved' | 'pending'>('idle')
@@ -118,10 +118,10 @@ export function useLaunchTrade({
     if (phase === 'pending') return 'pending'
     if (launch?.graduated) return 'graduated'
     if (!quote) return 'enterAmount'
-    if (balance < requiredIn) return 'insufficientBalance'
+    if (!payToken || spendableBalance(payToken.address, balance) < requiredIn) return 'insufficientBalance'
     if (side === 'buy' && usdcAllowance < requiredIn) return 'needsApproval'
     return 'ready'
-  }, [account, balance, chainId, isConnected, launch?.graduated, phase, quote, requiredIn, side, usdcAllowance])
+  }, [account, balance, chainId, isConnected, launch?.graduated, payToken, phase, quote, requiredIn, side, usdcAllowance])
 
   const label = useMemo(() => {
     const symbol = token?.symbol ?? 'token'
@@ -168,6 +168,7 @@ export function useLaunchTrade({
         } else {
           if (!publicClient) return
           const hash = await writeContractAsync({
+            chainId: activeChain.id,
             address: usdc.address,
             abi: erc20Abi,
             functionName: 'approve',
@@ -221,6 +222,7 @@ export function useLaunchTrade({
       } else {
         if (!publicClient) return
         hash = await writeContractAsync({
+          chainId: activeChain.id,
           address: deployment.launchpad,
           abi: launchpadAbi,
           functionName: side === 'buy' ? 'buy' : 'sell',

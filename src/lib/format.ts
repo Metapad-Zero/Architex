@@ -46,8 +46,17 @@ export function formatAmount(value: bigint, decimals: number): string {
 
   const raw = absolute.toString().padStart(decimals + 1, '0')
   const whole = decimals === 0 ? raw : raw.slice(0, -decimals)
-  const fraction = decimals === 0 ? '' : raw.slice(-decimals, -decimals + visibleFractionDigits).replace(/0+$/, '')
+  const fractionStart = raw.length - decimals
+  const fraction = decimals === 0 ? '' : raw.slice(fractionStart, fractionStart + visibleFractionDigits).replace(/0+$/, '')
   return `${negative ? '-' : ''}${addSeparators(whole)}${fraction ? `.${fraction}` : ''}`
+}
+
+/** LP tokens have 18 decimals, but a pool of two 6-decimal tokens mints ~1e9 wei for a real deposit — below formatAmount's 0.000001 floor. */
+export function formatLp(value: bigint): string {
+  if (value <= 0n || value >= powerOfTen(12)) return formatAmount(value, 18)
+  const fraction = value.toString().padStart(18, '0')
+  const first = fraction.search(/[1-9]/)
+  return `0.${fraction.slice(0, first + 6).replace(/0+$/, '')}`
 }
 
 export function formatUsd(value: bigint, decimals = 6): string {

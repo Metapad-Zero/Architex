@@ -4,7 +4,7 @@
  * from onchain-facts.
  */
 import { type Address, type EIP1193Provider, type Hex } from 'viem'
-import { arcNetwork } from '../chain'
+import { activeChain, arcNetwork } from '../chain'
 import { EVM_PROTOCOL_CONTRACTS } from '../onchain-facts'
 
 export type ForeignChain = 'ethereum' | 'solana'
@@ -29,6 +29,11 @@ export interface BridgeChain {
 
 const TESTNET = arcNetwork !== 'mainnet'
 
+// The public mainnet-beta endpoint refuses browser origins (403), so mainnet Solana needs a keyed
+// RPC that allows this site's origin. Without one, Solana is left out of the bridge entirely.
+const configuredSolanaRpc: unknown = import.meta.env.VITE_SOLANA_RPC_URL
+const SOLANA_MAINNET_RPC = typeof configuredSolanaRpc === 'string' && configuredSolanaRpc.startsWith('https://') ? configuredSolanaRpc : undefined
+
 const protocol = (name: string, networkKind: 'testnet' | 'mainnet'): Address | undefined => {
   const row = EVM_PROTOCOL_CONTRACTS.find((item) => item.name === name && item.networkKind === networkKind)
   return row?.address as Address | undefined
@@ -52,6 +57,7 @@ export const BRIDGE_CHAINS: Record<BridgeChainId, BridgeChain> = TESTNET
         usdc: '0x3600000000000000000000000000000000000000',
         decimals: 6,
         chainId: 5042002,
+        rpc: activeChain.rpc,
         explorerTx: (hash) => `https://explorer.testnet.arc.io/tx/${hash}`,
         tokenMessenger: protocol('TokenMessengerV2', 'testnet') ?? TESTNET_MESSENGER,
         messageTransmitter: protocol('MessageTransmitterV2', 'testnet') ?? TESTNET_TRANSMITTER,
@@ -92,6 +98,7 @@ export const BRIDGE_CHAINS: Record<BridgeChainId, BridgeChain> = TESTNET
         usdc: '0x3600000000000000000000000000000000000000',
         decimals: 6,
         chainId: 5042,
+        rpc: activeChain.rpc,
         explorerTx: (hash) => `https://explorer.arc.io/tx/${hash}`,
         tokenMessenger: protocol('TokenMessengerV2', 'mainnet') ?? MAINNET_MESSENGER,
         messageTransmitter: protocol('MessageTransmitterV2', 'mainnet') ?? MAINNET_TRANSMITTER,
@@ -118,12 +125,12 @@ export const BRIDGE_CHAINS: Record<BridgeChainId, BridgeChain> = TESTNET
         kind: 'solana',
         usdc: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
         decimals: 6,
-        rpc: 'https://api.mainnet-beta.solana.com',
+        rpc: SOLANA_MAINNET_RPC,
         explorerTx: (hash) => `https://solscan.io/tx/${hash}`,
       },
     }
 
-export const FOREIGN_CHAINS: readonly ForeignChain[] = ['ethereum', 'solana']
+export const FOREIGN_CHAINS: readonly ForeignChain[] = BRIDGE_CHAINS.solana.rpc ? ['ethereum', 'solana'] : ['ethereum']
 
 export function sourceChain(side: BridgeSide, foreign: ForeignChain): BridgeChain {
   return side === 'in' ? BRIDGE_CHAINS[foreign] : BRIDGE_CHAINS.arc
@@ -205,14 +212,15 @@ export async function switchEvmChain(provider: EIP1193Provider, chain: BridgeCha
   const hexId = `0x${chain.chainId.toString(16)}`
   try {
     await provider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: hexId }] })
-  } catch {
+  } catch (error) {
+    if ((error as { code?: number }).code === 4001) throw error
     await provider.request({
       method: 'wallet_addEthereumChain',
       params: [{
         chainId: hexId,
         chainName: chain.label,
         nativeCurrency: chain.id === 'arc' ? { name: 'USDC', symbol: 'USDC', decimals: 18 } : { name: 'Ether', symbol: 'ETH', decimals: 18 },
-        rpcUrls: chain.rpc ? [chain.rpc] : chain.id === 'arc' ? ['https://rpc.testnet.arc.io'] : [],
+        rpcUrls: chain.rpc ? [chain.rpc] : [],
         blockExplorerUrls: [chain.explorerTx('').replace(/\/tx\/$/, '')],
       }],
     })
@@ -221,7 +229,8 @@ export async function switchEvmChain(provider: EIP1193Provider, chain: BridgeCha
 }
 
 export async function fetchSplUsdcBalance(chain: BridgeChain, owner: string): Promise<bigint> {
-  const response = await fetch(chain.rpc ?? 'https://api.mainnet-beta.solana.com', {
+  if (!chain.rpc) throw new Error('No Solana RPC is configured')
+  const response = await fetch(chain.rpc, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({

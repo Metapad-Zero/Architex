@@ -62,7 +62,7 @@ export function reservesFor(pair: AmmPair, tokenIn: Address): [bigint, bigint] {
     : [pair.reserve1, pair.reserve0]
 }
 
-function pairFor(pairs: readonly AmmPair[], tokenA: Address, tokenB: Address): AmmPair | undefined {
+export function pairFor(pairs: readonly AmmPair[], tokenA: Address, tokenB: Address): AmmPair | undefined {
   const key = pairKey(tokenA, tokenB)
   return pairs.find((pair) => pairKey(pair.token0, pair.token1) === key)
 }

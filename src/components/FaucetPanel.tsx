@@ -37,7 +37,7 @@ export function FaucetPanel({ tokens, onConfirmed }: FaucetPanelProps) {
     if (!address || !publicClient) return
     setStates((current) => ({ ...current, [token.address]: 'pending' }))
     try {
-      const hash = await writeContractAsync({ address: token.address, abi: testTokenAbi, functionName: 'faucet' })
+      const hash = await writeContractAsync({ chainId: activeChain.id, address: token.address, abi: testTokenAbi, functionName: 'faucet' })
       const receipt = await publicClient.waitForTransactionReceipt({ hash })
       if (receipt.status !== 'success') throw new Error('Transaction reverted')
       setStates((current) => ({ ...current, [token.address]: 'done' }))

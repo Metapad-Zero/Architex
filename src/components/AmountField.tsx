@@ -1,5 +1,6 @@
 import { formatUnits } from 'viem'
 import { formatAmount } from '../lib/format'
+import { spendableBalance, USDC_GAS_RESERVE } from '../lib/gasReserve'
 import type { Token } from '../lib/tokens'
 import { TokenSelect } from './TokenSelect'
 import { TokenMark } from './TokenMark'
@@ -61,7 +62,9 @@ export function AmountField({
   hotkey,
 }: AmountFieldProps) {
   const balance = token ? balances.get(token.address.toLowerCase()) ?? 0n : 0n
+  const spendable = token ? spendableBalance(token.address, balance) : 0n
   let overBalance = false
+  let overSpendable = false
   if (checkBalance && token && amount) {
     try {
       const sanitized = sanitizeAmount(amount, token.decimals)
@@ -69,6 +72,7 @@ export function AmountField({
         const [whole = '0', fraction = ''] = sanitized.split('.')
         const raw = BigInt(whole || '0') * 10n ** BigInt(token.decimals) + BigInt((fraction + '0'.repeat(token.decimals)).slice(0, token.decimals) || '0')
         overBalance = raw > balance
+        overSpendable = raw > spendable
       }
     } catch {
       overBalance = false
@@ -76,7 +80,7 @@ export function AmountField({
   }
 
   return (
-    <section className="amount-field" data-over-balance={overBalance}>
+    <section className="amount-field" data-over-balance={overSpendable}>
       <label htmlFor={id} className="amount-label">{label}</label>
       <div className="mt-2 flex items-center gap-3">
         <input
@@ -111,10 +115,14 @@ export function AmountField({
       <div className="mt-2 flex min-h-6 items-center justify-between gap-3 text-sm">
         <span className="text-g500">{usdValue ?? ''}</span>
         {token && (checkBalance || balances.has(token.address.toLowerCase())) && (
-          <span className={overBalance ? 'text-loss' : 'text-g500'}>
-            {overBalance ? `Not enough ${token.symbol}` : `Balance ${formatAmount(balance, token.decimals)}`}
-            {checkBalance && !readOnly && balance > 0n && (
-              <button type="button" className="ml-2 font-semibold text-ink underline" onClick={() => onAmount(editableBalance(balance, token.decimals))}>Max</button>
+          <span className={overSpendable ? 'text-loss' : 'text-g500'}>
+            {overBalance
+              ? `Not enough ${token.symbol}`
+              : overSpendable
+                ? `Keep ${formatAmount(USDC_GAS_RESERVE, token.decimals)} ${token.symbol} for gas`
+                : `Balance ${formatAmount(balance, token.decimals)}`}
+            {checkBalance && !readOnly && spendable > 0n && (
+              <button type="button" className="ml-2 font-semibold text-ink underline" onClick={() => onAmount(editableBalance(spendable, token.decimals))}>Max</button>
             )}
           </span>
         )}
