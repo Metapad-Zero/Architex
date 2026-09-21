@@ -32,13 +32,15 @@ export async function readLogWindows<T>(options: {
   return { logs, complete: false }
 }
 
-/** Unix-second timestamps for up to `max` distinct blocks; blocks beyond that read as 0. */
+/** Unix-second timestamps for the newest `max` distinct blocks; older blocks are left out of the map. */
 export async function blockTimes(
   client: { getBlock(args: { blockNumber: bigint }): Promise<{ timestamp: bigint }> },
   blockNumbers: (bigint | null)[],
   max = 40,
 ): Promise<Map<bigint, number>> {
-  const wanted = [...new Set(blockNumbers.filter((block): block is bigint => block !== null))].slice(0, max)
+  const wanted = [...new Set(blockNumbers.filter((block): block is bigint => block !== null))]
+    .sort((a, b) => (a === b ? 0 : a > b ? -1 : 1))
+    .slice(0, max)
   const times = new Map<bigint, number>()
   await Promise.all(
     wanted.map(async (blockNumber) => {

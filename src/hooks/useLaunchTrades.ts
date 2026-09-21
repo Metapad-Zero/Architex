@@ -105,7 +105,6 @@ export function useLaunchTrades(token: Address | undefined, createdAt: number | 
               ? undefined
               : async (fromBlock) => Number((await publicClient.getBlock({ blockNumber: fromBlock })).timestamp) <= createdAt,
         })
-        const times = await blockTimes(publicClient, logs.map((log) => log.blockNumber))
         const trades = logs
           .filter((log) => log.blockNumber !== null && log.args.trader && log.args.tokenAmount !== undefined)
           .map((log) => ({
@@ -114,7 +113,7 @@ export function useLaunchTrades(token: Address | undefined, createdAt: number | 
             usdcAmount: log.args.usdcAmount ?? 0n,
             tokenAmount: log.args.tokenAmount ?? 0n,
             fee: log.args.fee ?? 0n,
-            time: times.get(log.blockNumber) ?? 0,
+            time: 0,
             txHash: log.transactionHash,
             block: Number(log.blockNumber),
             logIndex: log.logIndex ?? 0,
@@ -122,7 +121,13 @@ export function useLaunchTrades(token: Address | undefined, createdAt: number | 
             virtualTokens: log.args.virtualTokens,
           }))
           .sort(byNewest)
-        return { trades: trades.slice(0, MAX_TRADES), complete: complete || trades.length >= MAX_TRADES, source: 'rpc' }
+        const shown = trades.slice(0, MAX_TRADES)
+        const times = await blockTimes(publicClient, shown.map((trade) => BigInt(trade.block)), MAX_TRADES)
+        return {
+          trades: shown.map((trade) => ({ ...trade, time: times.get(BigInt(trade.block)) ?? 0 })),
+          complete: complete || trades.length >= MAX_TRADES,
+          source: 'rpc',
+        }
       }
     },
   })
@@ -132,14 +137,16 @@ export function useLaunchTrades(token: Address | undefined, createdAt: number | 
   }
 
   const trades = query.data?.trades ?? []
-  const historyComplete = query.data?.complete ?? true
+  const historyComplete = query.data?.complete ?? false
   return {
     trades,
     historyComplete,
     /** True when `trades` is every trade since the token was created, not just the newest page of them. */
     reachesCreation: Boolean(query.data) && historyComplete && trades.length < MAX_TRADES,
-    isLoading: query.isLoading,
-    error: query.error,
+    /** True until the first read has finished, retries included. */
+    isLoading: query.isPending,
+    /** Set only when no read has succeeded; a failed poll keeps the last good trades. */
+    error: query.data ? null : query.error,
     version: 0,
   }
 }

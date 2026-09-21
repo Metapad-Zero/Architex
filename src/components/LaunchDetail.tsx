@@ -27,7 +27,7 @@ function formatCap(value: number): string {
 
 export function LaunchDetail({ token, onBack }: LaunchDetailProps) {
   const { launch, token: launchToken, usdc, tokenBalance, usdcBalance, usdcAllowance, isLoading, unknown, refetch } = useLaunch(token)
-  const { trades, historyComplete, reachesCreation, isLoading: tradesLoading } = useLaunchTrades(token, launch ? Number(launch.createdAt) : undefined)
+  const { trades, historyComplete, reachesCreation, isLoading: tradesLoading, error: tradesError } = useLaunchTrades(token, launch ? Number(launch.createdAt) : undefined)
   // Market cap after each trade, oldest first. The creation point is only drawn when every trade since is known.
   const capSeries = useMemo<SeriesPoint[]>(() => {
     const usdcOf = (virtualUsdc: bigint, virtualTokens: bigint) => Number(marketCap({ virtualUsdc, virtualTokens, tokensSold: 0n })) / 1e6
@@ -156,10 +156,12 @@ export function LaunchDetail({ token, onBack }: LaunchDetailProps) {
       </div>
 
       <section className="ledger" aria-label="Trades">
-        <div className="section-heading-row"><h2>Trades</h2><span>{trades.length}</span></div>
+        <div className="section-heading-row"><h2>Trades</h2>{!tradesLoading && !tradesError && <span>{trades.length}</span>}</div>
         {trades.length === 0 ? (
           <p className="price-history-empty">
-            {historyComplete ? 'No trades yet.' : (
+            {tradesLoading ? 'Reading the trades…' : tradesError ? (
+              <>The trades could not be loaded. <a className="underline" href={addressExplorerUrl(token)} target="_blank" rel="noreferrer">The explorer</a> has the full history.</>
+            ) : historyComplete ? 'No trades yet.' : (
               <>No recent trades. Older trades could not be loaded; <a className="underline" href={addressExplorerUrl(token)} target="_blank" rel="noreferrer">the explorer</a> has the full history.</>
             )}
           </p>
@@ -171,7 +173,7 @@ export function LaunchDetail({ token, onBack }: LaunchDetailProps) {
                   <span className="block truncate">
                     <span className={trade.isBuy ? 'trade-buy' : 'trade-sell'}>{trade.isBuy ? 'Buy' : 'Sell'}</span> {formatAmount(trade.tokenAmount, 18)} {launch.symbol} · {formatAmount(trade.isBuy ? trade.usdcAmount : trade.usdcAmount - trade.fee, 6)} USDC
                   </span>
-                  <span className="block text-xs text-g500">{shortAddress(trade.trader)} · {relativeTime(trade.time * 1000, now)}</span>
+                  <span className="block text-xs text-g500">{shortAddress(trade.trader)}{trade.time > 0 && ` · ${relativeTime(trade.time * 1000, now)}`}</span>
                 </span>
                 <a className="inline-flex shrink-0 items-center gap-1 font-semibold underline" href={txExplorerUrl(trade.txHash)} target="_blank" rel="noreferrer">
                   View <ExternalLinkIcon className="h-4 w-4" />
