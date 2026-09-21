@@ -133,6 +133,22 @@ input[type='checkbox'], input[type='radio'], input[type='range'] { accent-color:
   .sheet-tools { @apply absolute right-0 top-0 -translate-y-1/2; }
   /* The one authored motion: a short ink bar running along a sheet's top rule while the chain confirms. */
   .rule-sweep { @apply pointer-events-none absolute left-0 top-[-1px] h-0.5 w-1/4 bg-ink; animation: rule-sweep 1.4s cubic-bezier(0.2, 0, 0, 1) infinite; }
+
+  /* The other authored motion: the one-time brand moment on load. Always dark, regardless of theme —
+     it's a curtain in front of the app, not a themed surface. */
+  .intro-splash {
+    @apply pointer-events-auto fixed inset-0 z-[100] flex items-center justify-center;
+    background: radial-gradient(ellipse 80% 60% at 50% 20%, #262622 0%, #0a0a09 60%, #000 100%);
+  }
+  .intro-splash[data-phase='exiting'] { @apply pointer-events-none; animation: intro-splash-out 0.4s ease-in forwards; }
+  .intro-mark { @apply flex flex-col items-center gap-5; }
+  .intro-mark svg { @apply h-16 w-16 sm:h-20 sm:w-20; overflow: visible; }
+  .intro-arch { stroke-dasharray: 1; stroke-dashoffset: 1; animation: intro-arch-draw 0.75s cubic-bezier(0.4, 0, 0.2, 1) 0.2s forwards; }
+  .intro-bar { opacity: 0; transform-origin: center; animation: intro-bar-in 0.35s ease-out 0.15s forwards; }
+  .intro-wordmark {
+    @apply text-2xl font-semibold tracking-[-0.02em] text-white opacity-0 sm:text-3xl;
+    animation: intro-wordmark-in 0.7s ease-out 0.95s forwards;
+  }
   .amount-field { @apply min-w-0 py-7; }
   .amount-label { @apply block text-sm text-g500; }
   .amount-input {
@@ -326,6 +342,32 @@ input[type='checkbox'], input[type='radio'], input[type='range'] { accent-color:
   50% { background-color: var(--g300); }
 }
 
+@keyframes intro-bar-in {
+  0% { opacity: 0; transform: scaleY(0.15); }
+  100% { opacity: 1; transform: scaleY(1); }
+}
+
+@keyframes intro-arch-draw {
+  to { stroke-dashoffset: 0; }
+}
+
+@keyframes intro-wordmark-in {
+  0% { opacity: 0; transform: translateY(8px); }
+  /* Settles well before the animation ends, so animationend (which advances the phase) gives a brief hold rather than an abrupt cut. */
+  60%, 100% { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes intro-splash-out {
+  to { opacity: 0; }
+}
+
+@keyframes app-reveal {
+  0% { opacity: 0.85; transform: scale(0.995); }
+  100% { opacity: 1; transform: scale(1); }
+}
+
+.app-reveal { animation: app-reveal 0.4s ease-out 1.65s backwards; }
+
 @media (max-width: 639px) {
   .amount-input { font-size: 1.75rem; }
   .token-popover, .settings-popover, .connect-sheet, .unlock-sheet {
@@ -377,6 +419,9 @@ input[type='checkbox'], input[type='radio'], input[type='range'] { accent-color:
   .flip-button svg { transform: none !important; }
   .rule-sweep { display: none; }
   ::view-transition-group(*), ::view-transition-old(*), ::view-transition-new(*) { animation: none !important; }
+  /* The global rule above squashes durations but not delays — without this, reduced-motion still
+     means staring at a mostly-black screen for ~2s waiting on unchanged animation-delay values. */
+  .intro-bar, .intro-arch, .intro-wordmark, .intro-splash[data-phase='exiting'], .app-reveal { animation-delay: 0s !important; }
 }
 
 /* Token stamps. The class is built at run time (`stamp-${n}`), which Tailwind's scanner cannot see,

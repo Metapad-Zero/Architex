@@ -2,6 +2,7 @@ import type { ReactNode } from 'react'
 import { activeChain } from '../chain'
 import type { AppRoute } from '../hooks/useHashRoute'
 import { isLaunchViewAvailable } from '../lib/deployment'
+import { ARCH_PATH } from '../lib/logomark'
 import { ConnectSheet } from './ConnectSheet'
 import { WalletButton } from './WalletButton'
 
@@ -18,7 +19,7 @@ export function AppShell({ route, onRoute, children }: AppShellProps) {
         <div className="flex min-w-0 items-center gap-3 sm:gap-6">
           <button type="button" className="wordmark" onClick={() => onRoute({ view: 'swap' })}>
             <svg className="wordmark-mark" viewBox="0 0 64 64" aria-hidden="true" focusable="false">
-              <path d="M18 58V28a14 14 0 0 1 28 0v30" fill="none" stroke="currentColor" strokeWidth="9" />
+              <path d={ARCH_PATH} fill="none" stroke="currentColor" strokeWidth="9" />
               <rect x="2" y="36" width="60" height="8" fill="var(--accent)" />
             </svg>
             <span className="wordmark-text">Architex</span>

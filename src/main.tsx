@@ -23,6 +23,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { config } from './config'
 import { ConnectSheetProvider } from './hooks/useConnectSheet'
 import { ErrorBoundary } from './components/ErrorBoundary'
+import { IntroSplash } from './components/IntroSplash'
 import { UnlockSheet } from './components/UnlockSheet'
 import App from './App'
 import './index.css'
@@ -35,8 +36,11 @@ createRoot(document.getElementById('root')!).render(
       <WagmiProvider config={config}>
         <QueryClientProvider client={queryClient}>
           <ConnectSheetProvider>
-            <App />
+            <div className="app-reveal">
+              <App />
+            </div>
             <UnlockSheet />
+            <IntroSplash />
           </ConnectSheetProvider>
         </QueryClientProvider>
       </WagmiProvider>
