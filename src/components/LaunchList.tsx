@@ -8,6 +8,7 @@ import { useLaunches } from '../hooks/useLaunches'
 import { GhostButton } from './GhostButton'
 import { CheckIcon } from './Icons'
 import { LaunchMeter, LaunchTokenMark } from './LaunchBits'
+import { PluginsModal } from './PluginsModal'
 import { TableSkeleton } from './Skeleton'
 
 interface LaunchListProps {
@@ -18,6 +19,7 @@ interface LaunchListProps {
 export function LaunchList({ onOpen, onCreate }: LaunchListProps) {
   const { launches, isLoading } = useLaunches()
   const [now, setNow] = useState(() => Date.now())
+  const [pluginsOpen, setPluginsOpen] = useState(false)
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 30_000)
     return () => window.clearInterval(timer)
@@ -31,9 +33,18 @@ export function LaunchList({ onOpen, onCreate }: LaunchListProps) {
           <p className="mt-2 max-w-xl text-sm text-g500">
             Launch a token on a bonding curve. When the curve sells out, its liquidity moves to an Architex pool and is locked for good.
           </p>
+          <button
+            type="button"
+            onClick={() => setPluginsOpen(true)}
+            className="mt-2 text-sm font-semibold text-ink underline decoration-1 underline-offset-[3px] hover:text-g700"
+          >
+            Fee-distribution plugins
+          </button>
         </div>
         <GhostButton className="shrink-0 whitespace-nowrap" onClick={onCreate}>Create a token</GhostButton>
       </div>
+
+      <PluginsModal open={pluginsOpen} onClose={() => setPluginsOpen(false)} />
 
       <section className="ruled-section">
         <div className="section-heading-row">
