@@ -34,26 +34,25 @@ export function DocsCurve() {
         quote, including how much the price will move, before you confirm anything.
       </p>
 
-      <h3 className="mt-6 text-base font-semibold text-ink">The fee</h3>
+      <h3 className="mt-6 text-base font-semibold text-ink">The fees</h3>
       <p>
-        Every buy and every sell on the curve carries a 0.5% fee. It doesn't go back into the
-        curve — it accrues separately and anyone can trigger a permissionless call that sends it
-        to the protocol's treasury address. That's deliberate: it means a broken or blocklisted
-        treasury address can never freeze trading, launching, or graduation, because the fee
-        doesn't need anywhere to land in order for a trade to finish.
+        Every buy and every sell on the curve carries two fees, both in USDC: the platform's 0.5%,
+        and the token's own creator fee, anywhere from 0% to 10%, set by its creator at launch and
+        fixed for good. Neither goes back into the curve. The creator fee goes where the creator
+        chose — see <span className="font-semibold">Creator fees &amp; plugins</span> — and the
+        platform fee to the protocol's fee address.
       </p>
       <p>
-        That treasury address doesn't have to be a single wallet. It can be a small contract that
-        splits what it receives among several recipients — see "Fee-distribution plugins" on the{' '}
-        <span className="font-semibold">Launch</span> page for the ones available and how one
-        gets deployed and wired in.
+        Both accrue separately and move later, in a call anyone can make. That's deliberate: a
+        broken or blocklisted destination can never freeze trading, launching, or graduation,
+        because a fee doesn't need anywhere to land for a trade to finish.
       </p>
 
       <h3 className="mt-6 text-base font-semibold text-ink">What ends it</h3>
       <p>
         A curve sells a fixed pool of tokens — 800 million of the token's 1 billion total supply.
-        Once all 800 million are sold, the curve is done and the token graduates into a real AMM
-        pool; see <span className="font-semibold">Graduation</span>. Nothing else stops a curve
+        Once all 800 million are sold, the curve is done and the token graduates into its own
+        launch pool; see <span className="font-semibold">Graduation</span>. Nothing else stops a curve
         early. If buying just stops, the curve stops too, sitting wherever it was — there's no
         deadline and no penalty for that, it just doesn't graduate.
       </p>

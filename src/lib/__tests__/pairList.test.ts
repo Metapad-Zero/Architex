@@ -1,14 +1,8 @@
 import { describe, expect, test } from 'bun:test'
-import { encodeErrorResult, getAddress, getContractError, HttpRequestError, RawContractError, zeroAddress, type Hex } from 'viem'
-import { launchpadAbi } from '../abi'
-import { laterPageGroups, poolHold, readAllPages, revertErrorName } from '../pairList'
+import { getAddress, HttpRequestError, zeroAddress } from 'viem'
+import { laterPageGroups, readAllPages, withoutLaunchPools } from '../pairList'
 
 const token = getAddress('0x00000000000000000000000000000000000000b1')
-
-// The error a multicall result carries when curves(token) reverts, built the way viem's multicall builds it.
-function curvesRevert(data: Hex) {
-  return getContractError(new RawContractError({ data }), { abi: launchpadAbi, address: token, args: [token], functionName: 'curves' })
-}
 
 describe('lens paging', () => {
   test('needs no more pages while the list fits the first', () => {
@@ -44,26 +38,34 @@ describe('lens paging', () => {
   })
 })
 
-describe('held-back launch pools', () => {
-  test('holds back a live curve and shows a graduated one', () => {
-    expect(poolHold({ status: 'success', result: { token, graduated: false } })).toBe('launch')
-    expect(poolHold({ status: 'success', result: { token, graduated: true } })).toBe(undefined)
-    expect(poolHold({ status: 'success', result: { token: zeroAddress, graduated: false } })).toBe(undefined)
+describe('launch tokens stay out of core pools', () => {
+  const usdc = getAddress('0x3600000000000000000000000000000000000000')
+  const other = getAddress('0x00000000000000000000000000000000000000c2')
+  const pairs = [
+    { pair: getAddress('0x00000000000000000000000000000000000000f1'), token0: usdc, token1: token },
+    { pair: getAddress('0x00000000000000000000000000000000000000f2'), token0: other, token1: usdc },
+    { pair: getAddress('0x00000000000000000000000000000000000000f3'), token0: usdc, token1: getAddress('0xbEf5f6d51CB62b58e6A8f77868681825C6fe21c1') },
+  ]
+  const candidates = [token.toLowerCase(), other.toLowerCase()]
+  const plugin = getAddress('0x00000000000000000000000000000000000000e1')
+
+  test('drops a pool holding a launch token and keeps the rest', () => {
+    const shown = withoutLaunchPools(pairs, candidates, [
+      { status: 'success', result: plugin },
+      { status: 'success', result: zeroAddress },
+    ])
+    expect(shown.map((pair) => pair.pair)).toEqual([pairs[1].pair, pairs[2].pair])
   })
 
-  test('shows the pool only when the launchpad says UnknownToken', () => {
-    const unknown = curvesRevert(encodeErrorResult({ abi: launchpadAbi, errorName: 'UnknownToken' }))
-    expect(revertErrorName(unknown)).toBe('UnknownToken')
-    expect(poolHold({ status: 'failure', error: unknown })).toBe(undefined)
-  })
-
-  test('keeps holding it back until the launchpad answers', () => {
-    expect(poolHold(undefined)).toBe('unknown')
+  test('holds a token back until the launchpad has answered for it', () => {
+    expect(withoutLaunchPools(pairs, candidates, undefined).map((pair) => pair.pair)).toEqual([pairs[2].pair])
     const rateLimited = new HttpRequestError({ url: 'https://rpc.arc.network', status: 429, body: { method: 'eth_call' } })
-    expect(poolHold({ status: 'failure', error: rateLimited })).toBe('unknown')
-    expect(poolHold({ status: 'failure', error: curvesRevert(encodeErrorResult({ abi: launchpadAbi, errorName: 'Forbidden' })) })).toBe('unknown')
-    expect(poolHold({ status: 'failure', error: curvesRevert('0x') })).toBe('unknown')
-    expect(poolHold({ status: 'failure', error: new Error('timeout') })).toBe('unknown')
+    const shown = withoutLaunchPools(pairs, candidates, [{ status: 'success', result: zeroAddress }, { status: 'failure', error: rateLimited }])
+    expect(shown.map((pair) => pair.pair)).toEqual([pairs[0].pair, pairs[2].pair])
+  })
+
+  test('asks nothing and hides nothing without a launchpad', () => {
+    expect(withoutLaunchPools(pairs, [], undefined)).toEqual(pairs)
   })
 })
 

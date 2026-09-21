@@ -1,4 +1,4 @@
-import { BaseError, ContractFunctionRevertedError, zeroAddress, type Address } from 'viem'
+import { zeroAddress, type Address } from 'viem'
 
 /** Rows per lens.pairs / lens.positions call. */
 export const LENS_PAGE = 200n
@@ -30,25 +30,30 @@ export async function readAllPages<T>(
   return [...first, ...rest.flat().flat()]
 }
 
-/** Why an unfunded USDC pool is kept out of the app: its launch curve is live, or the launchpad has not answered. */
-export type PoolHold = 'launch' | 'unknown'
-
-type CurveLookup =
-  | { status: 'success'; result: { token: Address; graduated: boolean } }
-  | { status: 'failure'; error: unknown }
-
-export function revertErrorName(error: unknown): string | undefined {
-  if (!(error instanceof BaseError)) return undefined
-  const reverted = error.walk((cause) => cause instanceof ContractFunctionRevertedError)
-  return reverted instanceof ContractFunctionRevertedError ? reverted.data?.errorName : undefined
-}
+/** The launchpad's `pluginOf(token)` answer: a launch token has a plugin, any other token the zero address. */
+export type LaunchLookup = { status: 'success'; result: Address } | { status: 'failure'; error: unknown }
 
 /**
- * Reads the launchpad's `curves(token)` answer for the other side of an unfunded USDC pool. Only an UnknownToken
- * revert (not a launch) or a graduated curve lets the pool show; any other failure is an RPC problem, not an answer.
+ * Core pools that hold a launch token are kept out of Swap and Pools. Since v1.3 a launch token's own pool lives in
+ * the launch-pair factory, and it trades against USDC only, through the launch router, which charges its creator
+ * fee [D12]. Anyone can still pair it in a core pool (V13-SPEC §9: trades there skip the creator fee, and that
+ * pool's dividends can be taken from it), but the site does not route through one. `pluginOf` never reverts, so a
+ * token is shown only once the launchpad has answered that it is not a launch; a failed read holds it back.
+ *
+ * `candidates` are the lowercased tokens that were asked about (every non-deployment token), in lookup order.
  */
-export function poolHold(lookup: CurveLookup | undefined): PoolHold | undefined {
-  if (!lookup) return 'unknown'
-  if (lookup.status === 'success') return lookup.result.token === zeroAddress || lookup.result.graduated ? undefined : 'launch'
-  return revertErrorName(lookup.error) === 'UnknownToken' ? undefined : 'unknown'
+export function withoutLaunchPools<P extends { token0: Address; token1: Address }>(
+  pairs: readonly P[],
+  candidates: readonly string[],
+  lookups: readonly (LaunchLookup | undefined)[] | undefined,
+): P[] {
+  if (candidates.length === 0) return [...pairs]
+  const shown = new Set<string>()
+  candidates.forEach((token, index) => {
+    const lookup = lookups?.[index]
+    if (lookup?.status === 'success' && lookup.result === zeroAddress) shown.add(token)
+  })
+  const asked = new Set(candidates)
+  const allowed = (token: Address) => !asked.has(token.toLowerCase()) || shown.has(token.toLowerCase())
+  return pairs.filter((pair) => allowed(pair.token0) && allowed(pair.token1))
 }

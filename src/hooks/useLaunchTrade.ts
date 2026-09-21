@@ -1,45 +1,35 @@
 import { useCallback, useMemo, useState } from 'react'
-import type { Address } from 'viem'
+import type { Hex } from 'viem'
 import { useAccount, usePublicClient, useWriteContract } from 'wagmi'
 import { activeChain } from '../chain'
-import { erc20Abi, launchpadAbi } from '../lib/abi'
-import { quoteBuy, quoteSell } from '../lib/curve'
-import { deployment } from '../lib/deployment'
+import { erc20Abi, launchRouterAbi, launchpadAbi } from '../lib/abi'
+import { deployment, launchSuite } from '../lib/deployment'
 import { isUserRejection, revertReason } from '../lib/errors'
 import { formatAmount } from '../lib/format'
-import { curvePriceImpactBps, curveStateOf, type LaunchRecord } from '../lib/launch'
-import { minReceived } from '../lib/amm'
+import type { LaunchRecord, TradeVenue } from '../lib/launch'
+import { quoteLaunchTrade, type LaunchQuote, type LaunchSide } from '../lib/launchQuote'
 import { pushRecent } from '../lib/recent'
 import type { Token } from '../lib/tokens'
 import { launchFixtureApi } from '../lib/launchFixtureApi'
 import { spendableBalance } from '../lib/gasReserve'
+import type { LaunchAllowances } from './useLaunch'
 import type { SwapTxStatus } from './useSwap'
 
 const fixtureOn = import.meta.env.DEV && import.meta.env.VITE_LAUNCHPAD_FIXTURE === '1'
 
-export type LaunchSide = 'buy' | 'sell'
+export type { LaunchQuote, LaunchSide }
 
 export type LaunchButtonState =
   | 'disconnected'
   | 'wrongChain'
   | 'enterAmount'
-  | 'graduated'
+  | 'poolLoading'
   | 'insufficientBalance'
   | 'needsApproval'
   | 'approving'
   | 'ready'
   | 'quoteMoved'
   | 'pending'
-
-export interface LaunchQuote {
-  amountIn: bigint
-  amountOut: bigint
-  fee: bigint
-  usdcSpent: bigint
-  minReceived: bigint
-  priceImpactBps: bigint
-  graduates: boolean
-}
 
 interface UseLaunchTradeArgs {
   launch: LaunchRecord | undefined
@@ -48,9 +38,10 @@ interface UseLaunchTradeArgs {
   side: LaunchSide
   parsedIn: bigint
   slippageBps: number
+  deadlineMinutes: number
   tokenBalance: bigint
   usdcBalance: bigint
-  usdcAllowance: bigint
+  usdcAllowance: LaunchAllowances
   onConfirmed: () => void | Promise<void>
   onClear: () => void
 }
@@ -62,6 +53,7 @@ export function useLaunchTrade({
   side,
   parsedIn,
   slippageBps,
+  deadlineMinutes,
   tokenBalance,
   usdcBalance,
   usdcAllowance,
@@ -75,40 +67,18 @@ export function useLaunchTrade({
   const [txStatus, setTxStatus] = useState<SwapTxStatus | undefined>()
   const [approvedThisSession, setApprovedThisSession] = useState(false)
 
-  const quote = useMemo<LaunchQuote | undefined>(() => {
-    if (!launch || launch.graduated || parsedIn <= 0n) return undefined
-    const state = curveStateOf(launch)
-    try {
-      if (side === 'buy') {
-        const result = quoteBuy(state, parsedIn)
-        return {
-          amountIn: result.usdcSpent,
-          amountOut: result.tokensOut,
-          fee: result.fee,
-          usdcSpent: result.usdcSpent,
-          minReceived: minReceived(result.tokensOut, slippageBps),
-          priceImpactBps: curvePriceImpactBps(state, result.next),
-          graduates: result.graduates,
-        }
-      }
-      const result = quoteSell(state, parsedIn)
-      return {
-        amountIn: parsedIn,
-        amountOut: result.usdcOut,
-        fee: result.fee,
-        usdcSpent: 0n,
-        minReceived: minReceived(result.usdcOut, slippageBps),
-        priceImpactBps: curvePriceImpactBps(state, result.next),
-        graduates: false,
-      }
-    } catch {
-      return undefined
-    }
-  }, [launch, parsedIn, side, slippageBps])
+  const quote = useMemo(() => (launch ? quoteLaunchTrade(launch, side, parsedIn, slippageBps) : undefined), [launch, parsedIn, side, slippageBps])
 
+  const venue: TradeVenue = launch?.graduated ? 'pool' : 'curve'
+  // A buy on the curve spends through the launchpad, in the pool through the launch router. A sell needs no
+  // approval at all: the token lets either pull only from whoever is selling.
+  const spender = venue === 'curve' ? launchSuite.launchpad : launchSuite.launchRouter
+  const allowance = venue === 'curve' ? usdcAllowance.launchpad : usdcAllowance.router
   const payToken = side === 'buy' ? usdc : token
   const balance = side === 'buy' ? usdcBalance : tokenBalance
-  const requiredIn = quote ? quote.amountIn : parsedIn
+  // The whole offer is what the wallet must cover and approve: the curve takes less only on its sell-out buy, and
+  // only while nobody else trades first.
+  const required = parsedIn
 
   const buttonState = useMemo<LaunchButtonState>(() => {
     if (!isConnected || !account) return 'disconnected'
@@ -116,12 +86,12 @@ export function useLaunchTrade({
     if (phase === 'approving') return 'approving'
     if (phase === 'quoteMoved') return 'quoteMoved'
     if (phase === 'pending') return 'pending'
-    if (launch?.graduated) return 'graduated'
+    if (launch?.graduated && !launch.pool) return 'poolLoading'
     if (!quote) return 'enterAmount'
-    if (!payToken || spendableBalance(payToken.address, balance) < requiredIn) return 'insufficientBalance'
-    if (side === 'buy' && usdcAllowance < requiredIn) return 'needsApproval'
+    if (!payToken || spendableBalance(payToken.address, balance) < required) return 'insufficientBalance'
+    if (side === 'buy' && allowance < required) return 'needsApproval'
     return 'ready'
-  }, [account, balance, chainId, isConnected, launch?.graduated, payToken, phase, quote, requiredIn, side, usdcAllowance])
+  }, [account, allowance, balance, chainId, isConnected, launch?.graduated, launch?.pool, payToken, phase, quote, required, side])
 
   const label = useMemo(() => {
     const symbol = token?.symbol ?? 'token'
@@ -132,8 +102,8 @@ export function useLaunchTrade({
         return activeChain.isTestnet ? 'Switch to Arc Testnet' : 'Switch to Arc'
       case 'enterAmount':
         return 'Enter an amount'
-      case 'graduated':
-        return 'Trade on Swap'
+      case 'poolLoading':
+        return 'Reading the pool…'
       case 'insufficientBalance':
         return `Not enough ${payToken?.symbol ?? 'balance'}`
       case 'needsApproval':
@@ -164,7 +134,7 @@ export function useLaunchTrade({
       if (buttonState === 'needsApproval') {
         setPhase('approving')
         if (fixtureOn) {
-          launchFixtureApi()?.approve(account, usdc.address, requiredIn)
+          launchFixtureApi()?.approve(account, usdc.address, spender, required)
         } else {
           if (!publicClient) return
           const hash = await writeContractAsync({
@@ -172,9 +142,10 @@ export function useLaunchTrade({
             address: usdc.address,
             abi: erc20Abi,
             functionName: 'approve',
-            args: [deployment.launchpad, requiredIn],
+            args: [venue === 'curve' ? deployment.launchpad : deployment.launchRouter, required],
           })
-          await publicClient.waitForTransactionReceipt({ hash })
+          const receipt = await publicClient.waitForTransactionReceipt({ hash })
+          if (receipt.status !== 'success') throw new Error('Transaction reverted')
         }
         setPhase('idle')
         setApprovedThisSession(true)
@@ -184,26 +155,19 @@ export function useLaunchTrade({
 
       if (buttonState !== 'ready') return
 
-      if (!fixtureOn && publicClient && side === 'buy') {
-        const onchain = await publicClient.readContract({
-          address: deployment.launchpad,
-          abi: launchpadAbi,
-          functionName: 'quoteBuy',
-          args: [launch.token, quote.amountIn],
-        })
-        if ((onchain[0] ?? 0n) < quote.minReceived) {
-          setPhase('quoteMoved')
-          return
+      // The chain has the last word: if it now quotes below the bound, stop and show the new amounts.
+      if (!fixtureOn && publicClient) {
+        let chainOut: bigint
+        if (venue === 'curve') {
+          chainOut = side === 'buy'
+            ? (await publicClient.readContract({ address: deployment.launchpad, abi: launchpadAbi, functionName: 'quoteBuy', args: [launch.token, quote.offer] }))[0]
+            : (await publicClient.readContract({ address: deployment.launchpad, abi: launchpadAbi, functionName: 'quoteSell', args: [launch.token, quote.offer] }))[0]
+        } else {
+          chainOut = side === 'buy'
+            ? (await publicClient.readContract({ address: deployment.launchRouter, abi: launchRouterAbi, functionName: 'quoteBuy', args: [launch.token, quote.offer] }))[0]
+            : (await publicClient.readContract({ address: deployment.launchRouter, abi: launchRouterAbi, functionName: 'quoteSell', args: [launch.token, quote.offer] }))[0]
         }
-      }
-      if (!fixtureOn && publicClient && side === 'sell') {
-        const onchain = await publicClient.readContract({
-          address: deployment.launchpad,
-          abi: launchpadAbi,
-          functionName: 'quoteSell',
-          args: [launch.token, quote.amountIn],
-        })
-        if ((onchain[0] ?? 0n) < quote.minReceived) {
+        if (chainOut < quote.minReceived) {
           setPhase('quoteMoved')
           return
         }
@@ -211,25 +175,33 @@ export function useLaunchTrade({
 
       setPhase('pending')
       setTxStatus({ kind: 'pending' })
-      let hash: Address
+      let hash: Hex
       if (fixtureOn) {
         const api = launchFixtureApi()
         if (!api) return
-        const result = side === 'buy'
-          ? api.buy(account, launch.token, quote.amountIn)
-          : api.sell(account, launch.token, quote.amountIn)
-        hash = result.hash
+        hash = side === 'buy' ? api.buy(account, launch.token, quote.offer).hash : api.sell(account, launch.token, quote.offer).hash
       } else {
         if (!publicClient) return
-        hash = await writeContractAsync({
-          chainId: activeChain.id,
-          address: deployment.launchpad,
-          abi: launchpadAbi,
-          functionName: side === 'buy' ? 'buy' : 'sell',
-          args: side === 'buy'
-            ? [launch.token, quote.amountIn, quote.minReceived, account]
-            : [launch.token, quote.amountIn, quote.minReceived, account],
-        })
+        // One deadline for both venues, from the sheet's settings: the curve and the launch router both revert
+        // Expired once block.timestamp is past it.
+        const deadline = BigInt(Math.floor(Date.now() / 1_000) + deadlineMinutes * 60)
+        // The offer, not the quoted spend: on the curve's sell-out buy the spend can be one unit below the smallest
+        // offer that sells out, so offering only the spend could buy a hair less and not graduate.
+        hash = venue === 'curve'
+          ? await writeContractAsync({
+              chainId: activeChain.id,
+              address: deployment.launchpad,
+              abi: launchpadAbi,
+              functionName: side,
+              args: [launch.token, quote.offer, quote.minReceived, account, deadline],
+            })
+          : await writeContractAsync({
+              chainId: activeChain.id,
+              address: deployment.launchRouter,
+              abi: launchRouterAbi,
+              functionName: side,
+              args: [launch.token, quote.offer, quote.minReceived, account, deadline],
+            })
         setTxStatus({ kind: 'pending', hash })
         const receipt = await publicClient.waitForTransactionReceipt({ hash })
         if (receipt.status !== 'success') throw new Error('Transaction reverted')
@@ -254,16 +226,19 @@ export function useLaunchTrade({
   }, [
     account,
     buttonState,
+    deadlineMinutes,
     launch,
     onClear,
     onConfirmed,
     publicClient,
     quote,
-    requiredIn,
+    required,
     side,
+    spender,
     token,
     usdc.address,
     usdc.decimals,
+    venue,
     writeContractAsync,
   ])
 
@@ -271,17 +246,22 @@ export function useLaunchTrade({
     if (buttonState === 'needsApproval') return 'Step 1 of 2 — approve USDC once, then buy.'
     if (buttonState === 'approving') return 'Step 1 of 2 — waiting for the USDC approval to confirm.'
     if (buttonState === 'ready' && approvedThisSession && side === 'buy') return 'Step 2 of 2 — approved. Buy when you are ready.'
-    if (buttonState === 'quoteMoved') return 'The curve moved while you were reading. Check the new amounts, then try again.'
+    if (buttonState === 'quoteMoved') {
+      return venue === 'curve'
+        ? 'The curve moved while you were reading. Check the new amounts, then try again.'
+        : 'The pool moved while you were reading. Check the new amounts, then try again.'
+    }
     return undefined
-  }, [approvedThisSession, buttonState, side])
+  }, [approvedThisSession, buttonState, side, venue])
 
   return {
     quote,
+    venue,
     buttonState,
     label,
     hint,
     isLoading: buttonState === 'approving' || buttonState === 'pending',
-    isDisabled: ['enterAmount', 'insufficientBalance', 'pending', 'graduated'].includes(buttonState),
+    isDisabled: ['enterAmount', 'poolLoading', 'insufficientBalance', 'pending'].includes(buttonState),
     txStatus,
     execute,
   }

@@ -1,4 +1,8 @@
-# Architex Launchpad v1.3 — binding spec (draft for owner sign-off)
+# Architex Launchpad v1.3 — binding spec
+
+Signed off by the owner 2026-09-21 and built on branch `v13`. This file describes what was built, including
+the builders' safer interpretations (marked **[built]**), two later owner decisions (**[D21]**, **[D22]**) and
+the fixes from the security review (**[review]**).
 
 v1.3 replaces the v1.2 launchpad (deployed on mainnet at `0x9Ac420d77E019D5e9F79a3020B0b5eB28d72B959`,
 0 launches, withdrawn from the site 2026-09-21). It adds per-token **creator fees** routed to **plugins**
@@ -18,7 +22,8 @@ Details not asked but forced by those decisions are marked **[derived]** — rev
 - **Both fees are taken in USDC [D11]**, computed on the trade's gross USDC and rounded **up** (they
   never round in the trader's favour). A buy pays them out of the USDC in; a sell out of the USDC out.
 - **No liquidity-provider fee** in launch pools. An "LP fee" is plugin behaviour (owner, Q "Pool fees").
-- **Launch fee: 1 USDC** (unchanged from v1.2).
+- **Launch fee: 1 USDC** (unchanged from v1.2). `createToken` takes `maxLaunchFee` and reverts `LaunchFeeAboveMax`
+  if the admin raised the fee above it while the launch was pending **[D22]**.
 - **Every bonding curve is identical**: the v1.2 constants stay hard-coded (`TOTAL_SUPPLY` 1B,
   `CURVE_SUPPLY` 800M, `POOL_SUPPLY` 200M, `VIRTUAL_TOKENS_0`, `VIRTUAL_USDC_0 = 8_333_333_333`). Not a
   constructor parameter, not per deployment (owner).
@@ -28,6 +33,7 @@ Details not asked but forced by those decisions are marked **[derived]** — rev
 - **One plugin per token, set at launch, locked forever [D5]**. A plugin is **any address**: custom
   addresses are allowed; immutability, not curation, is the safety guarantee **[D7]**. The site states
   plainly where fees go (the listed plugin's name, or "custom address") and makes no safety claim about it.
+  The launchpad refuses only the few addresses that could never pass fees on (§2.1) **[review]**.
 - **Accrual, never push.** Creator fees accrue per token inside the launchpad (from curve trades and from
   launch-pool trades). **Anyone can collect a token's accrued creator fees to its plugin, any time [D9]**.
   A trade never calls a plugin, so no plugin can block trading.
@@ -55,15 +61,31 @@ interface IArchitexFeePlugin is IERC165 {
   OpenZeppelin `ERC165Checker.supportsInterface(plugin, type(IArchitexFeePlugin).interfaceId)` is true.
   Anything else (a wallet, a Safe, an arbitrary contract) just receives USDC by `transfer` on collection.
   A creator's smart-contract wallet therefore works as a "Creator wallet" destination.
+- **Which addresses a creator may pick [review].** Any address that can pass fees on. `createToken` reverts
+  `InvalidPlugin` for zero, the launchpad, USDC, the launch router, the pair factory, the new token, any
+  launch pair (its own or another token's), and any other launch token. Fees sent to most of these would be
+  stranded; a plain transfer into a launch pair can be taken by anyone with `skim`, before or after
+  graduation. The launchpad records every launch pair as `createToken` creates it (`isLaunchPair`; no pair is
+  created anywhere else), so the new token's own pair counts too, and the new token's and its pair's
+  addresses are predictable, so a builder could offer them. The dead address stays allowed: burning the fees
+  is a choice. `pluginData` must be empty for an address that does not declare the interface
+  (`DataForNonPlugin`): data nothing will read means a mistyped plugin address, which would otherwise launch
+  and take every fee. Listed plugins check where they send fees the same way (§2.2).
 - **Fees are pulled, not credited.** On collection the launchpad `approve`s the plugin for `amount`, calls
   `onFees`, then checks that exactly `amount` left its balance and that the allowance is zero, and reverts
   otherwise. A plugin can never credit itself fees it did not receive, and neither can a caller that
   merely calls `onFees` directly: every credit is backed by USDC transferred in the same call.
 - **`onLaunch` is authenticated per token.** Launch-token addresses are predictable, so a plugin could be
   pre-configured by an attacker for a token about to be created. Listed plugins accept `onLaunch` only
-  if `launchpad.curves(token).plugin == msg.sender` or `msg.sender == launchpad`. This covers the Combo
-  case, where the Combo is the token's plugin and configures its sub-plugins. Configuration is write-once
-  per token.
+  if `launchpad.pluginOf(token) == msg.sender`, or if `msg.sender == launchpad` and
+  `pluginOf(token) == address(this)`. This covers the Combo case, where the Combo is the token's plugin
+  and configures its sub-plugins. Use `pluginOf`, not `curves()`: `curves()` reverts for unknown tokens.
+  Configuration is write-once per token.
+- **The hook decision is made once, at launch, and stored** (`Curve.pluginHooks`) **[built]**. Collection uses
+  the stored value, so `onFees` runs for a token exactly when `onLaunch` did. This matters for a plugin whose
+  `supportsInterface` answer could change later (an upgradeable proxy).
+- **Hooks run under the launchpad's reentrancy guard**, so a plugin cannot trade inside `onFees`. Buyback &
+  burn buys in its own separate `run` call.
 - If `onLaunch` reverts, `createToken` reverts (the creator's own choice). If `onFees` reverts, that
   collection reverts and the fees stay accrued **[D10]**.
 
@@ -72,31 +94,79 @@ interface IArchitexFeePlugin is IERC165 {
 | Plugin | Behaviour |
 | --- | --- |
 | **Creator wallet** | No contract: `plugin` is an address the creator names (default: the creator). |
-| **Split** | Up to **20** payees with fixed shares, set in `onLaunch` data **[D16]**. Per-token accounting; each payee (or anyone for them) pulls `release(token, payee)`. |
+| **Split** | Up to **20** payees with fixed shares, set in `onLaunch` data **[D16]**. Per-token accounting; each payee (or anyone for them) pulls `release(token, payee)`. Payees can't be zero, duplicates, the plugin, the launchpad, USDC or the token **[built]**, nor any launch pair, the launch router, the pair factory or any launch token **[review]**: fees sent to any of those would be stuck, or skimmed out of a pair by anyone. |
 | **Buyback & burn** | Anyone can run it **[D14]**. Each run buys the token with that token's accrued USDC (through the launchpad while on the curve, the launch router after graduation) and **burns** it, so total supply drops **[D13]**. |
-| **Distribute to holders** | On `onFees`, distributes the USDC to the token's holders pro-rata through the token's built-in dividend tracker **[D15]**. Holders claim USDC on the token page. |
-| **Combo** | Splits a token's fees across up to 5 plugins by basis points summing to 10,000, forwarding `onLaunch` data to each. |
+| **Distribute to holders** | Passes each collection straight to the token's `distribute`, which **streams it to holders over 24 hours with continuous accrual** (§3) **[D15]**: a holder earns only for the seconds it holds, so a bot that buys, collects, claims and sells in one transaction earns exactly 0 **[D21]**. The plugin holds nothing; holders claim on the token page (`claim` / `claimFor` on the token). |
+| **Combo** | Splits a token's fees across up to 5 plugins by basis points summing to 10,000, forwarding `onLaunch` data to each. An entry that isn't a plugin must have empty data, which catches a mistyped plugin address **[built]**. Entries follow Split's payee rules. A Combo inside a Combo can't configure listed plugins. |
 
-**Buyback & burn chunking [derived]**: each run spends at most **0.25% of the USDC-side reserve** (the
-curve's `virtualUsdc`, or the pool's USDC reserve), and **at most one run per token per block**. A
-sandwich attacker pays at least ~1% in platform fees on the round trip, more than the ≤ ~0.5% price
-move of one chunk, so sandwiching a run loses money. A run does not take a slippage bound, because the
-cap is the protection.
+**Buyback & burn pacing [review]**: a run offers min(held, budget). The cap is **0.25% of the USDC-side
+reserve** (the curve's `virtualUsdc`, or the pool's USDC reserve). The budget is the cap prorated by the
+time since the token's last run, `cap × min(now − lastRunAt, 1 h) / 1 h` rounded down, and a full cap for
+its first run. So a token spends **at most 0.25% of its reserve per hour, plus one full cap at once** after
+an idle hour, and still runs at most once per block. A run takes no slippage bound: the pacing is the
+protection. An offer below `MIN_RUN_USDC` = 3 units is no run (`previewRun` 0, `run` reverts
+`NothingToBuy`): fees round up, so 2 units pay 1 + 1 and buy nothing, while 3 always leave a net unit that
+buys at least one token wei, on the curve and in the pool. At most 2 units per token can stay behind.
+
+- To front-run the buyback, a trader buys before runs and sells after them, paying 0.5% + c on each leg
+  (c = the token's creator fee), while each full cap lifts the price by about 0.5%. Beyond the one cap
+  available at once, that takes about **((0.5% + c) / 0.25% − 1) hours** of runs. The exact-integer model
+  of the curve and pool (a run every second, positions of 1 to 20,000 USDC) puts the shortest profitable
+  hold at **3.1 h for c = 0.5%, 5.2 h for 1%, 9.4 h for 2%, 23 h for 5% and 48.6 h for 10%**. Until then
+  the round trip loses, whatever its size; past it the trader is a holder collecting what the buyback gives
+  every holder, at the market's risk. A trader who is also paid the creator fee (the creator, through a
+  Combo) faces a smaller c. `BuybackBurnFrontRun.t.sol` reproduces the model to the unit.
+- Why not per block: the first build capped each run and allowed one per block. A trader could buy once,
+  run in each of the next blocks and sell once, paying the fees once for many caps. That paid after 3 runs
+  at c = 0%, 7 at 1%, 24 at 5% and 50 at 10%, and Arc makes more than a block a second; at 1% with
+  1,000 USDC waiting, it took 44% of the pile.
 
 ## 3. Launch tokens (v2)
 
 - Fixed 1B supply, minted to the launchpad at construction. No owner, no mint.
 - **`burn(amount)`**: any holder burns their own tokens; total supply drops **[D13]**.
-- **USDC dividend tracker [D15]**:
-  - `distribute(amount)` pulls USDC from the caller; anyone may distribute.
-  - `claimable(holder)`, `claim()`, `claimFor(holder)`. `claimFor` pays the holder, never the caller.
+- **USDC dividends, streamed [D15] [D21]**:
+  - `distribute(amount)` pulls exactly `amount` USDC from the caller; anyone may distribute (a plugin, or a
+    creator paying holders directly). `distribute(0)` is a no-op, and it never reverts for lack of eligible
+    supply.
+  - **Continuous accrual** (Synthetix StakingRewards style): what is distributed is paid out over
+    `DRIP_PERIOD` = 24 hours, and each eligible account earns second by second in proportion to what it holds.
+    A holder earns only for the time it holds, so buying, claiming and selling in one transaction earns exactly
+    0, however much has been distributed and however long nobody touched the token. (This replaces the first
+    D21 design, a plugin-side drip that released matured amounts to whoever held at release time: reviews
+    showed any lump released that way stays snipeable.)
+  - A new distribution joins what the stream still owes; the stream's end moves to the amount-weighted average
+    of its old end and now + `DRIP_PERIOD`, **rounded down** (at least now + 1). A first stream runs exactly
+    24 hours; dust never moves the end; holding a stream back costs a deposit of about
+    (owed + amount) / (seconds to go) USDC per second, which itself goes to holders. The rate is rounded down,
+    so nobody is ever over-credited; the dust stays in the token.
+  - **Paused while nobody holds**: below one whole eligible token nothing accrues and the stream's end moves
+    out by the paused time, so no backlog builds for whoever buys next.
+  - Accrual runs first in every transfer (before balances change), in `distribute` and in `claim`; eligible
+    supply only changes in transfers, so it is constant over every interval accrued. Eligible supply is tracked
+    as balances cross the excluded boundary and always equals the formula below.
+  - `claimable(holder)`, `claim()`, `claimFor(holder)`. `claimFor` pays the holder, never the caller. Views for
+    the site: `streamRate()` (USDC per second), `streamEnd()`, `lastAccrual()`, `undistributed()`,
+    `DRIP_PERIOD()`, `totalDistributed()`.
   - Excluded from earning: the launchpad (the curve inventory), the token's launch pool, the burn
     address, and `address(0)`. Eligible supply is the total supply minus the excluded balances.
-  - Standard magnified-dividend-per-share accounting with per-account corrections (2^128 magnitude). A
-    distribution with zero eligible supply reverts.
+  - Magnified-dividend-per-share accounting with per-account corrections (2^128 magnitude); the per-share value
+    grows continuously, and the corrections keep what each account has earned fixed through transfers.
 - Transfers **into** its launch pool are blocked until graduation (as v1.2).
-- `pull(from, amount)`: callable by the launchpad or the launch router, only with their own `msg.sender`
-  as `from`. Sells on the curve and in the pool need no approval **[derived]**.
+- `pull(from, to, amount)`: callable only by the launchpad (into itself) or the launch router (into the pair),
+  each passing only its own `msg.sender` as `from`. Sells on the curve and in the pool need no approval
+  **[derived]**.
+- **Dividends need at least one whole eligible token** (`MIN_ELIGIBLE_SUPPLY`) **[built]**: below that,
+  `eligibleSupply()` reports 0 and the stream pauses. Without it, a sole holder of 1 wei could recycle
+  flash-loaned USDC through distribute/claim until the per-share value overflowed on large transfers, which
+  would freeze the curve. Each holder's share rounds down by at most 1 unit; the dust stays in the token.
+- **Cost [built, measured in review]**: a plain transfer costs ~47k with no dividends. Once a token has had any
+  distribution, a transfer in a new second while a stream runs costs ~15k more (~6k in the same second, ~6k after
+  the stream ends), a first-time receiver ~40k more (its correction slot is written for the first time; nearly
+  every curve buyer), and the first transfer after a token's first distribution ~66k more, once. On the real
+  launchpad a running stream adds ~23–29k to a curve or pool trade (end-to-end tests). Anyone can switch this
+  accounting on for any token with `distribute(1)` (0.000001 USDC) and keep a stream running with 1 unit a day;
+  the cost is bounded and nothing can revert. Deploying a token costs ~0.4M more than v1.2's token.
 
 ## 4. Launch pools (separate suite)
 
@@ -122,12 +192,19 @@ cap is the protection.
   4. `launchpad.initialize(factory, router)`: one call only, by the deployer. `createToken` reverts until
      it has run.
 - **Creating a token:** `createToken(name, symbol, metadataURI, creatorFeeBps, plugin, pluginData,
-  initialBuyUsdc, minTokensOut)`.
-  - It validates `creatorFeeBps ≤ 1000` and `plugin ≠ 0`, deploys the token, creates its launch pair, and
-    registers the curve (with `creatorFeeBps` and `plugin`).
+  initialBuyUsdc, minTokensOut, maxLaunchFee)` **[D22]**. The plugin must be an address that can pass fees
+  on, and `pluginData` must be empty unless it declares the interface (§2.1).
+  - It validates `creatorFeeBps ≤ 1000` and `plugin ≠ 0`, deploys the token, creates its launch pair and
+    records it (`isLaunchPair`), checks the plugin (§2.1), and registers the curve (with `creatorFeeBps` and
+    `plugin`).
   - It then calls `onLaunch` if the plugin declares the interface, and finally runs the optional first
     buy.
 - **`Curve` struct** gains `uint16 creatorFeeBps` and `address plugin`. `pair` is now the launch pair.
+- **Curve trades take a deadline [review]:** `buy(token, usdcIn, minTokensOut, to, deadline)` and
+  `sell(token, tokensIn, minUsdcOut, to, deadline)` revert `Expired` when `block.timestamp > deadline`, the
+  launch router's rule. **This changes v1.2's curve ABI**, which had no deadline (so only the minimum out bounded
+  a delayed transaction). `createToken`'s first buy takes none: it runs in the launch transaction itself.
+  Buyback & burn passes the current block's time.
 - **Buy math (curve):**
   - `platformFee = ceil(usdcIn·50/10⁴)`, `creatorFee = ceil(usdcIn·c/10⁴)`, `net = usdcIn − both`.
   - On the exact-fill (sell-out) buy:
@@ -141,15 +218,20 @@ cap is the protection.
   - `collectCreatorFees(token)` is permissionless and non-reentrant. It pays the token's plugin as in §2.1.
 - **Graduation:** as v1.2 (atomic inside the sell-out buy, direct transfers, no router, LP to the burn
   address), into the **launch pair**.
-- **Events:** `Trade` carries `platformFee` and `creatorFee`. `TokenCreated` carries `creatorFeeBps`
-  and `plugin`. There is also `CreatorFeesCollected(token, plugin, amount)`.
+- **Events:** `Trade` carries `platformFee` and `creatorFee`. `TokenCreated` indexes token, creator and plugin
+  and carries `creatorFeeBps`. Also `CreatorFeesCollected(token, plugin, amount)`,
+  `PoolFeesAccrued(token, platformFee, creatorFee)`, `Initialized(pairFactory, router)`, and the router's
+  `PoolTrade`.
+- **Hardening [built]:** `initialize` checks the factory and router point at this launchpad and its USDC;
+  `accrueTradeFees` only accepts a known, graduated token; `collectFees` is non-reentrant; a trade whose
+  rounded-up fees eat the whole input or output reverts `ZeroAmount`.
 - **Admin:** unchanged (`setFeeTo`, `setFeeToSetter`, `setLaunchFee` capped at 100 USDC). The admin has
   no power over creator fees, plugins, curves or pools.
 
 ## 6. Invariants (each needs a test; fuzz/invariant where possible)
 
 1. USDC held by the launchpad == `pendingFees` + Σ `pendingCreatorFees` + Σ over ungraduated curves of
-   (`virtualUsdc − VIRTUAL_USDC_0`), to the unit.
+   (`virtualUsdc − VIRTUAL_USDC_0`), to the unit, unless someone sends it USDC unasked (then ≥; §9).
 2. Every creator fee a plugin is credited was transferred to it in the same call.
 3. No trade makes an external call to a plugin; a reverting plugin never blocks a buy, a sell, a
    graduation or another token's collection.
@@ -157,7 +239,8 @@ cap is the protection.
    than was paid.
 5. Launch-pool swaps succeed only through the router and always pay both fees. Direct `swap` reverts.
 6. Dividends: Σ claimable + Σ claimed ≤ Σ distributed, and excluded accounts never accrue.
-7. Buyback runs spend ≤ 0.25% of the USDC-side reserve, at most once per token per block.
+7. Buyback runs spend at most 0.25% of the USDC-side reserve each, prorated by the time since the token's last
+   run (a full cap for its first run and after an hour), at most once per token per block.
 8. The whole v1.2 security list still holds (graduation atomicity, pair lock, donated-USDC safety,
    exact-fill, two live curves independent).
 
@@ -188,7 +271,58 @@ cap is the protection.
    graduation rehearsal.
 3. Mainnet: the owner deploys. The Launch tab reappears pointing at v1.3.
 
-## 9. Not in v1.3
+## 9. Accepted limits
+
+- **Launch tokens in third-party pools.** Anyone can pair a launch token in a core-AMM pool. Trades there skip
+  creator fees, and that pool's dividends can be pulled out with `claimFor` then `skim`. Nothing on-chain can
+  prevent it, as with any ERC-20.
+- **Launch-pool liquidity** has no router helper, so adding or removing it must be done atomically by the caller.
+- **USDC blocklist.** If a plain-address Combo entry is blocklisted by USDC, that token's collections fail and
+  its fees stay with the launchpad **[D10]**. A blocklisted Split payee only blocks their own release.
+- **USDC sent straight to a plugin** (not through collection) is credited to no token and can't be recovered.
+  The builder should not offer plugin addresses as Split payees.
+- **Launch tokens held by a plugin.** A plugin contract is an ordinary holder: launch tokens sent to one keep
+  earning dividends, and claiming them (`claimFor`) moves USDC into the plugin credited to no token, as above.
+- **The launchpad's USDC ≥ its books.** It holds at least `pendingFees` + Σ `pendingCreatorFees` + Σ
+  ungraduated curve floats, and exactly that unless someone sends it USDC unasked. A surplus (a direct
+  transfer, or a sell or `skim` paid out to the launchpad) can't be recovered, by design: nothing reads its
+  balance. Monitors must check `≥`, not `==`.
+- **Blocklisted launch pair.** If Circle blocklists a token's launch pair before graduation, the sell-out buy
+  can't seed it, so the curve can't graduate; smaller buys and sells still work.
+- **Blocklisted shared plugin.** Listed plugins are shared singletons. If Circle blocklists one, collections
+  for every token that uses it, directly or through a Combo, revert and their fees stay with the launchpad
+  **[D10]**; what the plugin already holds is frozen too.
+- **Sells need no approval.** The launchpad and the launch router `pull` the seller's tokens (§3). A contract
+  that relays arbitrary launchpad or router calls (a smart account with a session key scoped to "may call the
+  launchpad") lets whoever holds that key sell its tokens to themselves. Such accounts must scope keys by
+  selector and arguments.
+- **Configuration events are not authoritative.** A token's registered plugin may call a listed plugin's
+  `onLaunch` for that token at any time (that is how a Combo configures its entries). So a creator's wallet
+  can mark its token configured on Split later, which changes nothing about where fees go. The site decides
+  from `pluginOf` and the stored `pluginHooks` flag (and `allocationOf` for a Combo), never from events.
+- **Future launch addresses as fee destinations** (Grok review #4, final review). The destination checks know
+  every launch pair and launch token that exists at launch time. Launch pairs and tokens are deployed with
+  CREATE, so the address of the *next* pair or token can be computed in advance; a creator who names one as
+  their plugin, a Split payee or a Combo target passes the checks. Fees sent to a future pair can later be
+  taken by anyone with `skim`; fees sent to a future token are stuck. Only the creator chooses destinations,
+  and could as easily name their own wallet, so this moves nobody else's funds; the site only offers
+  destinations it can check.
+- **Combo remainder.** Each Combo slice is `amount × bps / 10,000` rounded down and the last entry takes the
+  remainder, so it gains at most (entries − 1) raw units per collection (0.000004 USDC with five entries). The
+  creator chooses the order.
+- **Buyback pacing can lag a busy, high-fee token.** Buyback & burn spends at most 0.25% of the USDC-side reserve
+  an hour, so fees arriving faster than that wait in the plugin: for a 25,000 USDC pool, from about 15,000
+  USDC of daily volume at a 10% creator fee (30,000 at 5%, 150,000 at 1%). Nothing is lost; the buyback catches
+  up as volume falls or the reserve grows.
+- **Blocklisted launch token.** If Circle blocklists a launch token contract, its claims and `distribute` revert:
+  holders can't claim what they earned, and Distribute-to-holders collections for it (behind a Combo, the whole
+  collection) fail and stay with the launchpad **[D10]**.
+- **A sole holder takes the whole stream while alone.** Dividends are pro-rata by the second. After everyone
+  else sells, whoever holds at least one whole token collects everything the stream pays while they are the
+  only holder. Nothing builds up for them in advance (the stream pauses while nobody holds), and anyone who
+  buys in shares from that second on.
+
+## 10. Not in v1.3
 
 Launch tokens trading against anything but USDC. Creator fees changing after launch. Plugin changes after
 launch. An on-chain plugin allowlist. An LP plugin (buildable later on open `mint`, per [D17]).

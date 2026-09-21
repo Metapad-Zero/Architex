@@ -2,7 +2,7 @@ import { formatUnits } from 'viem'
 import { formatAmount } from '../lib/format'
 import { spendableBalance, USDC_GAS_RESERVE } from '../lib/gasReserve'
 import type { Token } from '../lib/tokens'
-import { TokenSelect } from './TokenSelect'
+import { TokenSelect, type PickerExtra } from './TokenSelect'
 import { TokenMark } from './TokenMark'
 
 interface AmountFieldProps {
@@ -24,6 +24,8 @@ interface AmountFieldProps {
   onSubmit?: () => void
   /** Marks the token trigger for the ⌘K shortcut. */
   hotkey?: string
+  /** More rows under the picker's tokens while it is open (Swap's launch tokens). */
+  pickerExtra?: PickerExtra
 }
 
 function sanitizeAmount(value: string, decimals: number): string | undefined {
@@ -60,6 +62,7 @@ export function AmountField({
   checkBalance = true,
   onSubmit,
   hotkey,
+  pickerExtra,
 }: AmountFieldProps) {
   const balance = token ? balances.get(token.address.toLowerCase()) ?? 0n : 0n
   const spendable = token ? spendableBalance(token.address, balance) : 0n
@@ -109,7 +112,7 @@ export function AmountField({
             <span>{token.symbol}</span>
           </span>
         ) : (
-          <TokenSelect token={token} tokens={tokens} balances={balances} onSelect={onToken} disabled={disabled} label={`${label} token`} hotkey={hotkey} />
+          <TokenSelect token={token} tokens={tokens} balances={balances} onSelect={onToken} disabled={disabled} label={`${label} token`} hotkey={hotkey} extra={pickerExtra} />
         )}
       </div>
       <div className="mt-2 flex min-h-6 items-center justify-between gap-3 text-sm">

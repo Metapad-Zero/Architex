@@ -1,23 +1,25 @@
 /**
- * Live smoke test for the launchpad on Arc Testnet, against real USDC.
+ * Live smoke test for the launchpad v1.3 on Arc Testnet, against real USDC.
  *
  *   bun run scripts/launchpad-smoke.ts                 # read-only: wiring and constants
  *   BURNER_KEY=0x… bun run scripts/launchpad-smoke.ts  # also trades: needs about 12 test USDC, keeps most of it
  *   SMOKE_BUY=2 BURNER_KEY=0x… bun run …               # smaller buys: needs about 6
+ *   SMOKE_FEE=250 …                                    # the creator fee the smoke token launches with, in bps (default 250)
  *
  * Arc's USDC moves balances through a chain-native precompile that a local fork cannot execute, so
  * this is the only place the launchpad meets the real token: allowance and transferFrom on the
- * 6-decimal ERC-20 view of the native balance, the launch fee, a buy, a sell, fee collection, and
- * the accounting identity (USDC held == accrued fees + curve float) checked to the unit.
+ * 6-decimal ERC-20 view of the native balance, the launch fee, a buy, a sell, both fee collections,
+ * and the accounting identity (USDC held == platform fees + creator fees + curve float) checked to the unit.
  *
- * Every on-chain result is compared with the reference model in src/lib/curve.ts. Testnet only:
- * the script refuses any other chain id.
+ * The smoke token's creator fees go to the trader's own wallet (a plain address: no plugin hooks), so
+ * collectCreatorFees pays the trader back. Every on-chain result is compared with the reference model in
+ * src/lib/curve.ts. Testnet only: the script refuses any other chain id.
  */
 import { createPublicClient, createWalletClient, formatUnits, getAddress, http, parseEventLogs, zeroAddress, type Address, type Hex, type TransactionReceipt } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { arcTestnet } from 'viem/chains'
 import deployment from '../src/deployments/arc-testnet.json'
-import { erc20Abi, launchpadAbi, pairAbi } from '../src/lib/abi'
+import { erc20Abi, launchPairAbi, launchpadAbi } from '../src/lib/abi'
 import { CURVE, INITIAL_CURVE, quoteBuy, quoteSell, type CurveState } from '../src/lib/curve'
 
 const rpc = process.env.ARC_TESTNET_RPC ?? 'https://rpc.testnet.arc.io'
@@ -37,14 +39,18 @@ const launchpad = getAddress(deployment.launchpad)
 if (launchpad === zeroAddress) throw new Error('No launchpad address in src/deployments/arc-testnet.json yet. Deploy first: docs/launchpad/TESTNET-DEPLOY.md')
 const usdc = getAddress(deployment.tokens.find((t) => t.symbol === 'USDC')!.address)
 const pad = { address: launchpad, abi: launchpadAbi } as const
+const CREATOR_FEE_BPS = Number(process.env.SMOKE_FEE ?? '250')
+if (!Number.isInteger(CREATOR_FEE_BPS) || CREATOR_FEE_BPS < 0 || CREATOR_FEE_BPS > 1_000) throw new Error('SMOKE_FEE must be 0 to 1000 (bps).')
 
 // ── Read-only: wiring and constants ─────────────────────────────────────────
 check('usdc', await pub.readContract({ ...pad, functionName: 'usdc' }), usdc)
-check('factory', await pub.readContract({ ...pad, functionName: 'factory' }), getAddress(deployment.factory))
+check('router', await pub.readContract({ ...pad, functionName: 'router' }), getAddress(deployment.launchRouter))
+check('pairFactory', await pub.readContract({ ...pad, functionName: 'pairFactory' }), getAddress(deployment.launchPairFactory))
 check('VIRTUAL_USDC_0', await pub.readContract({ ...pad, functionName: 'VIRTUAL_USDC_0' }), CURVE.VIRTUAL_USDC_0)
 check('VIRTUAL_TOKENS_0', await pub.readContract({ ...pad, functionName: 'VIRTUAL_TOKENS_0' }), CURVE.VIRTUAL_TOKENS_0)
 check('CURVE_SUPPLY', await pub.readContract({ ...pad, functionName: 'CURVE_SUPPLY' }), CURVE.CURVE_SUPPLY)
 check('FEE_BPS', await pub.readContract({ ...pad, functionName: 'FEE_BPS' }), CURVE.FEE_BPS)
+check('MAX_CREATOR_FEE_BPS', await pub.readContract({ ...pad, functionName: 'MAX_CREATOR_FEE_BPS' }), CURVE.MAX_CREATOR_FEE_BPS)
 const launchFee = await pub.readContract({ ...pad, functionName: 'launchFee' })
 const feeTo = await pub.readContract({ ...pad, functionName: 'feeTo' })
 console.log(`     launch fee ${formatUnits(launchFee, 6)} USDC, fees go to ${feeTo}, admin ${await pub.readContract({ ...pad, functionName: 'feeToSetter' })}`)
@@ -67,15 +73,20 @@ const usdcOf = (who: Address) => pub.readContract({ address: usdc, abi: erc20Abi
  */
 const UNIT = 10n ** 12n
 const nativeOf = (who: Address) => pub.getBalance({ address: who })
+/** Curve buys and sells revert Expired past their deadline, like the launch router's: 20 minutes from now. */
+const deadline = () => BigInt(Math.floor(Date.now() / 1000) + 20 * 60)
 const gasCost = (receipt: TransactionReceipt) => receipt.gasUsed * receipt.effectiveGasPrice
 
-/** USDC the launchpad owes: accrued fees plus the float of every curve that has not graduated. */
+/** USDC the launchpad owes: platform fees, every token's creator fees, and every live curve's float (V13-SPEC §6.1). */
 async function owed(): Promise<bigint> {
   let total = await pub.readContract({ ...pad, functionName: 'pendingFees' })
   const count = await pub.readContract({ ...pad, functionName: 'tokensLength' })
   for (let start = 0n; start < count; start += 50n) {
     const page = await pub.readContract({ ...pad, functionName: 'curvesPage', args: [start, 50n] })
-    for (const c of page) if (!c.graduated) total += c.virtualUsdc - CURVE.VIRTUAL_USDC_0
+    for (const c of page) {
+      total += await pub.readContract({ ...pad, functionName: 'pendingCreatorFees', args: [c.token] })
+      if (!c.graduated) total += c.virtualUsdc - CURVE.VIRTUAL_USDC_0
+    }
   }
   return total
 }
@@ -110,41 +121,59 @@ check('held == owed before', await usdcOf(launchpad), await owed())
 const allowance = await pub.readContract({ address: usdc, abi: erc20Abi, functionName: 'allowance', args: [account.address, launchpad] })
 if (allowance < needed) await send('approve', { address: usdc, abi: erc20Abi, functionName: 'approve', args: [launchpad, needed] })
 
-// Create with an initial buy.
+// Create with an initial buy; creator fees go to the trader's own wallet (no plugin data), capped launch fee [D22].
 const stamp = Date.now().toString(36).toUpperCase()
 const feesBeforeCreate = await pub.readContract({ ...pad, functionName: 'pendingFees' })
-const expectedCreate = quoteBuy(INITIAL_CURVE, BUY)
+const expectedCreate = quoteBuy(INITIAL_CURVE, BUY, CREATOR_FEE_BPS)
 let before = await nativeOf(account.address)
-let receipt = await send('createToken', { ...pad, functionName: 'createToken', args: [`Smoke ${stamp}`, `SMK${stamp.slice(-3)}`, '', BUY, expectedCreate.tokensOut] })
+let receipt = await send('createToken', {
+  ...pad,
+  functionName: 'createToken',
+  args: [`Smoke ${stamp}`, `SMK${stamp.slice(-3)}`, '', CREATOR_FEE_BPS, account.address, '0x', BUY, expectedCreate.tokensOut, launchFee],
+})
 const token = parseEventLogs({ abi: launchpadAbi, logs: receipt.logs, eventName: 'TokenCreated' })[0].args.token
 console.log(`     token ${token}`)
 check('create: trader paid fee + buy + gas', before - (await nativeOf(account.address)), (launchFee + BUY) * UNIT + gasCost(receipt))
 check('create: trader tokens', await pub.readContract({ address: token, abi: erc20Abi, functionName: 'balanceOf', args: [account.address] }), expectedCreate.tokensOut)
-check('create: fees accrued', (await pub.readContract({ ...pad, functionName: 'pendingFees' })) - feesBeforeCreate, launchFee + expectedCreate.fee)
+check('create: platform fees accrued', (await pub.readContract({ ...pad, functionName: 'pendingFees' })) - feesBeforeCreate, launchFee + expectedCreate.platformFee)
+check('create: creator fees accrued', await pub.readContract({ ...pad, functionName: 'pendingCreatorFees', args: [token] }), expectedCreate.creatorFee)
+check('create: plugin', await pub.readContract({ ...pad, functionName: 'pluginOf', args: [token] }), account.address)
 const curve = await checkCurve('create', token, expectedCreate.next)
-check('create: pair is empty', await pub.readContract({ address: curve.pair, abi: pairAbi, functionName: 'totalSupply' }), 0n)
+check('create: creator fee', curve.creatorFeeBps, CREATOR_FEE_BPS)
+check('create: no plugin hooks for a wallet', curve.pluginHooks, false)
+check('create: launch pool is empty', await pub.readContract({ address: curve.pair, abi: launchPairAbi, functionName: 'totalSupply' }), 0n)
 
 // Buy again: the on-chain quote, the model and the trade must agree.
-const expectedBuy = quoteBuy(expectedCreate.next, BUY)
-const [quotedTokens, quotedFee] = await pub.readContract({ ...pad, functionName: 'quoteBuy', args: [token, BUY] })
+const expectedBuy = quoteBuy(expectedCreate.next, BUY, CREATOR_FEE_BPS)
+const [quotedTokens, quotedPlatform, quotedCreator] = await pub.readContract({ ...pad, functionName: 'quoteBuy', args: [token, BUY] })
 check('buy: quote tokens == model', quotedTokens, expectedBuy.tokensOut)
-check('buy: quote fee == model', quotedFee, expectedBuy.fee)
+check('buy: quote platform fee == model', quotedPlatform, expectedBuy.platformFee)
+check('buy: quote creator fee == model', quotedCreator, expectedBuy.creatorFee)
 before = await nativeOf(account.address)
-receipt = await send('buy', { ...pad, functionName: 'buy', args: [token, BUY, expectedBuy.tokensOut, account.address] })
+receipt = await send('buy', { ...pad, functionName: 'buy', args: [token, BUY, expectedBuy.tokensOut, account.address, deadline()] })
 check('buy: trader paid buy + gas', before - (await nativeOf(account.address)), BUY * UNIT + gasCost(receipt))
 await checkCurve('buy', token, expectedBuy.next)
 
 // Sell everything back, with no token approval: the launchpad pulls from the seller.
 const held = expectedBuy.next.tokensSold
-const expectedSell = quoteSell(expectedBuy.next, held)
-const [quotedOut] = await pub.readContract({ ...pad, functionName: 'quoteSell', args: [token, held] })
+const expectedSell = quoteSell(expectedBuy.next, held, CREATOR_FEE_BPS)
+const [quotedOut, sellPlatform, sellCreator] = await pub.readContract({ ...pad, functionName: 'quoteSell', args: [token, held] })
 check('sell: quote == model', quotedOut, expectedSell.usdcOut)
+check('sell: fees == model', `${sellPlatform}/${sellCreator}`, `${expectedSell.platformFee}/${expectedSell.creatorFee}`)
 before = await nativeOf(account.address)
-receipt = await send('sell', { ...pad, functionName: 'sell', args: [token, held, expectedSell.usdcOut, account.address] })
+receipt = await send('sell', { ...pad, functionName: 'sell', args: [token, held, expectedSell.usdcOut, account.address, deadline()] })
 check('sell: trader received proceeds - gas', (await nativeOf(account.address)) - before, expectedSell.usdcOut * UNIT - gasCost(receipt))
 await checkCurve('sell', token, expectedSell.next)
 
-// Anyone may push accrued fees to feeTo.
+// Anyone may collect a token's creator fees to its plugin: here, back to the trader's wallet by plain transfer.
+const creatorOwed = expectedCreate.creatorFee + expectedBuy.creatorFee + expectedSell.creatorFee
+check('creator fees accrued over all three trades', await pub.readContract({ ...pad, functionName: 'pendingCreatorFees', args: [token] }), creatorOwed)
+before = await nativeOf(account.address)
+receipt = await send('collectCreatorFees', { ...pad, functionName: 'collectCreatorFees', args: [token] })
+check('collect creator: plugin received', (await nativeOf(account.address)) - before, creatorOwed * UNIT - gasCost(receipt))
+check('collect creator: cleared', await pub.readContract({ ...pad, functionName: 'pendingCreatorFees', args: [token] }), 0n)
+
+// Anyone may push accrued platform fees to feeTo.
 const pending = await pub.readContract({ ...pad, functionName: 'pendingFees' })
 before = await nativeOf(feeTo)
 receipt = await send('collectFees', { ...pad, functionName: 'collectFees' })

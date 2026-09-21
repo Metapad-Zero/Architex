@@ -1,9 +1,9 @@
 import { useMemo, useSyncExternalStore } from 'react'
 import { isAddress, type Address } from 'viem'
-import { useAccount, useReadContract } from 'wagmi'
+import { useAccount, useReadContract, useReadContracts } from 'wagmi'
 import { activeChain } from '../chain'
-import { lensAbi, launchpadAbi } from '../lib/abi'
-import { deployment, isDeployed, isLaunchpadDeployed } from '../lib/deployment'
+import { launchPairAbi, launchpadAbi, lensAbi } from '../lib/abi'
+import { deployment, isDeployed, isLaunchpadDeployed, launchSuite } from '../lib/deployment'
 import { asLaunchCurve, type LaunchRecord } from '../lib/launch'
 import { launchFixtureApi } from '../lib/launchFixtureApi'
 import { rememberToken, type Token, type TokenMetaResult } from '../lib/tokens'
@@ -17,9 +17,15 @@ function zero(): number {
   return 0
 }
 
-function usdcToken(): Token {
+export function usdcToken(): Token {
   const listed = deployment.tokens.find((token) => token.address.toLowerCase() === activeChain.usdc.toLowerCase())
   return listed ?? { address: activeChain.usdc, symbol: 'USDC', name: 'USD Coin', decimals: 6, faucet: false }
+}
+
+/** USDC allowances a launch trade may need: to the launchpad (curve buys, launches) and the launch router (pool buys). */
+export interface LaunchAllowances {
+  launchpad: bigint
+  router: bigint
 }
 
 export function useLaunch(token: Address | undefined) {
@@ -64,13 +70,27 @@ export function useLaunch(token: Address | undefined) {
     },
   })
 
-  const allowanceQuery = useReadContract({
-    address: deployment.lens,
-    abi: lensAbi,
-    functionName: 'allowances',
-    args: [owner!, deployment.launchpad, [usdc.address]],
+  const allowancesQuery = useReadContracts({
+    allowFailure: false,
+    contracts: [
+      { address: deployment.lens, abi: lensAbi, functionName: 'allowances', args: [owner!, deployment.launchpad, [usdc.address]] },
+      { address: deployment.lens, abi: lensAbi, functionName: 'allowances', args: [owner!, deployment.launchRouter, [usdc.address]] },
+    ],
     query: {
       enabled: !fixtureOn && isLaunchpadDeployed && Boolean(owner),
+      refetchInterval: 4_000,
+    },
+  })
+
+  const curve = useMemo(() => (curveQuery.data ? asLaunchCurve(curveQuery.data) : undefined), [curveQuery.data])
+
+  // A graduated token trades in its launch pool: its reserves price it and quote every pool trade.
+  const reservesQuery = useReadContract({
+    address: curve?.pair,
+    abi: launchPairAbi,
+    functionName: 'getReserves',
+    query: {
+      enabled: !fixtureOn && Boolean(curve?.graduated),
       refetchInterval: 4_000,
     },
   })
@@ -81,12 +101,14 @@ export function useLaunch(token: Address | undefined) {
       void fixtureVersion
       return api?.get(token)
     }
-    if (!curveQuery.data) return undefined
+    if (!curve) return undefined
     const meta = ((metaQuery.data ?? []) as readonly TokenMetaResult[])[0]
+    const reserves = reservesQuery.data
     const record: LaunchRecord = {
-      ...asLaunchCurve(curveQuery.data),
+      ...curve,
       name: meta?.name || 'Launch token',
       symbol: meta?.symbol || 'TOKEN',
+      pool: curve.graduated && reserves ? { reserveToken: reserves[0], reserveUsdc: reserves[1] } : undefined,
     }
     rememberToken({
       address: record.token,
@@ -97,7 +119,7 @@ export function useLaunch(token: Address | undefined) {
       isLaunch: true,
     })
     return record
-  }, [api, curveQuery.data, fixtureVersion, metaQuery.data, token])
+  }, [api, curve, fixtureVersion, metaQuery.data, reservesQuery.data, token])
 
   const launchToken = useMemo<Token | undefined>(
     () =>
@@ -115,11 +137,16 @@ export function useLaunch(token: Address | undefined) {
   const usdcBalance = fixtureOn
     ? (api?.balance(owner, usdc.address) ?? 0n)
     : (balancesQuery.data?.[valid ? 1 : 0] ?? 0n)
-  const usdcAllowance = fixtureOn ? (api?.allowance(owner, usdc.address) ?? 0n) : (allowanceQuery.data?.[0] ?? 0n)
+  const usdcAllowance: LaunchAllowances = fixtureOn
+    ? {
+        launchpad: api?.allowance(owner, usdc.address, launchSuite.launchpad) ?? 0n,
+        router: api?.allowance(owner, usdc.address, launchSuite.launchRouter) ?? 0n,
+      }
+    : { launchpad: allowancesQuery.data?.[0]?.[0] ?? 0n, router: allowancesQuery.data?.[1]?.[0] ?? 0n }
 
   const refetch = async () => {
     if (fixtureOn) return
-    await Promise.all([curveQuery.refetch(), metaQuery.refetch(), balancesQuery.refetch(), allowanceQuery.refetch()])
+    await Promise.all([curveQuery.refetch(), metaQuery.refetch(), balancesQuery.refetch(), allowancesQuery.refetch(), reservesQuery.refetch()])
   }
 
   return {

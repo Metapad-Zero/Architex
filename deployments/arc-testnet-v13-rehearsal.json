@@ -1,0 +1,32 @@
+{
+  "chainId": 5042002,
+  "network": "Arc Testnet",
+  "mode": "rehearsal-usdc",
+  "deployer": "0x7212fA4Fe663d063A7a83dA0467d592ed3A51D46",
+  "commit": "05e7abc",
+  "usdc": "0x309297011592BA9a157204e57EB0AF2175D8ceed",
+  "launchpad": "0xCEbf26B8d49963860B09851a1d27C73fd4b6DC37",
+  "pairFactory": "0x171b4969F54b896EBD518eC5D857181D9766B78D",
+  "router": "0xd4561e380219F6BFb798b52A1F9bcB8445d8CE52",
+  "plugins": {
+    "split": "0xBC28f21B476E33BCbccD92a1831A68ca44993Ea5",
+    "buybackBurn": "0xD1A52781CbB1F990e1c0d471FeC6E00E99CE631B",
+    "holders": "0xED3D99A33f9c25c9077a0aFD399b5B36504484A9",
+    "combo": "0x3F6a480dBb609256A8EdF943456Afec1f565f0c8"
+  },
+  "launchFee": "1000000",
+  "feeTo": "0x7212fA4Fe663d063A7a83dA0467d592ed3A51D46",
+  "feeToSetter": "0x7212fA4Fe663d063A7a83dA0467d592ed3A51D46",
+  "deployedAt": "2026-09-21T23:04:03.000Z",
+  "txs": {
+    "rUSDC": "0x74b65724481bfd7219d4f10530fedf954ca8bd62bdce467872e97c476663f6d2",
+    "launchpad": "0x248bc0db6e0cbe4ca9892f4c2d1ed2c3a61c6b51844a50c0b2a816f7210ceedd",
+    "pairFactory": "0xae9635f47b073e6870d9b9af706b564c073a81a5f734b3875bb1e82f7ce6977f",
+    "router": "0x2106366307608870347a1f24fbf7011821007c40c139531d0e1c52d13838336b",
+    "initialize": "0x92e46a3bb13424eb7c29a2e9015a7082d8c4fc18c5cbf098686419948c26c3a6",
+    "split": "0x2010b7aba3339c36d063248d56dcca985caa7996b33e2e788ea3fb7586aea1c6",
+    "buybackBurn": "0x37e0410bf1d89e783d6c0d28a5551f172cd56efa6fd61ab4b6abace90e8b04d8",
+    "holders": "0x45a85886c0fdc8e8c11158e9f9c60758e076f444fc43f78c42c66051dd414cdd",
+    "combo": "0xb6e0fbca6ab2ed6207e4049fd2762f4048c8495549dd1040d47d3b766a7b501b"
+  }
+}

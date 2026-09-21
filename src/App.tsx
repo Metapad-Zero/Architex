@@ -23,6 +23,7 @@ export default function App() {
         <Suspense fallback={<div className="pools-page"><TableSkeleton rows={5} /></div>}>
           <LaunchView
             token={route.view === 'launch' ? route.token : undefined}
+            side={route.view === 'launch' ? route.side : undefined}
             creating={route.view === 'launch-new'}
             onOpen={(token) => setRoute({ view: 'launch', token })}
             onCreate={() => setRoute({ view: 'launch-new' })}

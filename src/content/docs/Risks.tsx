@@ -33,15 +33,66 @@ export function DocsRisks() {
 
       <h3 className="mt-6 text-base font-semibold text-ink">There is an admin key, and it's narrower than that sounds</h3>
       <p>
-        One address, held on a hardware wallet, can redirect where the trading and launch fees
-        go and change the flat launch fee (capped, so it can never be raised past a small
-        ceiling). That's the entire admin surface — no pause, no upgrade, no access to any
-        curve's funds, no way to touch a launch or a pool once it exists. Redirecting fees can
-        point at a single wallet or a multi-recipient split contract (see "Fee-distribution
-        plugins" on the <span className="font-semibold">Launch</span> page) — either way, it
-        only ever moves where the protocol's own fee revenue lands, never anyone's trade,
-        deposit, or holdings.
+        One address, held on a hardware wallet, can redirect where the platform's own trading and
+        launch fees go and change the flat launch fee (capped, so it can never be raised past a
+        small ceiling, and never above the fee a creator's launch agreed to). That's the entire
+        admin surface — no pause, no upgrade, no access to any curve's funds, and no power over
+        any token's creator fee, its destination, its curve or its pool. It only ever moves where
+        the protocol's own fee revenue lands, never anyone's trade, deposit, holdings or creator
+        fees.
       </p>
+
+      <h3 className="mt-6 text-base font-semibold text-ink">Creator-fee destinations are the creator's choice</h3>
+      <p>
+        A token's creator fee goes wherever its creator pointed it, for good. The listed plugins
+        were reviewed by pull request; a custom address wasn't, and the site says only which it
+        is. If a destination breaks, its fees stay stuck in the launchpad forever: trading is
+        unaffected, and nobody can redirect them. Check where a token's fees go before you buy,
+        especially a high fee going to an address you can't read.
+      </p>
+
+      <h3 className="mt-6 text-base font-semibold text-ink">Limits Architex accepts</h3>
+      <p>
+        Some things no contract can prevent, and v1.3 lives with them rather than pretend
+        otherwise:
+      </p>
+      <ul className="list-disc space-y-2 pl-5">
+        <li>
+          Anyone can pair a launch token in a regular Architex pool, or anywhere else, like any
+          ERC-20. Trades there skip the creator fee, and if the token pays holders, such a pool's
+          share of the USDC can be taken out of it by anyone. The site doesn't list or route
+          through those pools.
+        </li>
+        <li>
+          Launch-pool liquidity has no helper on this site: adding or removing it has to be done
+          with the pool contract directly, in one transaction. Tokens you add to a launch pool earn
+          no holder dividends, because the pool is excluded from them.
+        </li>
+        <li>
+          USDC can block addresses. If a wallet inside a Combo gets blocked, that token's
+          collections fail and its fees stay in the launchpad. A blocked Split payee only blocks
+          their own release.
+        </li>
+        <li>
+          USDC sent straight to a plugin, rather than collected through the launchpad, is credited
+          to no token and can't be recovered. That's why the builder refuses a plugin as a Split
+          payee.
+        </li>
+        <li>
+          The listed plugins are shared by every token that picks them. If USDC ever blocked one, or
+          blocked a launch token itself, collections for the tokens involved would fail and their
+          fees would stay in the launchpad; a blocked token's holders couldn't claim either.
+        </li>
+        <li>
+          Buyback &amp; burn spends at most 0.25% of the pool's USDC side an hour. On a busy token
+          with a high creator fee, fees can arrive faster than that, and the USDC waiting to buy
+          back grows until volume cools. Nothing is lost; it's just slower.
+        </li>
+        <li>
+          Holder dividends are shared by the second. If everyone else sells, whoever still holds
+          collects the whole stream while they're alone, and anyone who buys shares it from then on.
+        </li>
+      </ul>
 
       <h3 className="mt-6 text-base font-semibold text-ink">Curves can stall, and graduation isn't a promise of anything</h3>
       <p>
