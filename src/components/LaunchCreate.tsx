@@ -4,7 +4,7 @@ import { useAccount } from 'wagmi'
 import { activeChain } from '../chain'
 import { useConnectSheet } from '../hooks/useConnectSheet'
 import { useCreateToken } from '../hooks/useCreateToken'
-import { useFeePluginProbe } from '../hooks/useFeePluginProbe'
+import { useDestinationProbe } from '../hooks/useDestinationProbe'
 import { useLaunch } from '../hooks/useLaunch'
 import { useSettings } from '../hooks/useSettings'
 import { parseOptionalAmount, sanitizeAmount } from '../lib/amountInput'
@@ -85,7 +85,9 @@ export function LaunchCreate({ onCreated }: LaunchCreateProps) {
   const fee = parsePercentBps(feeText, MAX_CREATOR_FEE_BPS, 0)
   const creatorFeeBps = fee.bps ?? 0
   const [plan, setPlan] = useState<FeePlan>({ kind: 'wallet', address: '' })
-  const probed = useFeePluginProbe(useMemo(() => planAddresses(plan), [plan]))
+  // Every typed address is checked against the launchpad before the launch can go (launch pools, launch tokens,
+  // the router and pair factory are refused on chain), and against ERC-165 (a plugin is never a Split payee).
+  const facts = useDestinationProbe(useMemo(() => planAddresses(plan), [plan]))
   const planned = useMemo(
     () =>
       planFeePlugin(plan, {
@@ -93,9 +95,9 @@ export function LaunchCreate({ onCreated }: LaunchCreateProps) {
         usdc: activeChain.usdc,
         suite: launchSuite,
         architexContracts: [deployment.factory, deployment.router, deployment.lens],
-        pluginAddresses: probed,
+        facts,
       }),
-    [address, plan, probed],
+    [address, facts, plan],
   )
 
   const valid =
@@ -232,7 +234,7 @@ export function LaunchCreate({ onCreated }: LaunchCreateProps) {
             errors={planned.errors}
             showErrors={submitted}
             account={address}
-            probed={probed}
+            probed={facts.plugins}
           />
 
           {detailsEnabled && (

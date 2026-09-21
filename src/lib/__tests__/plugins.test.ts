@@ -9,6 +9,7 @@ import {
   parsePercentBps,
   planFeePlugin,
   type ComboEntry,
+  type DestinationFacts,
   type FeePlan,
   type PayeeRow,
   type PlanContext,
@@ -124,10 +125,63 @@ describe('Split', () => {
     expect(planFeePlugin(split([payee('a', suite.holderPlugin)]), ctx).errors['payee:a:address']).toBe(
       'That is the Distribute to holders plugin. USDC a Split pays it is credited to no token and is lost.',
     )
-    const probed = { ...ctx, pluginAddresses: new Set([bob.toLowerCase()]) }
+    const probed = { ...ctx, facts: facts({ plugins: [bob] }) }
     expect(planFeePlugin(split([payee('a', bob)]), probed).errors['payee:a:address']).toBe(
       'That address is a fee plugin. USDC a Split pays it is credited to no token and is lost.',
     )
+  })
+})
+
+/** On-chain answers, as hooks/useDestinationProbe reports them. */
+function facts(input: { plugins?: string[]; launchPairs?: string[]; launchTokens?: string[]; unchecked?: string[]; router?: Address; pairFactory?: Address }): DestinationFacts {
+  const set = (list: string[] = []) => new Set(list.map((address) => address.toLowerCase()))
+  return {
+    plugins: set(input.plugins),
+    launchPairs: set(input.launchPairs),
+    launchTokens: set(input.launchTokens),
+    unchecked: set(input.unchecked),
+    router: input.router,
+    pairFactory: input.pairFactory,
+  }
+}
+
+describe('what the launchpad refuses, checked before signing (V13-SPEC §2.1, review)', () => {
+  const pool = getAddress('0x00000000000000000000000000000000000000f1')
+  const launchToken = getAddress('0x00000000000000000000000000000000000000f2')
+  const liveRouter = getAddress('0x00000000000000000000000000000000000000f3')
+  const liveFactory = getAddress('0x00000000000000000000000000000000000000f4')
+  const known: PlanContext = { ...ctx, facts: facts({ launchPairs: [pool], launchTokens: [launchToken], router: liveRouter, pairFactory: liveFactory }) }
+  const asEveryRole = (address: string) => [
+    planFeePlugin({ kind: 'custom', address }, known).errors.custom,
+    planFeePlugin({ kind: 'split', payees: [payee('a', address)] }, known).errors['payee:a:address'],
+    planFeePlugin({ kind: 'combo', entries: [entry('e', { kind: 'custom', address }, '100')] }, known).errors['entry:e:target'],
+  ]
+
+  test('a launch pool, where anyone could skim what is sent', () => {
+    for (const error of asEveryRole(pool)) expect(error).toBe('That is a launch pool. Anyone could take fees sent to it, so it cannot receive them.')
+  })
+
+  test('a launch token', () => {
+    for (const error of asEveryRole(launchToken)) expect(error).toBe('That is a launch token. It cannot pass fees on, so they would be stuck.')
+  })
+
+  test('the router and pair factory the launchpad itself reports, and USDC', () => {
+    for (const address of [liveRouter, liveFactory]) {
+      for (const error of asEveryRole(address)) expect(error).toBe('That is an Architex contract. It cannot pass USDC on, so the fees would be stuck.')
+    }
+    for (const error of asEveryRole(usdc)) expect(error).toBe('That is the USDC contract. USDC sent to it is lost.')
+  })
+
+  test('waits for the launchpad’s answer rather than guess, and lets a checked wallet through', () => {
+    const pending = { ...ctx, facts: facts({ unchecked: [bob] }) }
+    expect(planFeePlugin({ kind: 'custom', address: bob }, pending).errors.custom).toBe('Checking this address on Arc…')
+    expect(planFeePlugin({ kind: 'custom', address: bob }, pending).plan).toBe(undefined)
+    expect(planFeePlugin({ kind: 'custom', address: bob }, known).plan).toEqual({ plugin: bob, pluginData: '0x' })
+  })
+
+  test('never sends settings to a plain address: a custom address or a wallet takes empty data', () => {
+    expect(planFeePlugin({ kind: 'custom', address: bob }, known).plan?.pluginData).toBe('0x')
+    expect(planFeePlugin({ kind: 'wallet', address: '' }, known).plan?.pluginData).toBe('0x')
   })
 })
 
@@ -182,13 +236,20 @@ describe('Combo', () => {
 
 describe('where a token’s fees go', () => {
   test('names a listed plugin, the creator’s own wallet, or a custom address', () => {
-    const listed = feeDestination({ plugin: suite.buybackPlugin, creator }, suite)
+    const listed = feeDestination({ plugin: suite.buybackPlugin, creator, pluginHooks: true }, suite)
     expect(destinationName(listed)).toBe('Buyback & burn')
     expect(destinationLabel(listed)).toBe('Buyback & burn')
-    const own = feeDestination({ plugin: creator, creator }, suite)
+    const own = feeDestination({ plugin: creator, creator, pluginHooks: false }, suite)
     expect(destinationLabel(own)).toBe('Creator wallet · 0x0000…00C1')
-    const custom = feeDestination({ plugin: bob, creator }, suite)
+    const custom = feeDestination({ plugin: bob, creator, pluginHooks: false }, suite)
     expect(destinationLabel(custom)).toBe('Custom address · 0x2222…2222')
+  })
+
+  test('decides from the registered plugin and the stored hooks flag only', () => {
+    // A listed plugin's address the launchpad pays by plain transfer credits no token: it is not that plugin.
+    const noHooks = feeDestination({ plugin: suite.splitPlugin, creator, pluginHooks: false }, suite)
+    expect(noHooks.kind).toBe('custom')
+    expect(destinationLabel(noHooks)).toBe('Custom address · 0x5555…5555')
   })
 })
 

@@ -25,6 +25,9 @@ const USDC = 1_000_000n
 const E18 = 10n ** 18n
 const MAGNITUDE = 10n ** 36n
 const DRIP_PERIOD = 86_400
+/** Buyback & burn pacing: the budget refills over an hour; offers under 3 units are no run. */
+const RUN_INTERVAL = 3_600
+const MIN_RUN_USDC = 3n
 const FIXTURE_LAUNCH_FEE = 1n * USDC
 const FIXTURE_USDC_BALANCE = 10_000n * USDC
 const CREATOR = getAddress('0x00000000000000000000000000000000000000c0')
@@ -57,7 +60,10 @@ interface BuybackBook {
   held: bigint
   spent: bigint
   burned: bigint
+  /** The simulated block of the latest run: one run a block. */
   lastRunBlock: number
+  /** Unix seconds of the latest run, 0 if it never ran: the budget refills over the hour after it. */
+  lastRunAt: number
 }
 
 interface HolderBook {
@@ -200,7 +206,7 @@ function configure(token: Address, plugin: Address, data: Hex): void {
       return
     }
     case 'buyback':
-      store.buybacks.set(token.toLowerCase(), { held: 0n, spent: 0n, burned: 0n, lastRunBlock: 0 })
+      store.buybacks.set(token.toLowerCase(), { held: 0n, spent: 0n, burned: 0n, lastRunBlock: 0, lastRunAt: 0 })
       return
     case 'holders':
       store.holders.set(token.toLowerCase(), {
@@ -408,14 +414,28 @@ function createInternal(owner: Address, args: FixtureCreateArgs, time: number, s
   return token
 }
 
+/**
+ * What a buyback run may offer at `time`, as BuybackBurnPlugin paces it: min(held, budget), the budget being the cap
+ * (0.25% of the USDC-side reserve) prorated by the time since the last run, full for a first run or after an hour;
+ * 0 when it already ran this block or the offer is under the 3-unit minimum.
+ */
+function buybackOffer(book: BuybackBook, launch: FixtureLaunch, time: number): bigint {
+  if (blockNumber() < book.lastRunBlock + 1) return 0n
+  const cap = ((launch.graduated ? (launch.pool as PoolReserves).reserveUsdc : launch.state.virtualUsdc) * 25n) / 10_000n
+  const elapsed = book.lastRunAt === 0 ? RUN_INTERVAL : Math.min(Math.max(0, time - book.lastRunAt), RUN_INTERVAL)
+  const budget = (cap * BigInt(elapsed)) / BigInt(RUN_INTERVAL)
+  const offer = book.held < budget ? book.held : budget
+  return offer < MIN_RUN_USDC ? 0n : offer
+}
+
 function runBuybackInternal(token: Address, time: number): Hash {
   const book = store.buybacks.get(token.toLowerCase())
   if (!book) throw new Error('NotConfigured')
   if (blockNumber() < book.lastRunBlock + 1) throw new Error('AlreadyRanThisBlock')
   const launch = find(token)
-  const cap = ((launch.graduated ? (launch.pool as PoolReserves).reserveUsdc : launch.state.virtualUsdc) * 25n) / 10_000n
-  const offer = book.held < cap ? book.held : cap
+  const offer = buybackOffer(book, launch, time)
   if (offer === 0n) throw new Error('NothingToBuy')
+  book.lastRunAt = time
   const plugin = pluginAddress(listedPlugin('buyback'))
   store.balances.set(key(plugin, usdcAddress()), offer)
   const { tokensOut, usdcSpent } = buyInternal(plugin, token, offer, time)
@@ -536,11 +556,8 @@ function creatorFees(token: Address, owner: Address | undefined): CreatorFeeStat
       held: buyback.held,
       totalSpent: buyback.spent,
       totalBurned: buyback.burned,
-      offer: (() => {
-        if (buyback.held === 0n || blockNumber() < buyback.lastRunBlock + 1) return 0n
-        const cap = ((launch.graduated ? (launch.pool as PoolReserves).reserveUsdc : launch.state.virtualUsdc) * 25n) / 10_000n
-        return buyback.held < cap ? buyback.held : cap
-      })(),
+      offer: buybackOffer(buyback, launch, nowSeconds()),
+      lastRunAt: BigInt(buyback.lastRunAt),
     },
     holders: holders && {
       unreleased: holders.unreleased,

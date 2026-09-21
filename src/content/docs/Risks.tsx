@@ -65,7 +65,8 @@ export function DocsRisks() {
         </li>
         <li>
           Launch-pool liquidity has no helper on this site: adding or removing it has to be done
-          with the pool contract directly, in one transaction.
+          with the pool contract directly, in one transaction. Tokens you add to a launch pool earn
+          no holder dividends, because the pool is excluded from them.
         </li>
         <li>
           USDC can block addresses. If a wallet inside a Combo gets blocked, that token's

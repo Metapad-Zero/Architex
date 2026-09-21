@@ -26,7 +26,9 @@ export function DocsTrading() {
         before you confirm, the same receipt you'd see on a swap. A quote can also go stale
         between the moment you review it and the moment you confirm, if someone else trades
         first; the app catches that and asks you to check the new numbers rather than letting a
-        transaction go through against a price you didn't see.
+        transaction go through against a price you didn't see. Every trade, on the curve or in the
+        pool, also carries a deadline, set in the sheet's settings beside your slippage: a trade
+        that hasn't landed by then fails instead of going through late.
       </p>
       <p>
         The buy that sells out a curve is special: it gets exactly the tokens left and pays only
@@ -56,7 +58,7 @@ export function DocsTrading() {
         A graduated token trades against USDC in its own launch pool, through the launch router,
         which charges both fees exactly as the curve did. It doesn't route through Architex's
         regular pools, and the Swap page doesn't quote it: picking a launch token there opens its
-        page instead. Pool trades take a deadline, set in the sheet's settings with your slippage.
+        page instead.
       </p>
     </div>
   )

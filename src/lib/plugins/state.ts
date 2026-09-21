@@ -21,9 +21,20 @@ export interface BuybackState {
   held: bigint
   totalSpent: bigint
   totalBurned: bigint
-  /** What a run now would offer (`previewRun`): 0 when nothing waits or the token already ran this block. */
+  /**
+   * Exactly what a run now would offer (`previewRun`): min(held, budget), where the budget is 0.25% of the USDC-side
+   * reserve prorated by the time since the last run (full after an hour). 0 when the token already ran this block
+   * or the offer would be under MIN_RUN_USDC.
+   */
   offer: bigint
+  /** Unix seconds of the token's latest run; 0 if it never ran. */
+  lastRunAt: bigint
 }
+
+/** Buyback & burn pacing (IBuybackBurnPlugin): the budget refills over this long after each run. */
+export const BUYBACK_RUN_INTERVAL = 3_600n
+/** Buyback & burn's smallest offer, in USDC units: below it a run is refused and previewRun reports 0. */
+export const BUYBACK_MIN_RUN_USDC = 3n
 
 export interface HolderState extends HolderStream {
   /** The token's eligible supply (0 below one whole token, when nothing can be distributed). */

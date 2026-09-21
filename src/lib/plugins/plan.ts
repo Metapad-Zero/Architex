@@ -49,6 +49,24 @@ export interface ComboEntry {
 export type FeePlan = SimpleTarget | { kind: 'combo'; entries: ComboEntry[] }
 export type FeePlanKind = FeePlan['kind']
 
+/**
+ * What the chain says about the addresses typed into the builder (hooks/useDestinationProbe). Every set holds
+ * lowercased addresses.
+ */
+export interface DestinationFacts {
+  /** Declare IArchitexFeePlugin (ERC-165). */
+  plugins: ReadonlySet<string>
+  /** The launchpad's isLaunchPair: USDC sent to one by plain transfer can be skimmed by anyone. */
+  launchPairs: ReadonlySet<string>
+  /** Launch tokens (the launchpad's pluginOf is not zero): they cannot pass USDC on. */
+  launchTokens: ReadonlySet<string>
+  /** Typed but not answered for yet: a plan naming one waits, rather than risk a refused launch. */
+  unchecked: ReadonlySet<string>
+  /** The launchpad's own router() and pairFactory(), as the launchpad reports them. */
+  router?: Address
+  pairFactory?: Address
+}
+
 export interface PlanContext {
   /** The connected wallet: what an empty Creator wallet field means. */
   creator?: Address
@@ -56,8 +74,8 @@ export interface PlanContext {
   suite: LaunchSuite
   /** Other Architex contracts that would strand USDC sent to them (core factory, router, lens). */
   architexContracts?: readonly Address[]
-  /** Addresses an on-chain ERC-165 probe found to declare IArchitexFeePlugin, lowercased. */
-  pluginAddresses?: ReadonlySet<string>
+  /** On-chain facts about the typed addresses; without them only the static checks run. */
+  facts?: DestinationFacts
 }
 
 export interface PluginPlan {
@@ -103,12 +121,27 @@ function same(a: string, b: string): boolean {
   return a.toLowerCase() === b.toLowerCase()
 }
 
-/** Why `address` cannot receive fees in this role, or undefined if it can. */
+/**
+ * Why `address` cannot receive fees in this role, or undefined if it can. The launchpad refuses a plugin, and the
+ * Split and Combo refuse a payee or entry, that is zero, the launchpad, USDC, the launch router or pair factory,
+ * any launch pair or any launch token (V13-SPEC §2.1, §2.2); a listed plugin as a payee, or anything declaring the
+ * plugin interface, is refused here too, because USDC paid straight to a plugin is credited to no token.
+ */
 function refuse(address: Address, role: Recipient, ctx: PlanContext): string | undefined {
   if (address === zeroAddress) return 'The zero address cannot receive fees.'
   if (same(address, ctx.suite.launchpad)) return 'That is the launchpad. It cannot receive its own fees.'
   if (same(address, ctx.usdc)) return 'That is the USDC contract. USDC sent to it is lost.'
-  const architex = [ctx.suite.launchRouter, ctx.suite.launchPairFactory, ...(ctx.architexContracts ?? [])]
+  const facts = ctx.facts
+  const id = address.toLowerCase()
+  if (facts?.launchPairs.has(id)) return 'That is a launch pool. Anyone could take fees sent to it, so it cannot receive them.'
+  if (facts?.launchTokens.has(id)) return 'That is a launch token. It cannot pass fees on, so they would be stuck.'
+  const architex = [
+    ctx.suite.launchRouter,
+    ctx.suite.launchPairFactory,
+    ...(facts?.router ? [facts.router] : []),
+    ...(facts?.pairFactory ? [facts.pairFactory] : []),
+    ...(ctx.architexContracts ?? []),
+  ]
   if (architex.some((contract) => contract !== zeroAddress && same(address, contract))) {
     return 'That is an Architex contract. It cannot pass USDC on, so the fees would be stuck.'
   }
@@ -120,9 +153,11 @@ function refuse(address: Address, role: Recipient, ctx: PlanContext): string | u
     }
     return `That is the ${listed.name} plugin. Choose it from the list so it is set up.`
   }
-  if (role === 'payee' && ctx.pluginAddresses?.has(address.toLowerCase())) {
+  if (role === 'payee' && facts?.plugins.has(id)) {
     return 'That address is a fee plugin. USDC a Split pays it is credited to no token and is lost.'
   }
+  // Last, so a known answer above always wins over "still checking".
+  if (facts?.unchecked.has(id)) return 'Checking this address on Arc…'
   return undefined
 }
 

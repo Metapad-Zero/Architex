@@ -51,13 +51,15 @@ async function readSplit(client: PublicClient, plugin: Address, token: Address):
 }
 
 async function readBuyback(client: PublicClient, plugin: Address, token: Address): Promise<BuybackState> {
-  const [held, totalSpent, totalBurned, preview] = await Promise.all([
+  const [held, totalSpent, totalBurned, preview, lastRunAt] = await Promise.all([
     client.readContract({ address: plugin, abi: buybackPluginAbi, functionName: 'usdcHeld', args: [token] }),
     client.readContract({ address: plugin, abi: buybackPluginAbi, functionName: 'totalUsdcSpent', args: [token] }),
     client.readContract({ address: plugin, abi: buybackPluginAbi, functionName: 'totalTokensBurned', args: [token] }),
+    // Exact for the block it is read in: the paced budget, the per-block limit and the minimum are the plugin's own.
     client.readContract({ address: plugin, abi: buybackPluginAbi, functionName: 'previewRun', args: [token] }),
+    client.readContract({ address: plugin, abi: buybackPluginAbi, functionName: 'lastRunAt', args: [token] }),
   ])
-  return { held, totalSpent, totalBurned, offer: preview[0] }
+  return { held, totalSpent, totalBurned, offer: preview[0], lastRunAt }
 }
 
 async function readHolders(client: PublicClient, plugin: Address, token: Address, account: Address | undefined): Promise<HolderState> {
@@ -85,10 +87,13 @@ async function readHolders(client: PublicClient, plugin: Address, token: Address
 /**
  * The token page's view of a token's creator fees: what waits in the launchpad, and the state of its plugin. A
  * Combo is followed one level down, to the listed plugins among its entries (each serves this token too).
+ * Which plugins serve the token comes only from its registered plugin, the launchpad's stored hooks flag and the
+ * Combo's allocationOf (with its stored isPlugin flags), never from isConfigured or Configured events, which a
+ * token's registered plugin can set on any listed plugin without changing where the fees go (V13-SPEC §9).
  */
 async function readCreatorFees(client: PublicClient, launch: LaunchRecord, account: Address | undefined): Promise<CreatorFeeState> {
   const token = launch.token
-  const listed = listedPluginAt(launch.plugin)
+  const listed = launch.pluginHooks ? listedPluginAt(launch.plugin) : undefined
   const [pending, allocation] = await Promise.all([
     client.readContract({ address: deployment.launchpad, abi: launchpadAbi, functionName: 'pendingCreatorFees', args: [token] }),
     listed?.kind === 'combo'
