@@ -110,6 +110,10 @@ From the second review. Testnet needs none of these; mainnet needs all of them.
       testnet grant or a rehearsal build with the constants scaled down. The pieces are each proven:
       graduation against the deployed pair bytecode (fork suite), real USDC through the launchpad
       (smoke test) and real USDC through the pair (`scripts/amm-smoke.ts`)
-- [ ] `LAUNCH_FEE` decided and non-zero (spam cost; the cap is 100 USDC)
+- [x] `LAUNCH_FEE` decided 2026-09-21: **1 USDC** (`1000000`, 6 decimals — same as the testnet
+      default). Owner's call: "0.5% [the existing FEE_BPS] plus gas and that's it" for trading,
+      but a literal-zero launch fee removes the only spam deterrent (Arc gas is cheap enough,
+      ~$0.27 for a 3-contract deploy, that gas alone won't throttle mass junk-token creation) —
+      1 USDC is negligible for a real launch and non-zero for spam.
 - [ ] `FEE_TO_SETTER` is a hardware wallet and is kept, never renounced: it is the only way to move
       `feeTo` if that address is ever blocklisted by USDC
