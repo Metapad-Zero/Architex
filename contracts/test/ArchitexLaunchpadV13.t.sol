@@ -910,6 +910,9 @@ contract ArchitexLaunchpadV13Test is LaunchpadV13Base {
         pad.collectCreatorFees(token);
         ILaunchToken t = ILaunchToken(token);
         assertEq(t.totalDistributed(), owed);
+        // The token streams what it is given over its DRIP_PERIOD: nothing is claimable at once, all of it a day on.
+        assertEq(t.claimable(alice), 0);
+        vm.warp(vm.getBlockTimestamp() + t.DRIP_PERIOD());
         uint256 a = t.claimable(alice);
         uint256 b = t.claimable(bob);
         assertLe(a + b, owed);

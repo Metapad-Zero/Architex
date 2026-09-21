@@ -14,7 +14,8 @@ import {ILaunchTokenExtensions} from "../../../interfaces/ILaunchTokenExtensions
 // committed interfaces only (the real implementations are being built in parallel). Each mock models the part of
 // V13-SPEC the plugins depend on, plus knobs to make it misbehave.
 
-/// @notice A v2 launch token reduced to what the plugins use: burn, distribute (pulls USDC from the caller) and
+/// @notice A v2 launch token reduced to what the plugins use: burn, distribute (pulls USDC from the caller, with or
+///         without eligible supply, as the real token does; it records the amount but streams nothing) and
 ///         eligibleSupply (total supply minus the launchpad, pair and burn-address balances, or a forced value).
 contract MockLaunchToken is ERC20, ILaunchTokenExtensions {
     using SafeERC20 for IERC20;
@@ -26,6 +27,7 @@ contract MockLaunchToken is ERC20, ILaunchTokenExtensions {
     address public pair;
 
     uint256 public totalDistributed;
+    uint256 public distributeCalls;
     uint256 public burnCalls;
     uint256 public totalBurned;
 
@@ -63,10 +65,31 @@ contract MockLaunchToken is ERC20, ILaunchTokenExtensions {
     }
 
     function distribute(uint256 amount) external {
-        if (eligibleSupply() == 0) revert NoEligibleSupply();
+        if (amount == 0) return;
         IERC20(usdc).safeTransferFrom(msg.sender, address(this), amount - distributeShortfall);
         totalDistributed += amount;
+        distributeCalls += 1;
         emit DividendsDistributed(msg.sender, amount);
+    }
+
+    function DRIP_PERIOD() external pure returns (uint256) {
+        return 24 hours;
+    }
+
+    function streamRate() external pure returns (uint256) {
+        return 0;
+    }
+
+    function streamEnd() external pure returns (uint256) {
+        return 0;
+    }
+
+    function lastAccrual() external pure returns (uint256) {
+        return 0;
+    }
+
+    function undistributed() external pure returns (uint256) {
+        return 0;
     }
 
     function eligibleSupply() public view returns (uint256) {

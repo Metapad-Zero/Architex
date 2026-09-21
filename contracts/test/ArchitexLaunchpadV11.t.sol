@@ -669,8 +669,9 @@ contract ArchitexLaunchpadV11Test is LaunchpadV13Base {
         address token = pad.createToken("Gas", "GAS", "", 0, alice, "", 30_000e6, CURVE_SUPPLY, type(uint256).max);
         uint256 gasUsed = gasBefore - gasleft();
         emit log_named_uint("gas: create + pair + sell-out + graduation", gasUsed);
-        // Measured 2.92M (token + launch pair deployed, sell-out, graduation): well inside a 30M Arc block
-        assertLt(gasUsed, 3_200_000, "create + pair + sell-out + graduation");
+        // Measured 3.31M (token + launch pair deployed, sell-out, graduation; 2.92M before the v1.3 token streamed its
+        // dividends, whose larger bytecode costs ~0.36M to deploy): well inside a 30M Arc block
+        assertLt(gasUsed, 3_500_000, "create + pair + sell-out + graduation");
         LaunchPair pair = LaunchPair(pad.curves(token).pair);
         assertEq(pair.balanceOf(DEAD), pair.totalSupply(), "every LP unit sits at the dead address");
     }

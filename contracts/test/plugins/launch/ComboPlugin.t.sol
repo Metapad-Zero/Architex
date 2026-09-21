@@ -312,11 +312,14 @@ contract ComboPluginTest is LaunchPluginTestBase {
 
         assertEq(split.totalReceived(address(token)), 500_000_003);
         assertEq(buyback.usdcHeld(address(token)), 300_000_002);
-        assertEq(holder.usdcHeld(address(token)), 100_000_000); // streaming: nothing goes out in the delivering block
+        // No holders yet: the holders slice still goes straight to the token, whose stream waits for holders.
+        assertEq(holder.totalDistributed(address(token)), 100_000_000);
+        assertEq(token.totalDistributed(), 100_000_000);
+        assertEq(holder.usdcHeld(address(token)), 0);
         assertEq(usdc.balanceOf(carol), 100_000_002);
         assertEq(
-            split.totalReceived(address(token)) + buyback.usdcHeld(address(token)) + holder.usdcHeld(address(token))
-                + usdc.balanceOf(carol),
+            split.totalReceived(address(token)) + buyback.usdcHeld(address(token))
+                + holder.totalDistributed(address(token)) + usdc.balanceOf(carol),
             amount
         );
         assertEq(usdc.balanceOf(address(combo)), 0);
@@ -329,16 +332,12 @@ contract ComboPluginTest is LaunchPluginTestBase {
     /// @dev Fees through the Combo then work in every sub-plugin exactly as if it were the token's own plugin.
     function test_endToEnd_everySubPluginWorksBehindTheCombo() public {
         MockLaunchToken token = _launchFullCombo();
-        token.mint(dave, 1e18); // a holder, so the holder slice drips out
+        token.mint(dave, 1e18); // a holder
         _collect(token, 1000e6);
 
-        // The holder slice streams over the drip period: nothing in the delivering block, all of it a day later.
-        assertEq(token.totalDistributed(), 0);
-        assertEq(holder.unreleased(address(token)), 100e6);
-        vm.warp(block.timestamp + holder.DRIP_PERIOD());
-        vm.prank(keeper);
-        assertEq(holder.drip(address(token)), 100e6);
+        // The holders slice went straight to the token's distribute (which streams it); the plugin kept nothing.
         assertEq(token.totalDistributed(), 100e6);
+        assertEq(usdc.balanceOf(address(token)), 100e6);
         assertEq(usdc.balanceOf(address(holder)), 0);
 
         split.release(address(token), alice);
@@ -356,13 +355,36 @@ contract ComboPluginTest is LaunchPluginTestBase {
         assertEq(usdc.balanceOf(address(combo)), 0);
     }
 
+    /// @dev Behind a Combo, a revert in the holder plugin would block every collection for the token [D10]. With the
+    ///      holders plugin as the only entry and no eligible supply, every collection, at any time, still goes
+    ///      through: the USDC goes to the token, whose stream waits for holders.
+    function test_holderSliceWithNoEligibleSupplyNeverBlocksCollection() public {
+        MockLaunchToken token = _launchCombo(_addrs(address(holder)), _u16s(10_000), _datas(""));
+        assertEq(token.eligibleSupply(), 0);
+        uint256 t0 = vm.getBlockTimestamp();
+        uint256[5] memory at = [t0, t0 + 2 hours, t0 + 23 hours, t0 + 30 hours, t0 + 9 days];
+        uint256 total;
+        for (uint256 i; i < at.length; ++i) {
+            vm.warp(at[i]);
+            _collect(token, 1e6 + i);
+            total += 1e6 + i;
+        }
+        assertEq(token.totalDistributed(), total, "every delivery reached the token");
+        assertEq(usdc.balanceOf(address(token)), total);
+        assertEq(holder.totalDistributed(address(token)), total);
+        assertEq(usdc.balanceOf(address(holder)), 0);
+        assertEq(usdc.balanceOf(address(launchpad)), 0, "every collection went through");
+        assertEq(usdc.balanceOf(address(combo)), 0);
+    }
+
     function test_onFees_directPayerIsPulledExactly() public {
         MockLaunchToken token = _launchFullCombo();
         _payDirect(address(combo), address(token), keeper, 10_000);
         assertEq(usdc.balanceOf(keeper), 0);
         assertEq(split.totalReceived(address(token)), 5000);
         assertEq(buyback.usdcHeld(address(token)), 3000);
-        assertEq(holder.usdcHeld(address(token)), 1000);
+        assertEq(holder.totalDistributed(address(token)), 1000);
+        assertEq(token.totalDistributed(), 1000);
         assertEq(usdc.balanceOf(carol), 1000);
     }
 

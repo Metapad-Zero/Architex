@@ -369,142 +369,55 @@ contract BuybackBurnPluginInvariantTest is Test {
 
 // ═══ Distribute to holders ════════════════════════════════════════════════════
 
+/// @notice The holders plugin forwards every delivery to the token's distribute in the same call. The handler counts
+///         deliveries that revert (none may: nothing holder-side can block a collection) and toggles eligibility.
 contract HolderHandler is PluginHandlerBase {
-    /// @dev A token's stream just before a delivery.
-    struct Before {
-        uint256 due;
-        uint256 unreleased;
-        uint256 distributed;
-        uint256 end;
-    }
-
     HolderDistributionPlugin internal immutable HOLDER;
-    uint256 internal immutable PERIOD;
-    /// @notice Per token, the stream's balance right after its latest delivery (the line it may not drop below).
-    mapping(address token => uint256) public ghostBalanceAfterDelivery;
-    /// @notice Per token, when its latest delivery happened (where that line starts).
-    mapping(address token => uint256) public ghostDeliveryTime;
-    /// @notice Releases (by drip, dripAndClaim or a delivery) that differ from the linear rule.
-    uint256 public badReleases;
-    /// @notice Deliveries that released any of themselves in their own block, or left the stream mis-set.
-    uint256 public badDeliveries;
-    uint256 public releases; // coverage: drips that released something
-    uint256 public partialReleases; // coverage: releases before the stream's end
-    uint256 public heldForNoHolders; // coverage: something was due but the token had no eligible supply
-    uint256 public deliveriesMidStream; // coverage: deliveries onto a stream that still held USDC
-    uint256 public endsShortOfAFullPeriod; // coverage: deliveries whose weighted end fell short of now + period
+    /// @notice Deliveries that reverted.
+    uint256 public deliveryReverts;
+    uint256 public deliveriesWithoutHolders; // coverage
 
     constructor(HolderDistributionPlugin holder_, TestToken usdc_, MockLaunchpad launchpad_, address[] memory tokens_)
         PluginHandlerBase(usdc_, launchpad_, tokens_)
     {
         HOLDER = holder_;
-        PERIOD = holder_.DRIP_PERIOD();
     }
 
     function deliverViaLaunchpad(uint256 tokenSeed, uint256 amount) external {
         address token = _token(tokenSeed);
         amount = bound(amount, 0, 1e12);
-        Before memory b = _beforeDelivery(token);
-        _deliverViaLaunchpad(token, amount);
-        _afterDelivery(token, amount, b);
+        _noteCoverage(token);
+        USDC.mint(address(LAUNCHPAD), amount);
+        try LAUNCHPAD.collect(token, amount) {
+            ghostCredited[token] += amount;
+        } catch {
+            deliveryReverts += 1;
+        }
     }
 
     function deliverDirect(uint256 tokenSeed, uint256 payerSeed, uint256 amount) external {
         address token = _token(tokenSeed);
         amount = bound(amount, 0, 1e12);
-        Before memory b = _beforeDelivery(token);
-        _deliverDirect(address(HOLDER), token, payerSeed, amount);
-        _afterDelivery(token, amount, b);
-    }
-
-    function drip(uint256 tokenSeed) external {
-        address token = _token(tokenSeed);
-        uint256 expected = _expectedRelease(token);
-        _noteCoverage(token, expected);
-        _checkRelease(token, expected, HOLDER.drip(token));
-    }
-
-    /// @dev Anyone drips and claims; the mock token pays no dividends, so only the drip is checked here (the real
-    ///      token's claims are covered in HolderDistributionPlugin.t.sol).
-    function dripAndClaim(uint256 tokenSeed, uint256 callerSeed) external {
-        address token = _token(tokenSeed);
-        uint256 expected = _expectedRelease(token);
-        _noteCoverage(token, expected);
-        vm.prank(_payers[callerSeed % _payers.length]);
-        (uint256 released,) = HOLDER.dripAndClaim(token);
-        _checkRelease(token, expected, released);
+        _noteCoverage(token);
+        address payer = _payers[payerSeed % _payers.length];
+        USDC.mint(payer, amount);
+        vm.startPrank(payer);
+        USDC.approve(address(HOLDER), amount);
+        bool delivered;
+        try HOLDER.onFees(token, amount) {
+            delivered = true;
+        } catch {}
+        vm.stopPrank();
+        if (delivered) ghostCredited[token] += amount;
+        else deliveryReverts += 1;
     }
 
     function setEligible(uint256 tokenSeed, bool eligible) external {
         MockLaunchToken(_token(tokenSeed)).forceEligibleSupply(eligible ? 1e18 : 0);
     }
 
-    function warp(uint256 secondsRaw) external {
-        vm.warp(block.timestamp + bound(secondsRaw, 0, 30 hours));
-    }
-
-    /// @dev The rule, from the plugin's stream views and the token's eligibility.
-    function _expectedRelease(address token) internal view returns (uint256) {
-        uint256 pending = HOLDER.unreleased(token);
-        if (pending == 0 || MockLaunchToken(token).eligibleSupply() == 0) return 0;
-        uint256 end = HOLDER.streamEnd(token);
-        if (block.timestamp >= end) return pending;
-        uint256 last = HOLDER.lastDrip(token);
-        return Math.mulDiv(pending, block.timestamp - last, end - last);
-    }
-
-    function _noteCoverage(address token, uint256 expected) internal {
-        if (expected == 0 && HOLDER.unreleased(token) != 0 && MockLaunchToken(token).eligibleSupply() == 0) {
-            heldForNoHolders += 1;
-        }
-        if (expected != 0) {
-            releases += 1;
-            if (block.timestamp < HOLDER.streamEnd(token)) partialReleases += 1;
-        }
-    }
-
-    function _checkRelease(address token, uint256 expected, uint256 released) internal {
-        if (released != expected) badReleases += 1;
-        if (released != 0 && HOLDER.lastDrip(token) != block.timestamp) badReleases += 1;
-        if (HOLDER.releasable(token) != 0) badReleases += 1; // a second drip in the same block has nothing
-    }
-
-    function _beforeDelivery(address token) internal view returns (Before memory b) {
-        b.due = _expectedRelease(token);
-        b.unreleased = HOLDER.unreleased(token);
-        b.distributed = HOLDER.totalDistributed(token);
-        b.end = HOLDER.streamEnd(token);
-    }
-
-    /// @dev A delivery releases exactly the old stream's due, restarts the line from now, moves the end to
-    ///      ceil((kept * max(oldEnd, now) + amount * (now + period)) / (kept + amount)), which must lie in
-    ///      [max(oldEnd, now), now + period] and after now, and leaves nothing releasable in its own block. A zero
-    ///      delivery changes nothing.
-    function _afterDelivery(address token, uint256 amount, Before memory b) internal {
-        if (amount == 0) {
-            if (
-                HOLDER.unreleased(token) != b.unreleased || HOLDER.totalDistributed(token) != b.distributed
-                    || HOLDER.streamEnd(token) != b.end
-            ) badDeliveries += 1;
-            return;
-        }
-        uint256 kept = b.unreleased - b.due;
-        if (kept != 0) deliveriesMidStream += 1;
-        uint256 from = b.end > block.timestamp ? b.end : block.timestamp;
-        uint256 expectedEnd = (kept * from + amount * (block.timestamp + PERIOD) + kept + amount - 1) / (kept + amount);
-        uint256 end = HOLDER.streamEnd(token);
-        if (end < block.timestamp + PERIOD) endsShortOfAFullPeriod += 1;
-
-        if (HOLDER.totalDistributed(token) != b.distributed + b.due) badReleases += 1;
-        if (
-            HOLDER.unreleased(token) != kept + amount || HOLDER.lastDrip(token) != block.timestamp
-                || HOLDER.releasable(token) != 0
-        ) badDeliveries += 1;
-        if (end != expectedEnd || end < from || end > block.timestamp + PERIOD || end <= block.timestamp) {
-            badDeliveries += 1;
-        }
-        ghostBalanceAfterDelivery[token] = HOLDER.unreleased(token);
-        ghostDeliveryTime[token] = block.timestamp;
+    function _noteCoverage(address token) internal {
+        if (MockLaunchToken(token).eligibleSupply() == 0) deliveriesWithoutHolders += 1;
     }
 }
 
@@ -530,74 +443,37 @@ contract HolderDistributionPluginInvariantTest is Test {
         handler = new HolderHandler(holder, usdc, launchpad, tokens);
         usdc.transferOwnership(address(handler));
 
-        bytes4[] memory selectors = new bytes4[](6);
+        bytes4[] memory selectors = new bytes4[](3);
         selectors[0] = HolderHandler.deliverViaLaunchpad.selector;
         selectors[1] = HolderHandler.deliverDirect.selector;
-        selectors[2] = HolderHandler.drip.selector;
-        selectors[3] = HolderHandler.dripAndClaim.selector;
-        selectors[4] = HolderHandler.setEligible.selector;
-        selectors[5] = HolderHandler.warp.selector;
+        selectors[2] = HolderHandler.setEligible.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
         targetContract(address(handler));
     }
 
-    /// @dev The plugin holds exactly Σ unreleased: every other unit it received went into a token's distribute.
-    function invariant_usdcHeldEqualsSumOfUnreleased() public view {
-        uint256 sum;
+    /// @dev The plugin holds nothing and leaves no allowance: every unit it received went into a token's distribute in
+    ///      the same call.
+    function invariant_holdsNothing() public view {
+        assertEq(usdc.balanceOf(address(holder)), 0);
         for (uint256 i; i < tokens.length; ++i) {
-            assertEq(holder.usdcHeld(tokens[i]), holder.unreleased(tokens[i]));
-            sum += holder.unreleased(tokens[i]);
-        }
-        assertEq(usdc.balanceOf(address(holder)), sum);
-    }
-
-    /// @dev Per token: unreleased + distributed == credited, and the token received exactly what was distributed.
-    function invariant_perTokenDistributionAccounting() public view {
-        for (uint256 i; i < tokens.length; ++i) {
-            address token = tokens[i];
-            assertEq(holder.unreleased(token) + holder.totalDistributed(token), handler.ghostCredited(token));
-            assertEq(MockLaunchToken(token).totalDistributed(), holder.totalDistributed(token));
-            assertEq(usdc.balanceOf(token), holder.totalDistributed(token));
-            assertEq(usdc.allowance(address(holder), token), 0);
+            assertEq(holder.usdcHeld(tokens[i]), 0);
+            assertEq(usdc.allowance(address(holder), tokens[i]), 0);
         }
     }
 
-    /// @dev A stream with USDC in it started at most DRIP_PERIOD before its end, has not started in the future, and
-    ///      never has more releasable than it holds.
-    function invariant_streamShape() public view {
-        uint256 period = holder.DRIP_PERIOD();
+    /// @dev Per token: everything credited reached exactly that token's distribute, and nothing more.
+    function invariant_everythingCreditedReachedItsToken() public view {
         for (uint256 i; i < tokens.length; ++i) {
             address token = tokens[i];
-            uint256 releasable = holder.releasable(token);
-            assertLe(releasable, holder.unreleased(token));
-            if (holder.unreleased(token) == 0) continue;
-            uint256 last = holder.lastDrip(token);
-            uint256 end = holder.streamEnd(token);
-            assertLe(last, block.timestamp);
-            assertLt(last, end);
-            assertLe(end - last, period);
+            assertEq(holder.totalDistributed(token), handler.ghostCredited(token));
+            assertEq(MockLaunchToken(token).totalDistributed(), handler.ghostCredited(token));
+            assertEq(usdc.balanceOf(token), handler.ghostCredited(token));
         }
     }
 
-    /// @dev Never early: until the stream's end, what is unreleased stays on or above the straight line from the
-    ///      balance right after the latest delivery (at that delivery's time) down to zero at the end. That window is
-    ///      at most a period, so the weaker full-period form holds too.
-    function invariant_neverReleasesEarly() public view {
-        uint256 period = holder.DRIP_PERIOD();
-        for (uint256 i; i < tokens.length; ++i) {
-            address token = tokens[i];
-            uint256 end = holder.streamEnd(token);
-            if (block.timestamp >= end) continue;
-            uint256 line = handler.ghostBalanceAfterDelivery(token) * (end - block.timestamp);
-            assertGe(holder.unreleased(token) * (end - handler.ghostDeliveryTime(token)), line);
-            assertGe(holder.unreleased(token) * period, line);
-        }
-    }
-
-    /// @dev Every release followed the rule, and no delivery released any of itself.
-    function invariant_everyReleaseFollowedTheRule() public view {
-        assertEq(handler.badReleases(), 0, "a release broke the linear rule");
-        assertEq(handler.badDeliveries(), 0, "a delivery released itself or mis-set the stream");
+    /// @dev No delivery reverted, with or without eligible supply.
+    function invariant_deliveriesNeverRevert() public view {
+        assertEq(handler.deliveryReverts(), 0, "a delivery reverted");
     }
 }
 
@@ -610,7 +486,6 @@ contract ComboHandler is PluginHandlerBase {
     HolderDistributionPlugin internal immutable HOLDER;
     uint256 public releases; // coverage
     uint256 public buybackRuns; // coverage
-    uint256 public drips; // coverage: holder drips that released something
 
     constructor(
         ComboPlugin combo_,
@@ -653,23 +528,12 @@ contract ComboHandler is PluginHandlerBase {
         buybackRuns += 1;
     }
 
-    function drip(uint256 tokenSeed) external {
-        address token = _token(tokenSeed);
-        if (!HOLDER.isConfigured(token)) return;
-        if (HOLDER.drip(token) != 0) drips += 1;
-    }
-
     function setEligible(uint256 tokenSeed, bool eligible) external {
         MockLaunchToken(_token(tokenSeed)).forceEligibleSupply(eligible ? 1e18 : 0);
     }
 
     function nextBlock() external {
         vm.roll(block.number + 1);
-    }
-
-    /// @dev Time passes, so the holder slice's stream drips.
-    function warp(uint256 secondsRaw) external {
-        vm.warp(block.timestamp + bound(secondsRaw, 0, 30 hours));
     }
 }
 
@@ -717,15 +581,13 @@ contract ComboPluginInvariantTest is Test {
         handler = new ComboHandler(combo, split, buyback, holder, usdc, launchpad, tokens);
         usdc.transferOwnership(address(handler));
 
-        bytes4[] memory selectors = new bytes4[](8);
+        bytes4[] memory selectors = new bytes4[](6);
         selectors[0] = ComboHandler.deliverViaLaunchpad.selector;
         selectors[1] = ComboHandler.deliverDirect.selector;
         selectors[2] = ComboHandler.release.selector;
         selectors[3] = ComboHandler.runBuyback.selector;
-        selectors[4] = ComboHandler.drip.selector;
-        selectors[5] = ComboHandler.setEligible.selector;
-        selectors[6] = ComboHandler.nextBlock.selector;
-        selectors[7] = ComboHandler.warp.selector;
+        selectors[4] = ComboHandler.setEligible.selector;
+        selectors[5] = ComboHandler.nextBlock.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
         targetContract(address(handler));
     }

@@ -84,7 +84,7 @@ interface IArchitexFeePlugin is IERC165 {
 | **Creator wallet** | No contract: `plugin` is an address the creator names (default: the creator). |
 | **Split** | Up to **20** payees with fixed shares, set in `onLaunch` data **[D16]**. Per-token accounting; each payee (or anyone for them) pulls `release(token, payee)`. Payees can't be zero, duplicates, the plugin, the launchpad, USDC or the token **[built]**: fees sent to any of those would be stuck. |
 | **Buyback & burn** | Anyone can run it **[D14]**. Each run buys the token with that token's accrued USDC (through the launchpad while on the curve, the launch router after graduation) and **burns** it, so total supply drops **[D13]**. |
-| **Distribute to holders** | Pays the USDC to the token's holders pro-rata through the token's built-in dividend tracker **[D15]**, **dripped over 24 hours** so a bot can't buy, collect, claim and sell in one transaction **[D21]**. A new deposit restarts the 24-hour window for everything still undistributed. Anyone can `drip(token)`; holders use `dripAndClaim(token)` on the token page. |
+| **Distribute to holders** | Passes each collection straight to the token's `distribute`, which **streams it to holders over 24 hours with continuous accrual** (§3) **[D15]**: a holder earns only for the seconds it holds, so a bot that buys, collects, claims and sells in one transaction earns exactly 0 **[D21]**. The plugin holds nothing; holders claim on the token page (`claim` / `claimFor` on the token). |
 | **Combo** | Splits a token's fees across up to 5 plugins by basis points summing to 10,000, forwarding `onLaunch` data to each. An entry that isn't a plugin must have empty data, which catches a mistyped plugin address **[built]**. A Combo inside a Combo can't configure listed plugins. |
 
 **Buyback & burn chunking [derived]**: each run spends at most **0.25% of the USDC-side reserve** (the
@@ -97,21 +97,44 @@ cap is the protection.
 
 - Fixed 1B supply, minted to the launchpad at construction. No owner, no mint.
 - **`burn(amount)`**: any holder burns their own tokens; total supply drops **[D13]**.
-- **USDC dividend tracker [D15]**:
-  - `distribute(amount)` pulls USDC from the caller; anyone may distribute.
-  - `claimable(holder)`, `claim()`, `claimFor(holder)`. `claimFor` pays the holder, never the caller.
+- **USDC dividends, streamed [D15] [D21]**:
+  - `distribute(amount)` pulls exactly `amount` USDC from the caller; anyone may distribute (a plugin, or a
+    creator paying holders directly). `distribute(0)` is a no-op, and it never reverts for lack of eligible
+    supply.
+  - **Continuous accrual** (Synthetix StakingRewards style): what is distributed is paid out over
+    `DRIP_PERIOD` = 24 hours, and each eligible account earns second by second in proportion to what it holds.
+    A holder earns only for the time it holds, so buying, claiming and selling in one transaction earns exactly
+    0, however much has been distributed and however long nobody touched the token. (This replaces the first
+    D21 design, a plugin-side drip that released matured amounts to whoever held at release time: reviews
+    showed any lump released that way stays snipeable.)
+  - A new distribution joins what the stream still owes; the stream's end moves to the amount-weighted average
+    of its old end and now + `DRIP_PERIOD`, **rounded down** (at least now + 1). A first stream runs exactly
+    24 hours; dust never moves the end; holding a stream back costs a deposit of about
+    (owed + amount) / (seconds to go) USDC per second, which itself goes to holders. The rate is rounded down,
+    so nobody is ever over-credited; the dust stays in the token.
+  - **Paused while nobody holds**: below one whole eligible token nothing accrues and the stream's end moves
+    out by the paused time, so no backlog builds for whoever buys next.
+  - Accrual runs first in every transfer (before balances change), in `distribute` and in `claim`; eligible
+    supply only changes in transfers, so it is constant over every interval accrued. Eligible supply is tracked
+    as balances cross the excluded boundary and always equals the formula below.
+  - `claimable(holder)`, `claim()`, `claimFor(holder)`. `claimFor` pays the holder, never the caller. Views for
+    the site: `streamRate()` (USDC per second), `streamEnd()`, `lastAccrual()`, `undistributed()`,
+    `DRIP_PERIOD()`, `totalDistributed()`.
   - Excluded from earning: the launchpad (the curve inventory), the token's launch pool, the burn
     address, and `address(0)`. Eligible supply is the total supply minus the excluded balances.
-  - Standard magnified-dividend-per-share accounting with per-account corrections (2^128 magnitude). A
-    distribution with zero eligible supply reverts.
+  - Magnified-dividend-per-share accounting with per-account corrections (2^128 magnitude); the per-share value
+    grows continuously, and the corrections keep what each account has earned fixed through transfers.
 - Transfers **into** its launch pool are blocked until graduation (as v1.2).
 - `pull(from, to, amount)`: callable only by the launchpad (into itself) or the launch router (into the pair),
   each passing only its own `msg.sender` as `from`. Sells on the curve and in the pool need no approval
   **[derived]**.
 - **Dividends need at least one whole eligible token** (`MIN_ELIGIBLE_SUPPLY`) **[built]**: below that,
-  `eligibleSupply()` reports 0 and `distribute` reverts. Without it, a sole holder of 1 wei could recycle
+  `eligibleSupply()` reports 0 and the stream pauses. Without it, a sole holder of 1 wei could recycle
   flash-loaned USDC through distribute/claim until the per-share value overflowed on large transfers, which
   would freeze the curve. Each holder's share rounds down by at most 1 unit; the dust stays in the token.
+- **Cost [built]**: while a stream runs, each transfer, buy, sell and claim pays ~12k gas more for the accrual
+  (one-time ~29k on the first accrual of a token's first distribution); with no stream, ~3k per transfer and
+  ~6k per curve buy or sell (eligible-supply tracking). Deploying a token costs ~0.36M more.
 
 ## 4. Launch pools (separate suite)
 
