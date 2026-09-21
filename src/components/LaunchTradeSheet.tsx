@@ -124,12 +124,8 @@ export function LaunchTradeSheet({
     <div className="swap-sheet">
       {trade.isLoading && <span className="rule-sweep" aria-hidden="true" />}
       <div className="sheet-tools">
-        <SettingsPopover
-          slippageBps={settings.slippageBps}
-          deadlineMinutes={settings.deadlineMinutes}
-          onSlippage={settings.setSlippageBps}
-          onDeadline={settings.setDeadlineMinutes}
-        />
+        {/* Curve buy/sell take no deadline, so only slippage applies here. */}
+        <SettingsPopover slippageBps={settings.slippageBps} onSlippage={settings.setSlippageBps} />
       </div>
       <div className="grid grid-cols-2 gap-2 pb-4 pt-6">
         {(['buy', 'sell'] as const).map((value) => (

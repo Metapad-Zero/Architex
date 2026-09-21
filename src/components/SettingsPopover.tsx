@@ -6,9 +6,9 @@ import { SettingsIcon, XIcon } from './Icons'
 
 interface SettingsPopoverProps {
   slippageBps: number
-  deadlineMinutes: number
+  deadlineMinutes?: number
   onSlippage: (value: number) => void
-  onDeadline: (value: number) => void
+  onDeadline?: (value: number) => void
 }
 
 export function SettingsPopover({ slippageBps, deadlineMinutes, onSlippage, onDeadline }: SettingsPopoverProps) {
@@ -70,10 +70,12 @@ export function SettingsPopover({ slippageBps, deadlineMinutes, onSlippage, onDe
             </label>
             <p className="mt-2 text-xs leading-5 text-g500">Your swap fails if the price moves more than this while it confirms.</p>
           </fieldset>
-          <label className="block text-sm text-g500">
-            Deadline
-            <span className="field-with-suffix mt-2"><input type="number" min="1" max="180" value={deadlineMinutes} onChange={(event) => onDeadline(Number(event.target.value))} /><span>minutes</span></span>
-          </label>
+          {deadlineMinutes !== undefined && onDeadline && (
+            <label className="block text-sm text-g500">
+              Deadline
+              <span className="field-with-suffix mt-2"><input type="number" min="1" max="180" value={deadlineMinutes} onChange={(event) => onDeadline(Number(event.target.value))} /><span>minutes</span></span>
+            </label>
+          )}
         </div>
       </div>
     </>
