@@ -115,9 +115,16 @@ did. Two things make this an acceptable known limitation rather than a blocker:
 2. `contracts/test/ArchitexRouter.t.sol` and the fork suite (`LaunchpadArcFork.t.sol`) already
    exercise multi-hop swaps, slippage, and deadline paths against real bytecode.
 
-Don't keep raising the timeout chasing full symbolic coverage here — it won't converge. If this
-needs closing further, the right tool is Echidna/Foundry fuzzing over the router's public
-functions (not yet written), not more Mythril budget.
+Don't keep raising the timeout chasing full symbolic coverage here — it won't converge.
+
+**Closed 2026-09-20** with Foundry invariant fuzzing instead of more Mythril budget:
+`contracts/test/ArchitexRouterInvariant.t.sol` wires three tokens into two pairs (A/B, B/C) so
+every call can multi-hop, and fuzzes `addLiquidity`/`removeLiquidity`/both swap directions through
+the router — the exact path-explosion surface Mythril couldn't exhaust. 128,000 calls per run,
+including ~25,600 multi-hop exact-in and ~25,600 multi-hop exact-out swaps, 0 failures. Three
+invariants: the router never ends a call holding a balance of any token (it's a pure pass-through),
+`k` never decreases for either pair, and each pair's on-chain balance always covers its reported
+reserves.
 
 ## 4. Third-party scanners — after mainnet deploy + Etherscan-equivalent verification
 
