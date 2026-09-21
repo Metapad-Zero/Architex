@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from 'react'
 import { ARCH_PATH } from '../lib/logomark'
+import { markSplashFinished } from '../lib/splash'
 
 type Phase = 'playing' | 'exiting' | 'done'
 
@@ -18,6 +19,8 @@ export function IntroSplash() {
     if (advanced.current) return
     advanced.current = true
     setPhase('exiting')
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    window.setTimeout(() => markSplashFinished(), reduced ? 0 : 500)
   }, [])
 
   if (phase === 'done') return null
@@ -28,7 +31,10 @@ export function IntroSplash() {
       data-phase={phase}
       aria-hidden="true"
       onAnimationEnd={(event) => {
-        if (event.target === event.currentTarget && phase === 'exiting') setPhase('done')
+        if (event.target === event.currentTarget && phase === 'exiting') {
+          markSplashFinished()
+          setPhase('done')
+        }
       }}
     >
       <div className="intro-mark">

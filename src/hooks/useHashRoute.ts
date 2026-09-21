@@ -10,7 +10,7 @@ export type AppRoute =
   | { view: 'bridge' }
   | { view: 'docs'; section?: DocSection }
 
-function hashFor(next: AppRoute): string {
+export function hashFor(next: AppRoute): string {
   if (next.view === 'swap') return '#swap'
   if (next.view === 'pools') return next.pair ? `#pools/${next.pair}` : '#pools'
   if (next.view === 'launch-new') return '#launch/new'
@@ -60,4 +60,16 @@ export function useHashRoute() {
   }, [])
 
   return { route, setRoute }
+}
+
+/** Hash-only navigation for surfaces that sit outside the App tree (the updates bulletin). */
+export function navigate(next: AppRoute): void {
+  const update = () => {
+    window.location.hash = hashFor(next)
+  }
+  if ('startViewTransition' in document) {
+    document.startViewTransition(update)
+  } else {
+    update()
+  }
 }

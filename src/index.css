@@ -225,6 +225,25 @@ input[type='checkbox'], input[type='radio'], input[type='range'] { accent-color:
   }
   .unlock-sheet:not(:popover-open) { display: none; }
   .unlock-sheet::backdrop { background: rgb(0 0 0 / 0.4); }
+  /* Unread product bulletin: same scrim grammar, wider so a specimen and a paragraph can sit on one sheet. */
+  .updates-sheet {
+    @apply fixed inset-0 z-[55] m-auto flex h-fit max-h-[calc(100dvh-32px)] w-[min(512px,calc(100vw-32px))] flex-col overflow-hidden rounded border border-ink bg-paper p-0 text-ink;
+  }
+  .updates-sheet:not(:popover-open) { display: none; }
+  .updates-sheet:popover-open { display: flex; }
+  .updates-sheet::backdrop { background: rgb(0 0 0 / 0.4); }
+  .updates-panel { @apply flex min-h-0 max-h-full flex-col; }
+  .updates-main { @apply min-h-0 flex-1 overflow-y-auto; }
+  .updates-figure {
+    @apply mx-4 mt-4 flex h-44 shrink-0 flex-col border-y border-ink py-5;
+  }
+  .updates-specimen { @apply flex flex-1 flex-col justify-center; }
+  .updates-copy { @apply flex min-h-[220px] flex-col px-4 pb-2 pt-5; }
+  .updates-figure .launch-meter { @apply w-full; }
+  .updates-actions { @apply flex shrink-0 flex-col gap-3 border-t border-ink p-4 sm:flex-row sm:items-center sm:justify-between; }
+  .updates-later {
+    @apply min-h-11 text-sm font-semibold text-g700 underline underline-offset-[3px] hover:text-ink;
+  }
   .icon-button { @apply flex h-11 w-11 items-center justify-center rounded hover:bg-g100 active:bg-ink active:text-paper; }
   .choice-button { @apply min-h-11 rounded border border-ink px-2 text-sm font-semibold hover:bg-g100 active:bg-ink active:text-paper; }
   .choice-button[data-active='true'] { @apply bg-ink text-paper; }
@@ -370,12 +389,14 @@ input[type='checkbox'], input[type='radio'], input[type='range'] { accent-color:
 
 @media (max-width: 639px) {
   .amount-input { font-size: 1.75rem; }
-  .token-popover, .settings-popover, .connect-sheet, .unlock-sheet {
+  .token-popover, .settings-popover, .connect-sheet, .unlock-sheet, .updates-sheet {
     inset: auto 16px 16px 16px !important;
     width: auto !important;
     max-height: min(70dvh, 560px);
   }
-  .token-popover, .connect-sheet, .unlock-sheet { border-bottom-left-radius: 4px; border-bottom-right-radius: 4px; }
+  .updates-sheet { max-height: min(85dvh, 720px); }
+  .updates-figure { height: 11rem; padding-block: 16px; }
+  .token-popover, .connect-sheet, .unlock-sheet, .updates-sheet { border-bottom-left-radius: 4px; border-bottom-right-radius: 4px; }
   .pools-table thead { @apply sr-only; }
   .pools-table, .pools-table tbody { display: block; }
   .pool-row { display: grid; grid-template-columns: 1fr auto; align-items: center; padding: 8px 0; }

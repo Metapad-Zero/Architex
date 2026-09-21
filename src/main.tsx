@@ -25,6 +25,7 @@ import { ConnectSheetProvider } from './hooks/useConnectSheet'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { IntroSplash } from './components/IntroSplash'
 import { UnlockSheet } from './components/UnlockSheet'
+import { UpdatesSheet } from './components/UpdatesSheet'
 import App from './App'
 import './index.css'
 
@@ -40,6 +41,7 @@ createRoot(document.getElementById('root')!).render(
               <App />
             </div>
             <UnlockSheet />
+            <UpdatesSheet />
             <IntroSplash />
           </ConnectSheetProvider>
         </QueryClientProvider>

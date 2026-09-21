@@ -3,6 +3,7 @@ import { activeChain } from '../chain'
 import type { AppRoute } from '../hooks/useHashRoute'
 import { isLaunchViewAvailable } from '../lib/deployment'
 import { ARCH_PATH } from '../lib/logomark'
+import { requestUpdates } from '../lib/updates'
 import { ConnectSheet } from './ConnectSheet'
 import { WalletButton } from './WalletButton'
 
@@ -42,6 +43,13 @@ export function AppShell({ route, onRoute, children }: AppShellProps) {
         </div>
         <div className="flex items-center gap-3">
           <span className="hidden text-sm text-g500 lg:inline">{activeChain.name}</span>
+          <button
+            type="button"
+            className="hidden min-h-11 text-sm text-g500 underline underline-offset-[3px] hover:text-ink lg:inline"
+            onClick={requestUpdates}
+          >
+            Updates
+          </button>
           <WalletButton />
         </div>
       </header>
