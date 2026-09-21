@@ -38,6 +38,7 @@
     "@uniswap/v3-sdk": "^3.31.4",
     "@uniswap/v4-sdk": "^2.4.0",
     "@web3icons/react": "^4.0.0",
+    "canvas-confetti": "^1.9.4",
     "clsx": "^2.1.1",
     "connectkit": "^1.9.2",
     "framer-motion": "^11.15.0",
@@ -53,6 +54,7 @@
     "viem": "^2.56.3"
   },
   "devDependencies": {
+    "@types/canvas-confetti": "^1.9.0",
     "@types/node": "^24.0.0",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",

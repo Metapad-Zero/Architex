@@ -1,4 +1,5 @@
 import type { Address } from 'viem'
+import { celebrate } from '../lib/confetti'
 import { LaunchCreate } from './LaunchCreate'
 import { LaunchDetail } from './LaunchDetail'
 import { LaunchList } from './LaunchList'
@@ -16,7 +17,16 @@ interface LaunchViewProps {
 }
 
 export function LaunchView({ token, creating, onOpen, onCreate, onCreated }: LaunchViewProps) {
-  if (creating) return <LaunchCreate onCreated={onCreated} />
+  if (creating) {
+    return (
+      <LaunchCreate
+        onCreated={(created) => {
+          void celebrate()
+          onCreated(created)
+        }}
+      />
+    )
+  }
   if (token) return <LaunchDetail token={token} onBack={() => onOpen()} />
   return <LaunchList onOpen={(next) => onOpen(next)} onCreate={onCreate} />
 }

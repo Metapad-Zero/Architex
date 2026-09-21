@@ -2,6 +2,7 @@ import { useCallback, useState } from 'react'
 import { parseSignature, type Address, type Hash } from 'viem'
 import { useAccount, usePublicClient, useSignTypedData, useWriteContract } from 'wagmi'
 import { activeChain } from '../chain'
+import { celebrate } from '../lib/confetti'
 import { isUserRejection, revertReason } from '../lib/errors'
 import { pushRecent, type RecentEntry } from '../lib/recent'
 import { erc20Abi, pairAbi, routerAbi } from '../lib/abi'
@@ -103,7 +104,8 @@ export function useLiquidity(onConfirmed: () => void | Promise<void>) {
             deadline,
           ],
         })
-        await waitFor(hash, 'Adding liquidity…', 'Added liquidity', 'add')
+        await waitFor(hash, creatingPool ? 'Creating the pool…' : 'Adding liquidity…', creatingPool ? 'Pool created' : 'Added liquidity', 'add')
+        if (creatingPool) void celebrate()
       } catch (error) {
         if (isUserRejection(error)) {
           setStatus({ kind: 'cancelled', label: 'Transaction cancelled' })

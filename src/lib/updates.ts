@@ -1,3 +1,4 @@
+import { FOREIGN_CHAINS } from './cctp'
 import { isLaunchViewAvailable } from './deployment'
 
 export type UpdateView = 'launch' | 'bridge' | 'docs'
@@ -31,7 +32,7 @@ export const PRODUCT_UPDATES: readonly ProductUpdate[] = [
   {
     id: 'bridge',
     title: 'Bridge native USDC',
-    body: 'Bring USDC onto Arc from Ethereum or Solana, or take it back, over Circle CCTP. The coins are burned on one chain and minted on the other. Nothing is wrapped.',
+    body: `Bring USDC onto Arc from ${FOREIGN_CHAINS.includes('solana') ? 'Ethereum or Solana' : 'Ethereum'}, or take it back, over Circle CCTP. The coins are burned on one chain and minted on the other. Nothing is wrapped.`,
     action: { label: 'Open Bridge', view: 'bridge' },
     figure: 'bridge',
   },
