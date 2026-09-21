@@ -87,11 +87,13 @@ export function buildTokenRegistry(pairs: readonly AmmPair[], meta: readonly Tok
     })
   }
 
+  // Anyone can name a pool-discovered token, so none may sort ahead of a deployment token and become a default.
   const usdc = deployment.tokens[0]?.address.toLowerCase()
   return [...registry.values()].sort((a, b) => {
     if (a.address.toLowerCase() === usdc) return -1
     if (b.address.toLowerCase() === usdc) return 1
-    return a.symbol.localeCompare(b.symbol)
+    const canonicalFirst = Number(isCanonicalToken(b.address)) - Number(isCanonicalToken(a.address))
+    return canonicalFirst || a.symbol.localeCompare(b.symbol)
   })
 }
 
