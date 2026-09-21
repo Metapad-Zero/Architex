@@ -1,8 +1,11 @@
 import { useMemo } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import type { Address } from 'viem'
-import { useReadContract } from 'wagmi'
+import { usePublicClient } from 'wagmi'
+import { activeChain } from '../chain'
 import { lensAbi } from '../lib/abi'
 import { deployment, isDeployed } from '../lib/deployment'
+import { LENS_PAGE, readAllPages } from '../lib/pairList'
 
 export interface PositionInfo {
   pair: Address
@@ -16,14 +19,22 @@ export interface PositionInfo {
 }
 
 export function usePositions(owner: Address | undefined) {
-  const query = useReadContract({
-    address: deployment.lens,
-    abi: lensAbi,
-    functionName: 'positions',
-    args: [owner!, 0n, 200n],
-    query: {
-      enabled: isDeployed && Boolean(owner),
-      refetchInterval: 4_000,
+  const publicClient = usePublicClient()
+  const query = useQuery({
+    queryKey: ['positions', activeChain.id, deployment.lens, owner],
+    enabled: isDeployed && Boolean(owner) && Boolean(publicClient),
+    refetchInterval: 4_000,
+    queryFn: () => {
+      if (!publicClient || !owner) throw new Error('No RPC client or owner')
+      const page = (start: bigint) =>
+        ({ address: deployment.lens, abi: lensAbi, functionName: 'positions', args: [owner, start, LENS_PAGE] }) as const
+      return readAllPages(
+        () => Promise.all([
+          publicClient.readContract({ address: deployment.lens, abi: lensAbi, functionName: 'pairsLength' }),
+          publicClient.readContract(page(0n)),
+        ]),
+        (starts) => publicClient.multicall({ contracts: starts.map(page), allowFailure: false }),
+      )
     },
   })
   const positions = useMemo<PositionInfo[]>(
