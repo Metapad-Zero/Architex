@@ -1,13 +1,14 @@
 import { useMemo, useState } from 'react'
 import { useConnectSheet } from '../hooks/useConnectSheet'
+import type { LaunchAllowances } from '../hooks/useLaunch'
 import { useLaunchTrade, type LaunchSide } from '../hooks/useLaunchTrade'
 import { useSettings } from '../hooks/useSettings'
 import { formatAmount, formatPct, parseAmount } from '../lib/format'
-import { formatSwapUrl } from '../lib/swapUrl'
 import type { LaunchRecord } from '../lib/launch'
+import { destinationLabel, feeDestination } from '../lib/plugins/destination'
 import type { Token } from '../lib/tokens'
 import { AmountField } from './AmountField'
-import { GhostButton } from './GhostButton'
+import { FeeGauge } from './FeeGauge'
 import { PrimaryButton } from './PrimaryButton'
 import { SettingsPopover } from './SettingsPopover'
 import { TxStatus } from './TxStatus'
@@ -19,7 +20,8 @@ interface LaunchTradeSheetProps {
   usdc: Token
   tokenBalance: bigint
   usdcBalance: bigint
-  usdcAllowance: bigint
+  usdcAllowance: LaunchAllowances
+  initialSide?: LaunchSide
   onConfirmed: () => void | Promise<void>
 }
 
@@ -32,12 +34,13 @@ export function LaunchTradeSheet({
   tokenBalance,
   usdcBalance,
   usdcAllowance,
+  initialSide = 'buy',
   onConfirmed,
 }: LaunchTradeSheetProps) {
   const { open } = useConnectSheet()
   const switchToArc = useSwitchToArc()
   const settings = useSettings()
-  const [side, setSide] = useState<LaunchSide>('buy')
+  const [side, setSide] = useState<LaunchSide>(initialSide)
   const [amount, setAmount] = useState('')
 
   const payToken = side === 'buy' ? usdc : token
@@ -64,6 +67,7 @@ export function LaunchTradeSheet({
     side,
     parsedIn,
     slippageBps: settings.slippageBps,
+    deadlineMinutes: settings.deadlineMinutes,
     tokenBalance,
     usdcBalance,
     usdcAllowance,
@@ -83,50 +87,46 @@ export function LaunchTradeSheet({
     await trade.execute()
   }
 
-  if (launch.graduated) {
-    return (
-      <div className="swap-sheet">
-        <p className="py-7 text-sm leading-6 text-g700">
-          This curve sold out. Its liquidity is locked in an Architex pool for good, and every swap leaves its fee there. Anyone can add more and earn a share of those fees.
-        </p>
-        <div className="grid gap-3 sm:grid-cols-2">
-          <GhostButton className="w-full" onClick={() => { window.location.hash = formatSwapUrl({ in: 'USDC', out: launch.token }) }}>
-            Trade on Swap
-          </GhostButton>
-          <GhostButton className="w-full" onClick={() => { window.location.hash = `#pools/${launch.pair}` }}>
-            Add liquidity
-          </GhostButton>
-        </div>
-      </div>
-    )
-  }
-
-  const receiveAmount = trade.quote ? formatAmount(trade.quote.amountOut, receiveToken.decimals) : ''
-  const impact = trade.quote
-    ? `${formatPct(trade.quote.priceImpactBps)}${trade.quote.priceImpactBps > 500n ? ' · High price impact' : ''}`
+  const quote = trade.quote
+  const pool = trade.venue === 'pool'
+  const destination = feeDestination(launch)
+  const receiveAmount = quote ? formatAmount(quote.amountOut, receiveToken.decimals) : ''
+  const impact = quote
+    ? `${formatPct(quote.priceImpactBps)}${quote.priceImpactBps > 500n ? ' · High price impact' : ''}`
     : GHOST
-  const impactShort = trade.quote
-    ? `${formatPct(trade.quote.priceImpactBps)}${trade.quote.priceImpactBps > 500n ? ' · High impact' : ''}`
+  const impactShort = quote
+    ? `${formatPct(quote.priceImpactBps)}${quote.priceImpactBps > 500n ? ' · High impact' : ''}`
     : GHOST
-  const bound = trade.quote ? `${formatAmount(trade.quote.minReceived, receiveToken.decimals)} ${receiveToken.symbol}` : GHOST
-  // Always quoted the same way round (tokens per 1 USDC), fee included, so buys and sells compare at a glance.
-  const rate = trade.quote && trade.quote.amountIn > 0n && trade.quote.amountOut > 0n
+  const bound = quote ? `${formatAmount(quote.minReceived, receiveToken.decimals)} ${receiveToken.symbol}` : GHOST
+  // Always quoted the same way round (tokens per 1 USDC), fees included, so buys and sells compare at a glance.
+  const rate = quote && quote.amountIn > 0n && quote.amountOut > 0n
     ? `1 USDC = ${formatAmount(
-        payToken.address === usdc.address
-          ? (trade.quote.amountOut * 1_000_000n) / trade.quote.amountIn
-          : (trade.quote.amountIn * 1_000_000n) / trade.quote.amountOut,
+        side === 'buy' ? (quote.amountOut * 1_000_000n) / quote.amountIn : (quote.amountIn * 1_000_000n) / quote.amountOut,
         18,
       )} ${launch.symbol}`
     : GHOST
+  const platformFee = quote ? `0.50% · ${formatAmount(quote.platformFee, usdc.decimals)} USDC` : '0.50%'
+  const creatorFee = `${formatPct(launch.creatorFeeBps)}${quote ? ` · ${formatAmount(quote.creatorFee, usdc.decimals)} USDC` : ''}`
+  const sellsOut = quote?.graduates && quote.amountIn < quote.offer
 
   return (
     <div className="swap-sheet">
       {trade.isLoading && <span className="rule-sweep" aria-hidden="true" />}
       <div className="sheet-tools">
-        {/* Curve buy/sell take no deadline, so only slippage applies here. */}
-        <SettingsPopover slippageBps={settings.slippageBps} onSlippage={settings.setSlippageBps} />
+        {/* Curve and launch-pool trades both take the deadline and the slippage set here. */}
+        <SettingsPopover
+          slippageBps={settings.slippageBps}
+          onSlippage={settings.setSlippageBps}
+          deadlineMinutes={settings.deadlineMinutes}
+          onDeadline={settings.setDeadlineMinutes}
+        />
       </div>
-      <div className="grid grid-cols-2 gap-2 pb-4 pt-6">
+      <p className="trade-venue">
+        {pool ? 'Trading in the launch pool' : 'Trading on the curve'}
+        <span aria-hidden="true"> · </span>
+        <span className="text-g500">fees to {destinationLabel(destination)}</span>
+      </p>
+      <div className="grid grid-cols-2 gap-2 pb-4 pt-3">
         {(['buy', 'sell'] as const).map((value) => (
           <button
             key={value}
@@ -168,24 +168,38 @@ export function LaunchTradeSheet({
         checkBalance={false}
         disableTokenSelect
       />
-      <dl className="receipt-lines" data-live={Boolean(trade.quote)}>
+      <dl className="receipt-lines" data-live={Boolean(quote)}>
         <div>
           <dt>Rate</dt>
-          <dd className={trade.quote ? '' : 'text-g500'}>{rate}</dd>
+          <dd className={quote ? '' : 'text-g500'}>{rate}</dd>
         </div>
         <div>
           <dt>Price impact</dt>
-          <dd className={trade.quote && trade.quote.priceImpactBps > 500n ? 'text-loss' : trade.quote ? '' : 'text-g500'}>
+          <dd className={quote && quote.priceImpactBps > 500n ? 'text-loss' : quote ? '' : 'text-g500'}>
             <span className="hidden sm:inline">{impact}</span>
             <span className="sm:hidden">{impactShort}</span>
           </dd>
         </div>
-        <div><dt>Fee</dt><dd>0.50%</dd></div>
+        <div><dt>Platform fee</dt><dd>{platformFee}</dd></div>
+        <div>
+          <dt>Creator fee</dt>
+          <dd>
+            <span className="inline-flex items-center gap-2">
+              <FeeGauge bps={launch.creatorFeeBps} showValue={false} decorative />
+              {creatorFee}
+            </span>
+          </dd>
+        </div>
         <div>
           <dt>Minimum received</dt>
-          <dd className={trade.quote ? '' : 'text-g500'}>{bound}</dd>
+          <dd className={quote ? '' : 'text-g500'}>{bound}</dd>
         </div>
       </dl>
+      {sellsOut && quote && (
+        <p className="quote-message" role="status">
+          This buy sells out the curve and graduates {launch.symbol}. It spends {formatAmount(quote.amountIn, usdc.decimals)} of the {formatAmount(quote.offer, usdc.decimals)} USDC offered.
+        </p>
+      )}
       <PrimaryButton className="mt-6 w-full" loading={trade.isLoading} disabled={trade.isDisabled} onClick={() => void handlePrimary()}>
         {trade.label}
       </PrimaryButton>

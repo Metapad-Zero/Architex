@@ -3,7 +3,7 @@ import { isLaunchViewAvailable } from './deployment'
 
 export type UpdateView = 'launch' | 'bridge' | 'docs'
 
-export type UpdateFigure = 'launch' | 'bridge' | 'docs'
+export type UpdateFigure = 'fees' | 'launch' | 'bridge' | 'docs'
 
 export interface ProductUpdate {
   id: string
@@ -22,6 +22,14 @@ const STORAGE_KEY = 'architex-updates'
  * appear again for browsers that already dismissed an older stack.
  */
 export const PRODUCT_UPDATES: readonly ProductUpdate[] = [
+  {
+    id: 'creator-fees',
+    title: 'Creator fees, sent where you choose',
+    body: 'A launch now sets a creator fee of up to 10% on every buy and sell, and where it goes: your wallet, a Split, Buyback & burn, holders over 24 hours, or a mix. Both are locked at launch, anyone can collect a token’s fees, and graduated tokens keep trading in their own launch pool.',
+    action: { label: 'Open Launch', view: 'launch' },
+    figure: 'fees',
+    requiresLaunch: true,
+  },
   {
     id: 'docs',
     title: 'How the curve works',

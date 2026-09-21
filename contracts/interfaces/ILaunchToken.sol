@@ -23,8 +23,8 @@ interface ILaunchToken is IERC20, ILaunchTokenExtensions {
     function graduated() external view returns (bool);
 
     /// @notice The smallest eligible supply dividends run on (one whole token). Below it `eligibleSupply()` reports 0 and
-    ///         `distribute` reverts NoEligibleSupply, which bounds the dividend-per-share growth a near-empty supply
-    ///         would otherwise allow.
+    ///         the dividend stream pauses, which bounds the dividend-per-share growth a near-empty supply would
+    ///         otherwise allow.
     function MIN_ELIGIBLE_SUPPLY() external view returns (uint256);
     /// @notice USDC dividends `holder` has claimed so far.
     function claimed(address holder) external view returns (uint256);

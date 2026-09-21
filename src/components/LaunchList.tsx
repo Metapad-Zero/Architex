@@ -1,15 +1,14 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import type { Address } from 'viem'
-import { formatSwapUrl } from '../lib/swapUrl'
 import { launchFacts, type LaunchRecord } from '../lib/launch'
 import { parseLaunchAddress } from '../lib/launchPages'
+import { destinationLabel, feeDestination } from '../lib/plugins/destination'
 import { relativeTime } from '../lib/recent'
 import { shortAddress } from '../lib/format'
 import { useLaunches } from '../hooks/useLaunches'
+import { FeeGauge } from './FeeGauge'
 import { GhostButton } from './GhostButton'
-import { CheckIcon } from './Icons'
 import { LaunchMeter, LaunchTokenMark } from './LaunchBits'
-import { PluginsModal } from './PluginsModal'
 import { TableSkeleton } from './Skeleton'
 
 interface LaunchListProps {
@@ -20,7 +19,6 @@ interface LaunchListProps {
 export function LaunchList({ onOpen, onCreate }: LaunchListProps) {
   const { launches, total, hasMore, isLoadingMore, loadMore, isLoading } = useLaunches()
   const [now, setNow] = useState(() => Date.now())
-  const [pluginsOpen, setPluginsOpen] = useState(false)
   const [lookup, setLookup] = useState('')
   const [lookupError, setLookupError] = useState('')
   useEffect(() => {
@@ -44,20 +42,11 @@ export function LaunchList({ onOpen, onCreate }: LaunchListProps) {
         <div>
           <h1 className="text-xl font-semibold tracking-[-0.02em]">Launch</h1>
           <p className="mt-2 max-w-xl text-sm text-g500">
-            Launch a token on a bonding curve. When the curve sells out, its liquidity moves to an Architex pool and is locked for good.
+            Launch a token on a bonding curve, with a creator fee of up to 10% on every trade sent where you choose. When the curve sells out, its liquidity moves to the token’s own launch pool and is locked for good.
           </p>
-          <button
-            type="button"
-            onClick={() => setPluginsOpen(true)}
-            className="mt-2 text-sm font-semibold text-ink underline decoration-1 underline-offset-[3px] hover:text-g700"
-          >
-            Fee-distribution plugins
-          </button>
         </div>
         <GhostButton className="shrink-0 whitespace-nowrap" onClick={onCreate}>Create a token</GhostButton>
       </div>
-
-      <PluginsModal open={pluginsOpen} onClose={() => setPluginsOpen(false)} />
 
       <section className="ruled-section">
         <div className="section-heading-row">
@@ -100,6 +89,7 @@ export function LaunchList({ onOpen, onCreate }: LaunchListProps) {
                 <tr>
                   <th>Token</th>
                   <th>Market cap</th>
+                  <th>Creator fee</th>
                   <th>Sold</th>
                   <th>Age</th>
                 </tr>
@@ -125,7 +115,7 @@ export function LaunchList({ onOpen, onCreate }: LaunchListProps) {
 
 function LaunchRow({ launch, now, onOpen }: { launch: LaunchRecord; now: number; onOpen: (token: Address) => void }) {
   const facts = launchFacts(launch)
-  const swapHref = formatSwapUrl({ in: 'USDC', out: launch.token })
+  const destination = destinationLabel(feeDestination(launch))
   return (
     <tr className="launch-row">
       <th scope="row">
@@ -137,13 +127,15 @@ function LaunchRow({ launch, now, onOpen }: { launch: LaunchRecord; now: number;
           </span>
         </button>
       </th>
-      <td data-label="Market cap">{facts.cap}</td>
+      <td data-label="Market cap">{launch.graduated && !launch.pool ? '—' : facts.cap}</td>
+      <td data-label="Creator fee">
+        <span className="launch-fee">
+          <FeeGauge bps={launch.creatorFeeBps} label={`${launch.symbol} creator fee`} />
+          <span className="launch-fee-to" title={`Fees go to ${destination}`}>{destination}</span>
+        </span>
+      </td>
       <td data-label="Sold">
-        {launch.graduated ? (
-          <a className="launch-graduated underline" href={swapHref} onClick={(event) => event.stopPropagation()}><CheckIcon className="h-4 w-4" />Graduated</a>
-        ) : (
-          <LaunchMeter tokensSold={launch.tokensSold} graduated={false} />
-        )}
+        <LaunchMeter tokensSold={launch.tokensSold} graduated={launch.graduated} />
       </td>
       <td data-label="Age">{relativeTime(Number(launch.createdAt) * 1000, now)}</td>
     </tr>

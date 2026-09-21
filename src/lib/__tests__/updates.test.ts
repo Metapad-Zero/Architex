@@ -3,17 +3,17 @@ import { isUnread, latestId, PRODUCT_UPDATES, visibleUpdates } from '../updates'
 
 describe('product updates', () => {
   test('newest item is the latest id', () => {
-    expect(latestId(PRODUCT_UPDATES)).toBe('docs')
+    expect(latestId(PRODUCT_UPDATES)).toBe('creator-fees')
   })
 
-  test('hides the launch item when the Launch view is off', () => {
+  test('hides the launch items when the Launch view is off', () => {
     const items = visibleUpdates(false)
-    expect(items.some((item) => item.id === 'launch')).toBe(false)
+    expect(items.some((item) => item.requiresLaunch)).toBe(false)
     expect(items.map((item) => item.id)).toEqual(['docs', 'bridge'])
   })
 
-  test('keeps the launch item when the Launch view is on', () => {
-    expect(visibleUpdates(true).some((item) => item.id === 'launch')).toBe(true)
+  test('keeps the launch items when the Launch view is on, creator fees first', () => {
+    expect(visibleUpdates(true).map((item) => item.id)).toEqual(['creator-fees', 'docs', 'bridge', 'launch'])
   })
 
   test('is unread when nothing has been dismissed', () => {
@@ -25,7 +25,12 @@ describe('product updates', () => {
     expect(isUnread(items, latestId(items))).toBe(false)
   })
 
-  test('is unread again when a newer id ships', () => {
+  test('comes back for everyone who dismissed the stack before creator fees shipped', () => {
+    expect(isUnread(visibleUpdates(true), 'docs')).toBe(true)
     expect(isUnread(visibleUpdates(true), 'launch')).toBe(true)
+  })
+
+  test('stays read where the Launch view is still off, so nothing reappears until v1.3 is live', () => {
+    expect(isUnread(visibleUpdates(false), 'docs')).toBe(false)
   })
 })

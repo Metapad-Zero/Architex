@@ -5,7 +5,7 @@ import { DEFAULT_DOC_SECTION, isDocSection, type DocSection } from '../lib/docs'
 export type AppRoute =
   | { view: 'swap' }
   | { view: 'pools'; pair?: Address }
-  | { view: 'launch'; token?: Address }
+  | { view: 'launch'; token?: Address; side?: 'buy' | 'sell' }
   | { view: 'launch-new' }
   | { view: 'bridge' }
   | { view: 'docs'; section?: DocSection }
@@ -16,7 +16,7 @@ export function hashFor(next: AppRoute): string {
   if (next.view === 'launch-new') return '#launch/new'
   if (next.view === 'bridge') return '#bridge'
   if (next.view === 'docs') return next.section && next.section !== DEFAULT_DOC_SECTION ? `#docs/${next.section}` : '#docs'
-  return next.token ? `#launch/${next.token}` : '#launch'
+  return next.token ? `#launch/${next.token}${next.side === 'sell' ? '?side=sell' : ''}` : '#launch'
 }
 
 function readRoute(): AppRoute {
@@ -25,8 +25,9 @@ function readRoute(): AppRoute {
   if (hash === '#pools') return { view: 'pools' }
   if (hash === '#launch/new') return { view: 'launch-new' }
   if (hash.startsWith('#launch/')) {
-    const token = hash.slice('#launch/'.length)
-    return isAddress(token) ? { view: 'launch', token } : { view: 'launch' }
+    const [token = '', query = ''] = hash.slice('#launch/'.length).split('?')
+    const side = new URLSearchParams(query).get('side') === 'sell' ? 'sell' : undefined
+    return isAddress(token) ? { view: 'launch', token, side } : { view: 'launch' }
   }
   if (hash === '#launch') return { view: 'launch' }
   if (hash === '#bridge' || hash.startsWith('#bridge?')) return { view: 'bridge' }

@@ -52,6 +52,8 @@ contract BuybackBurnPluginTest is LaunchPluginTestBase {
 
     function test_constants() public view {
         assertEq(buyback.CAP_BPS(), 25);
+        assertEq(buyback.RUN_INTERVAL(), 1 hours);
+        assertEq(buyback.MIN_RUN_USDC(), 3);
     }
 
     // ─── Run on the curve ─────────────────────────────────────────────────────
@@ -69,6 +71,7 @@ contract BuybackBurnPluginTest is LaunchPluginTestBase {
         assertEq(launchpad.lastBuyUsdcIn(), DEFAULT_CAP, "offered the cap");
         assertEq(launchpad.lastBuyMinOut(), 0, "no slippage bound, by design");
         assertEq(launchpad.lastBuyTo(), address(buyback));
+        assertEq(launchpad.lastBuyDeadline(), vm.getBlockTimestamp(), "the curve buy's deadline is now");
         assertEq(buyback.usdcHeld(address(token)), 100e6 - DEFAULT_CAP);
         assertEq(usdc.balanceOf(address(buyback)), 100e6 - DEFAULT_CAP);
         assertEq(buyback.totalUsdcSpent(address(token)), DEFAULT_CAP);
@@ -121,7 +124,7 @@ contract BuybackBurnPluginTest is LaunchPluginTestBase {
         assertEq(usdc.allowance(address(buyback), address(launchpad)), 0);
     }
 
-    function test_run_sellOutThenTheNextBlockBuysInThePool() public {
+    function test_run_sellOutThenTheNextRunBuysInThePool() public {
         launchpad.setSellOutCost(address(token), 7e6);
         _collect(token, 100e6);
         _run(token);
@@ -130,7 +133,9 @@ contract BuybackBurnPluginTest is LaunchPluginTestBase {
         vm.expectRevert(abi.encodeWithSelector(IBuybackBurnPlugin.AlreadyRanThisBlock.selector, address(token)));
         _run(token);
 
-        vm.roll(block.number + 1);
+        // An hour on, the budget is a full cap again (pacing: BuybackBurnPacing.t.sol).
+        vm.roll(vm.getBlockNumber() + 1);
+        vm.warp(vm.getBlockTimestamp() + 1 hours);
         (uint256 spent,) = _run(token);
         assertEq(spent, 93e6); // below the pool cap of 100e6
         assertEq(router.lastUsdcIn(), 93e6);
@@ -205,7 +210,8 @@ contract BuybackBurnPluginTest is LaunchPluginTestBase {
         (uint256 offered,) = buyback.previewRun(address(token));
         assertEq(offered, 0);
 
-        vm.roll(block.number + 1);
+        vm.roll(vm.getBlockNumber() + 1);
+        vm.warp(vm.getBlockTimestamp() + 1 hours);
         (uint256 spent,) = _run(token);
         // The first run's buy raised the curve's virtual USDC, and the cap follows the reserve.
         assertEq(spent, ((VIRTUAL_USDC_0 + DEFAULT_CAP) * 25) / 10_000);
@@ -316,7 +322,7 @@ contract BuybackBurnPluginTest is LaunchPluginTestBase {
     // ─── Fuzz ─────────────────────────────────────────────────────────────────
 
     function testFuzz_run_onCurve(uint64 heldRaw, uint64 virtualUsdcRaw, uint64 sellOutRaw) public {
-        uint256 held = bound(heldRaw, 1, 1e13);
+        uint256 held = bound(heldRaw, 3, 1e13); // from MIN_RUN_USDC (dust: BuybackBurnDust.t.sol)
         uint256 virtualUsdc = bound(virtualUsdcRaw, VIRTUAL_USDC_0, 1e14);
         uint256 sellOut = bound(sellOutRaw, 1, 2e13);
         launchpad.setVirtualUsdc(address(token), virtualUsdc);
@@ -339,8 +345,8 @@ contract BuybackBurnPluginTest is LaunchPluginTestBase {
     }
 
     function testFuzz_run_inThePool(uint64 heldRaw, uint112 reserveUsdcRaw) public {
-        uint256 held = bound(heldRaw, 1, 1e13);
-        uint112 reserveUsdc = uint112(bound(reserveUsdcRaw, 400, 1e15));
+        uint256 held = bound(heldRaw, 3, 1e13); // from MIN_RUN_USDC (dust: BuybackBurnDust.t.sol)
+        uint112 reserveUsdc = uint112(bound(reserveUsdcRaw, 1200, 1e15)); // cap >= MIN_RUN_USDC
         _graduate(token, reserveUsdc);
         _collect(token, held);
 

@@ -63,7 +63,7 @@ contract SolvencyHandler is Test {
         address who = _actor(a);
         amount = bound(amount, 1, 6_000e6);
         vm.prank(who);
-        try pad.buy(t, amount, 0, who) {} catch {}
+        try pad.buy(t, amount, 0, who, type(uint256).max) {} catch {}
     }
 
     function curveSell(uint256 w, uint256 a, uint256 amount) external {
@@ -76,7 +76,7 @@ contract SolvencyHandler is Test {
         if (held == 0) return;
         amount = bound(amount, 1, held);
         vm.prank(who);
-        try pad.sell(t, amount, 0, who) {} catch {}
+        try pad.sell(t, amount, 0, who, type(uint256).max) {} catch {}
     }
 
     function graduate(uint256 w, uint256 a) external {
@@ -84,7 +84,7 @@ contract SolvencyHandler is Test {
         if (pad.isGraduated(t)) return;
         address who = _actor(a);
         vm.prank(who);
-        pad.buy(t, 1_000_000e6, 0, who);
+        pad.buy(t, 1_000_000e6, 0, who, type(uint256).max);
         ghostGraduations++;
     }
 
@@ -284,8 +284,10 @@ contract DividendHandler is Test {
     address[] public actors;
 
     uint256 public ghostDistributions;
-    uint256 public ghostNoEligibleSupply;
+    uint256 public ghostDistributedWithoutHolders; // coverage: distributions while the stream was paused
     uint256 public ghostBurned;
+    uint256 public ghostLiquidityMoves; // coverage: LP mints and burns
+    uint256 public ghostEveryoneOut; // coverage: times every actor sold out (nobody eligible)
 
     constructor(ArchitexLaunchpad _pad, LaunchRouter _router, BlockableUSDC _usdc, address _token, address[] memory _actors) {
         pad = _pad;
@@ -320,7 +322,7 @@ contract DividendHandler is Test {
         } else {
             amount = bound(amount, 1, 5_000e6);
             vm.prank(who);
-            try pad.buy(address(token), amount, 0, who) {} catch {}
+            try pad.buy(address(token), amount, 0, who, type(uint256).max) {} catch {}
         }
     }
 
@@ -334,7 +336,7 @@ contract DividendHandler is Test {
         if (pool) {
             try router.sell(address(token), amount, 0, who, block.timestamp) {} catch {}
         } else {
-            try pad.sell(address(token), amount, 0, who) {} catch {}
+            try pad.sell(address(token), amount, 0, who, type(uint256).max) {} catch {}
         }
     }
 
@@ -342,7 +344,7 @@ contract DividendHandler is Test {
         if (pad.isGraduated(address(token))) return;
         address who = _actor(a);
         vm.prank(who);
-        pad.buy(address(token), 1_000_000e6, 0, who);
+        pad.buy(address(token), 1_000_000e6, 0, who, type(uint256).max);
     }
 
     function transfer(uint256 a, uint256 b, uint256 amount) external {
@@ -373,14 +375,83 @@ contract DividendHandler is Test {
         ghostBurned += amount;
     }
 
+    /// @dev Never reverts for lack of eligible supply: the stream waits.
     function distribute(uint256 a, uint256 amount) external {
         amount = bound(amount, 0, 20_000e6);
+        if (token.eligibleSupply() == 0) ghostDistributedWithoutHolders++;
         vm.prank(_actor(a));
-        try token.distribute(amount) {
-            ghostDistributions++;
-        } catch (bytes memory err) {
-            if (bytes4(err) == ILaunchTokenExtensions.NoEligibleSupply.selector) ghostNoEligibleSupply++;
+        token.distribute(amount);
+        ghostDistributions++;
+    }
+
+    /// @dev Rarely, every actor sells everything, so nobody is eligible and a running stream pauses until someone buys.
+    function everyoneSells(uint256 seed) external {
+        if (uint256(keccak256(abi.encode(seed))) % 8 != 0) return;
+        bool pool = pad.isGraduated(address(token));
+        for (uint256 i = 0; i < actors.length; i++) {
+            address who = actors[i];
+            uint256 held = token.balanceOf(who);
+            if (held == 0) continue;
+            vm.prank(who);
+            if (pool) {
+                try router.sell(address(token), held, 0, who, block.timestamp) {} catch {}
+            } else {
+                try pad.sell(address(token), held, 0, who, block.timestamp) {} catch {}
+            }
         }
+        if (token.eligibleSupply() == 0) ghostEveryoneOut++;
+    }
+
+    /// @dev Time passes, so the stream pays out (or, with nobody holding, stays paused).
+    function warp(uint256 seconds_) external {
+        vm.warp(vm.getBlockTimestamp() + bound(seconds_, 0, 2 days));
+    }
+
+    /// @dev Adds liquidity to the launch pool (tokens leave an eligible holder for the pair).
+    function addLiquidity(uint256 a, uint256 amount) external {
+        if (!pad.isGraduated(address(token))) return;
+        address who = _actor(a);
+        uint256 held = token.balanceOf(who);
+        if (held == 0) return;
+        address pair = pad.pairOf(address(token));
+        (uint112 reserveToken, uint112 reserveUsdc,) = LaunchPair(pair).getReserves();
+        uint256 tokens = bound(amount, 1, held);
+        uint256 usdcIn = tokens * reserveUsdc / reserveToken + 1;
+        vm.startPrank(who);
+        token.transfer(pair, tokens);
+        usdc.transfer(pair, usdcIn);
+        try LaunchPair(pair).mint(who) {
+            ghostLiquidityMoves++;
+        } catch {
+            LaunchPair(pair).skim(who); // too little to mint: take it back
+        }
+        vm.stopPrank();
+    }
+
+    /// @dev Removes liquidity (tokens leave the pair for an eligible holder).
+    function removeLiquidity(uint256 a, uint256 share) external {
+        address pair = pad.pairOf(address(token));
+        address who = _actor(a);
+        uint256 lp = LaunchPair(pair).balanceOf(who);
+        if (lp == 0) return;
+        vm.startPrank(who);
+        LaunchPair(pair).transfer(pair, bound(share, 1, lp));
+        try LaunchPair(pair).burn(who) {
+            ghostLiquidityMoves++;
+        } catch {}
+        vm.stopPrank();
+    }
+
+    /// @dev Anyone can skim the pair's excess (a donation) to themselves: pair to an eligible account.
+    function donateAndSkim(uint256 a, uint256 b, uint256 amount) external {
+        if (!pad.isGraduated(address(token))) return;
+        address from = _actor(a);
+        uint256 held = token.balanceOf(from);
+        if (held == 0) return;
+        address pair = pad.pairOf(address(token));
+        vm.prank(from);
+        token.transfer(pair, bound(amount, 1, held));
+        LaunchPair(pair).skim(_actor(b));
     }
 
     /// @dev Creator fees collected to the DistributePlugin, which distributes them through the token.
@@ -427,13 +498,30 @@ contract LaunchTokenDividendInvariant is LaunchpadV13Base {
         }
     }
 
-    /// @notice Σ claimable + Σ claimed ≤ Σ distributed, and the rounding loss is bounded.
+    /// @notice Σ claimable + Σ claimed ≤ Σ distributed, and everything not yet credited is either still streaming
+    ///         (undistributed) or rounding dust.
     function invariant_neverOverCredits() public view {
         (uint256 claimable, uint256 claimed,) = _sums();
         uint256 distributed = token.totalDistributed();
         assertLe(claimable + claimed, distributed, "credited more than was distributed");
         // Floors lose < 1 unit per distribution and < 1 unit per account
-        assertLe(distributed - (claimable + claimed), handler.ghostDistributions() + actors.length + 1, "dust bound");
+        assertLe(
+            distributed - (claimable + claimed) - token.undistributed(),
+            handler.ghostDistributions() + actors.length + 1,
+            "dust bound"
+        );
+    }
+
+    /// @notice The tracked eligible supply is the formula it replaced (total supply minus the launchpad's, the pair's
+    ///         and 0x…dEaD's balances), through buys, sells, transfers, pulls, burns, graduation, pool trades and LP
+    ///         mints and burns; and a running stream never ends more than DRIP_PERIOD after its last accrual.
+    function invariant_eligibleSupplyIsTheFormula() public view {
+        uint256 formula = token.totalSupply() - token.balanceOf(address(pad)) - token.balanceOf(pad.pairOf(address(token)))
+            - token.balanceOf(DEAD);
+        assertEq(token.eligibleSupply(), formula < token.MIN_ELIGIBLE_SUPPLY() ? 0 : formula);
+        if (token.lastAccrual() < token.streamEnd()) {
+            assertLe(token.streamEnd() - token.lastAccrual(), token.DRIP_PERIOD());
+        }
     }
 
     /// @notice The token holds exactly what has been distributed and not yet claimed, which covers every claim.
@@ -466,7 +554,9 @@ contract LaunchTokenDividendInvariant is LaunchpadV13Base {
 
     function afterInvariant() public view {
         console.log("distributions", handler.ghostDistributions());
-        console.log("refused (no eligible supply)", handler.ghostNoEligibleSupply());
+        console.log("distributed with nobody eligible (stream paused)", handler.ghostDistributedWithoutHolders());
+        console.log("LP mints and burns", handler.ghostLiquidityMoves());
+        console.log("everyone sold out", handler.ghostEveryoneOut());
         console.log("graduated", pad.isGraduated(address(token)));
     }
 }

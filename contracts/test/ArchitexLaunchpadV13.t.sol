@@ -30,7 +30,7 @@ contract ArchitexLaunchpadV13Test is LaunchpadV13Base {
         uint256 pre = bound(rawPre, 0, 20_000e6);
         if (pre > 300) {
             vm.prank(carol);
-            pad.buy(token, pre, 0, carol);
+            pad.buy(token, pre, 0, carol, type(uint256).max);
         }
         IArchitexLaunchpad.Curve memory c = pad.curves(token);
         uint256 usdcIn = bound(rawUsdcIn, 1, 3_000e6);
@@ -50,7 +50,7 @@ contract ArchitexLaunchpadV13Test is LaunchpadV13Base {
         uint256 feesBefore = pad.pendingFees();
         uint256 creatorBefore = pad.pendingCreatorFees(token);
         vm.prank(alice);
-        (uint256 tokensOut, uint256 spent) = pad.buy(token, usdcIn, 0, alice);
+        (uint256 tokensOut, uint256 spent) = pad.buy(token, usdcIn, 0, alice, type(uint256).max);
 
         uint256 platformFee = pad.pendingFees() - feesBefore;
         uint256 creatorFee = pad.pendingCreatorFees(token) - creatorBefore;
@@ -70,7 +70,7 @@ contract ArchitexLaunchpadV13Test is LaunchpadV13Base {
         uint16 bps = uint16(bound(rawBps, 0, 1000));
         address token = _create(bps, creatorWallet);
         vm.prank(alice);
-        (uint256 bought,) = pad.buy(token, bound(rawBuy, 1e6, 20_000e6), 0, alice);
+        (uint256 bought,) = pad.buy(token, bound(rawBuy, 1e6, 20_000e6), 0, alice, type(uint256).max);
         uint256 tokensIn = bound(rawSell, 1, bought);
 
         IArchitexLaunchpad.Curve memory c = pad.curves(token);
@@ -81,7 +81,7 @@ contract ArchitexLaunchpadV13Test is LaunchpadV13Base {
         if (expPlatform + expCreator >= gross) {
             vm.prank(alice);
             vm.expectRevert(IArchitexLaunchpad.ZeroAmount.selector);
-            pad.sell(token, tokensIn, 0, alice);
+            pad.sell(token, tokensIn, 0, alice, type(uint256).max);
             return;
         }
 
@@ -89,7 +89,7 @@ contract ArchitexLaunchpadV13Test is LaunchpadV13Base {
         uint256 creatorBefore = pad.pendingCreatorFees(token);
         uint256 usdcBefore = usdc.balanceOf(alice);
         vm.prank(alice);
-        uint256 out = pad.sell(token, tokensIn, 0, alice);
+        uint256 out = pad.sell(token, tokensIn, 0, alice, type(uint256).max);
 
         uint256 platformFee = pad.pendingFees() - feesBefore;
         uint256 creatorFee = pad.pendingCreatorFees(token) - creatorBefore;
@@ -110,7 +110,7 @@ contract ArchitexLaunchpadV13Test is LaunchpadV13Base {
         uint256 pre = bound(rawPre, 0, 24_000e6);
         if (pre > 300) {
             vm.prank(carol);
-            pad.buy(token, pre, 0, carol);
+            pad.buy(token, pre, 0, carol, type(uint256).max);
         }
         IArchitexLaunchpad.Curve memory c = pad.curves(token);
         if (c.graduated) return;
@@ -129,7 +129,7 @@ contract ArchitexLaunchpadV13Test is LaunchpadV13Base {
         uint256 creatorBefore = pad.pendingCreatorFees(token);
         uint256 bobBefore = usdc.balanceOf(bob);
         vm.prank(bob);
-        (uint256 tokensOut, uint256 spent) = pad.buy(token, offer, 0, bob);
+        (uint256 tokensOut, uint256 spent) = pad.buy(token, offer, 0, bob, type(uint256).max);
 
         // Whenever the offer sells out, the uncapped exact-fill gross fits in it: the cap never binds (see
         // testFuzz_sellOutNeedsExactlyTheExactFillGross); the contract keeps the min() as the spec's belt and braces.
@@ -161,7 +161,7 @@ contract ArchitexLaunchpadV13Test is LaunchpadV13Base {
     function test_creatorFee_zeroEdge_reproducesTheV12Vectors() public {
         address token = _create(0, creatorWallet);
         vm.prank(alice);
-        (uint256 tokensOut, uint256 spent) = pad.buy(token, 1_000_000_000_000, 0, alice);
+        (uint256 tokensOut, uint256 spent) = pad.buy(token, 1_000_000_000_000, 0, alice, type(uint256).max);
         assertEq(tokensOut, CURVE_SUPPLY);
         assertEq(spent, 25125628109);
         assertEq(pad.pendingFees(), 125628141);
@@ -177,7 +177,7 @@ contract ArchitexLaunchpadV13Test is LaunchpadV13Base {
         assertEq(qCreator, 10_000_000);
         assertEq(qSpent, 100e6);
         vm.prank(alice);
-        (uint256 tokensOut,) = pad.buy(token, 100e6, 0, alice);
+        (uint256 tokensOut,) = pad.buy(token, 100e6, 0, alice, type(uint256).max);
         assertEq(tokensOut, qTokens);
         assertEq(pad.curves(token).virtualUsdc, VIRTUAL_USDC_0 + 89_500_000);
         assertEq(pad.pendingCreatorFees(token), 10_000_000);
@@ -189,7 +189,7 @@ contract ArchitexLaunchpadV13Test is LaunchpadV13Base {
         uint256 net = _divCeil(k, uint256(c.virtualTokens) - remaining) - uint256(c.virtualUsdc);
         uint256 gross = net + _divCeil(net * 1050, 8950);
         vm.prank(bob);
-        (, uint256 spent) = pad.buy(token, 1_000_000e6, 0, bob);
+        (, uint256 spent) = pad.buy(token, 1_000_000e6, 0, bob, type(uint256).max);
         assertEq(spent, gross);
         uint256 totalFee = gross - net;
         assertEq(pad.pendingCreatorFees(token), 10_000_000 + totalFee - _divCeil(totalFee * 50, 1050));
@@ -214,9 +214,9 @@ contract ArchitexLaunchpadV13Test is LaunchpadV13Base {
         pad.quoteBuy(token, 2);
         vm.prank(alice);
         vm.expectRevert(IArchitexLaunchpad.ZeroAmount.selector);
-        pad.buy(token, 2, 0, alice);
+        pad.buy(token, 2, 0, alice, type(uint256).max);
         vm.prank(alice);
-        (uint256 tokensOut,) = pad.buy(token, 100e6, 0, alice);
+        (uint256 tokensOut,) = pad.buy(token, 100e6, 0, alice, type(uint256).max);
         // A sell grossing 1 or 2 units: the two rounded-up fees (1 + 1) eat it all → ZeroAmount, not an underflow
         IArchitexLaunchpad.Curve memory c = pad.curves(token);
         uint256 tokensIn = uint256(c.virtualTokens) * 3 / (2 * uint256(c.virtualUsdc));
@@ -227,7 +227,7 @@ contract ArchitexLaunchpadV13Test is LaunchpadV13Base {
         pad.quoteSell(token, tokensIn);
         vm.prank(alice);
         vm.expectRevert(IArchitexLaunchpad.ZeroAmount.selector);
-        pad.sell(token, tokensIn, 0, alice);
+        pad.sell(token, tokensIn, 0, alice, type(uint256).max);
         assertGt(tokensOut, tokensIn);
     }
 
@@ -243,9 +243,9 @@ contract ArchitexLaunchpadV13Test is LaunchpadV13Base {
         uint256 usdcIn = bound(rawIn, 1e4, 5_000e6);
         uint256 before = usdc.balanceOf(alice);
         vm.prank(alice);
-        (uint256 tokensOut,) = pad.buy(token, usdcIn, 0, alice);
+        (uint256 tokensOut,) = pad.buy(token, usdcIn, 0, alice, type(uint256).max);
         vm.prank(alice);
-        try pad.sell(token, tokensOut, 0, alice) {} catch {}
+        try pad.sell(token, tokensOut, 0, alice, type(uint256).max) {} catch {}
         assertLe(usdc.balanceOf(alice), before, "a buy followed by a sell never returns more than was paid");
     }
 
@@ -255,7 +255,7 @@ contract ArchitexLaunchpadV13Test is LaunchpadV13Base {
 
     function _accrue(address token, uint256 usdcIn) internal returns (uint256 owed) {
         vm.prank(carol);
-        pad.buy(token, usdcIn, 0, carol);
+        pad.buy(token, usdcIn, 0, carol, type(uint256).max);
         owed = pad.pendingCreatorFees(token);
         assertGt(owed, 0);
     }
@@ -276,7 +276,7 @@ contract ArchitexLaunchpadV13Test is LaunchpadV13Base {
     function test_collect_contractWithoutErc165GetsAPlainTransferAndNoHooks() public {
         HooklessRecorder wallet = new HooklessRecorder();
         vm.prank(alice);
-        address token = pad.createToken("Safe", "SAFE", "", 300, address(wallet), "hello", 50e6, 0, type(uint256).max);
+        address token = pad.createToken("Safe", "SAFE", "", 300, address(wallet), "", 50e6, 0, type(uint256).max);
         uint256 owed = _accrue(token, 1_000e6);
         pad.collectCreatorFees(token);
         assertEq(usdc.balanceOf(address(wallet)), owed);
@@ -345,9 +345,9 @@ contract ArchitexLaunchpadV13Test is LaunchpadV13Base {
 
         // Trading is unaffected by the broken plugin
         vm.prank(alice);
-        (uint256 got,) = pad.buy(token, 100e6, 0, alice);
+        (uint256 got,) = pad.buy(token, 100e6, 0, alice, type(uint256).max);
         vm.prank(alice);
-        pad.sell(token, got, 0, alice);
+        pad.sell(token, got, 0, alice, type(uint256).max);
         assertGt(pad.pendingCreatorFees(token), owed);
 
         // Fixing the plugin's behaviour lets the same fees through, exactly
@@ -406,11 +406,11 @@ contract ArchitexLaunchpadV13Test is LaunchpadV13Base {
 
         // Trade both, collect the good one while the bad one is stuck
         vm.prank(alice);
-        (uint256 got,) = pad.buy(bad, 500e6, 0, alice);
+        (uint256 got,) = pad.buy(bad, 500e6, 0, alice, type(uint256).max);
         vm.prank(alice);
-        pad.sell(bad, got / 2, 0, alice);
+        pad.sell(bad, got / 2, 0, alice, type(uint256).max);
         vm.prank(alice);
-        pad.buy(fine, 500e6, 0, alice);
+        pad.buy(fine, 500e6, 0, alice, type(uint256).max);
         vm.expectRevert(bytes("plugin broken"));
         pad.collectCreatorFees(bad);
         uint256 fineOwed = pad.pendingCreatorFees(fine);
@@ -437,7 +437,7 @@ contract ArchitexLaunchpadV13Test is LaunchpadV13Base {
     function test_collect_zeroFeeTokenReturnsZero() public {
         address token = _create(0, creatorWallet);
         vm.prank(alice);
-        pad.buy(token, 100e6, 0, alice);
+        pad.buy(token, 100e6, 0, alice, type(uint256).max);
         assertEq(pad.collectCreatorFees(token), 0);
     }
 
@@ -454,11 +454,11 @@ contract ArchitexLaunchpadV13Test is LaunchpadV13Base {
         address a = _create(100, creatorWallet);
         address b = _create(900, alice);
         vm.prank(carol);
-        pad.buy(a, 1_000e6, 0, carol);
+        pad.buy(a, 1_000e6, 0, carol, type(uint256).max);
         assertEq(pad.pendingCreatorFees(a), 1_000e6 * 100 / BPS);
         assertEq(pad.pendingCreatorFees(b), 0);
         vm.prank(carol);
-        pad.buy(b, 1_000e6, 0, carol);
+        pad.buy(b, 1_000e6, 0, carol, type(uint256).max);
         assertEq(pad.pendingCreatorFees(a), 1_000e6 * 100 / BPS);
         assertEq(pad.pendingCreatorFees(b), 1_000e6 * 900 / BPS);
         _assertSolvent();
@@ -492,13 +492,21 @@ contract ArchitexLaunchpadV13Test is LaunchpadV13Base {
         assertEq(pad.tokensLength(), before);
     }
 
+    /// @dev A plugin that does not declare the interface gets no onLaunch, so it takes no pluginData: with empty data it
+    ///      launches with no hooks, and any data reverts DataForNonPlugin (it would be dropped: a mistyped address).
     function test_onLaunch_skippedForPluginsThatDoNotDeclareTheInterface() public {
         HooklessRecorder hookless = new HooklessRecorder();
         LyingPlugin liar = new LyingPlugin();
         vm.startPrank(alice);
+        pad.createToken("A", "A", "", 100, address(hookless), "", 10e6, 0, type(uint256).max);
+        pad.createToken("B", "B", "", 100, address(liar), "", 10e6, 0, type(uint256).max);
+        pad.createToken("C", "C", "", 100, bob, "", 10e6, 0, type(uint256).max); // an EOA
+        vm.expectRevert(IArchitexLaunchpad.DataForNonPlugin.selector);
         pad.createToken("A", "A", "", 100, address(hookless), "data", 10e6, 0, type(uint256).max);
+        vm.expectRevert(IArchitexLaunchpad.DataForNonPlugin.selector);
         pad.createToken("B", "B", "", 100, address(liar), "data", 10e6, 0, type(uint256).max);
-        pad.createToken("C", "C", "", 100, bob, "data", 10e6, 0, type(uint256).max); // an EOA
+        vm.expectRevert(IArchitexLaunchpad.DataForNonPlugin.selector);
+        pad.createToken("C", "C", "", 100, bob, "data", 10e6, 0, type(uint256).max);
         vm.stopPrank();
         assertEq(hookless.hookCalls(), 0);
         assertEq(liar.hookCalls(), 0);
@@ -599,7 +607,7 @@ contract ArchitexLaunchpadV13Test is LaunchpadV13Base {
         LaunchPair pair = _pairOf(token);
         assertEq(pair.totalSupply(), 0);
         vm.prank(bob);
-        pad.buy(token, 1_000_000e6, 0, bob);
+        pad.buy(token, 1_000_000e6, 0, bob, type(uint256).max);
         (uint112 reserveToken, uint112 reserveUsdc,) = pair.getReserves();
         assertEq(reserveToken, POOL_SUPPLY);
         assertEq(reserveUsdc, usdc.balanceOf(address(pair)));
@@ -859,7 +867,7 @@ contract ArchitexLaunchpadV13Test is LaunchpadV13Base {
         // A normal buy: bob pays, carol receives
         uint256 bobBefore = usdc.balanceOf(bob);
         vm.prank(bob);
-        (uint256 out, uint256 spent) = pad.buy(token, 500e6, 0, carol);
+        (uint256 out, uint256 spent) = pad.buy(token, 500e6, 0, carol, type(uint256).max);
         assertEq(spent, 500e6);
         assertEq(bobBefore - usdc.balanceOf(bob), spent);
         assertEq(IERC20(token).balanceOf(carol), out);
@@ -869,7 +877,7 @@ contract ArchitexLaunchpadV13Test is LaunchpadV13Base {
         bobBefore = usdc.balanceOf(bob);
         uint256 carolBefore = IERC20(token).balanceOf(carol);
         vm.prank(bob);
-        (out, spent) = pad.buy(token, 1_000_000e6, 0, carol);
+        (out, spent) = pad.buy(token, 1_000_000e6, 0, carol, type(uint256).max);
         assertEq(out, remaining, "the true tokensOut");
         assertLt(spent, 1_000_000e6);
         assertEq(bobBefore - usdc.balanceOf(bob), spent, "pulled exactly what it returned");
@@ -903,13 +911,16 @@ contract ArchitexLaunchpadV13Test is LaunchpadV13Base {
         DistributePlugin plugin = new DistributePlugin(IERC20(address(usdc)));
         address token = _create(1000, address(plugin));
         vm.prank(alice);
-        pad.buy(token, 3_000e6, 0, alice);
+        pad.buy(token, 3_000e6, 0, alice, type(uint256).max);
         vm.prank(bob);
-        pad.buy(token, 1_000e6, 0, bob);
+        pad.buy(token, 1_000e6, 0, bob, type(uint256).max);
         uint256 owed = pad.pendingCreatorFees(token);
         pad.collectCreatorFees(token);
         ILaunchToken t = ILaunchToken(token);
         assertEq(t.totalDistributed(), owed);
+        // The token streams what it is given over its DRIP_PERIOD: nothing is claimable at once, all of it a day on.
+        assertEq(t.claimable(alice), 0);
+        vm.warp(vm.getBlockTimestamp() + t.DRIP_PERIOD());
         uint256 a = t.claimable(alice);
         uint256 b = t.claimable(bob);
         assertLe(a + b, owed);
