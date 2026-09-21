@@ -13,7 +13,7 @@ What gets deployed (one launchpad suite, then the four reference plugins):
 | `SplitPlugin`, `BuybackBurnPlugin`, `HolderDistributionPlugin`, `ComboPlugin` | `DeployLaunchPlugins.s.sol` | none (no owner, nothing to hand over) |
 
 Readiness: V13-SPEC.md (§9 accepted limits), SECURITY.md §3b (reviews, tools, tests), V13-REHEARSAL.md (two
-testnet rehearsals, the second on this code). Contracts are **not third-party audited**; the site keeps saying so.
+testnet rehearsals, the second on the reviewed contracts; the only change since is two view functions). Contracts are **not third-party audited**; the site keeps saying so.
 
 ## 0. Before (Claude)
 
