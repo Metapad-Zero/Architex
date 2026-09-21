@@ -9,17 +9,21 @@
  *
  * With a mintable test USDC (rUSDC) it launches five tokens, one per creator-fee destination (a creator wallet, Split,
  * Buyback & burn, Distribute to holders, Combo), buys and sells each on its curve, collects each token's creator fees
- * and follows them to the end (Split releases, buyback runs, holder drips and claims, the Combo's 40/40/20), graduates
- * all five into their launch pools, buys and sells there through the launch router, collects and pays out again, and
- * finally collects the platform fees. With Arc's own USDC (a deployment whose usdc is 0x36…00) it does the curve half
- * of that for two tokens (TOKENS=holders,combo by default) with 1 USDC trades, and no graduation.
+ * and follows them to the end (Split releases; paced buyback runs; the token's 24-hour dividend stream and the holder's
+ * claims; the Combo's 40/40/20), graduates all five into their launch pools, buys and sells there through the launch
+ * router, collects and pays out again, and finally collects the platform fees. With Arc's own USDC (a deployment
+ * whose usdc is 0x36…00) it does the curve half of that for two tokens (TOKENS=holders,combo by default) with 1 USDC
+ * trades, and no graduation.
  *
  * Every transaction is simulated first (a revert costs nothing) and checked afterwards at its receipt's block against
  * the block before it: the result against the contract's own quote, a local model of the spec's formulas (V13-SPEC §5:
  * both fees from the USDC side, rounded up), where every unit went, and the launchpad identity
  *   USDC held == pendingFees + Σ pendingCreatorFees + Σ (virtualUsdc - VIRTUAL_USDC_0) over curves not graduated
  * to the unit (V13-SPEC §6.1). The burner's side is checked on its native balance with gas added back (on Arc, USDC is
- * the gas token). The run stops at the first step with a failed check.
+ * the gas token). The dividend stream is checked to the unit against a model of LaunchToken's accrual, fed with the
+ * token's own storage (per-share value, magnified rate, stream, the holder's correction): every view (claimable,
+ * undistributed, streamRate, streamEnd) must equal the model at its block, and every distribute and claim must move
+ * the stream exactly as the model says. The run stops at the first step with a failed check.
  *
  * Progress (token addresses, mined transactions, steps done) is kept next to the deployment in *.progress.json
  * (gitignored, or PROGRESS=<file>): a re-run skips finished steps, never re-sends a mined transaction, and re-checks a
@@ -42,6 +46,8 @@ import {
   encodeFunctionData,
   formatUnits,
   getAddress,
+  getContractAddress,
+  hexToBigInt,
   http,
   keccak256,
   maxUint256,
@@ -82,7 +88,15 @@ const VIRTUAL_USDC_0 = 8_333_333_333n
 const VIRTUAL_TOKENS_0 = 1_066_666_667n * E18
 const MINIMUM_LIQUIDITY = 1000n
 const CAP_BPS = 25n
+/** Buyback & burn pacing (V13-SPEC §2.2): the cap refills over an hour; offers under 3 units are no run. */
+const RUN_INTERVAL = 3600n
+const MIN_RUN_USDC = 3n
+/** LaunchToken's dividend stream (V13-SPEC §3). */
 const DRIP_PERIOD = 86_400n
+const MAGNITUDE = 2n ** 128n
+/** LaunchToken storage (`forge inspect LaunchToken storageLayout`): _magnifiedDividendPerShare, _corrections, _rate and
+ *  the packed _stream (uint128 eligible | uint64 lastAccrual | uint64 end). A wrong slot fails every view-vs-model check. */
+const SLOT = { perShare: 6n, corrections: 7n, rate: 10n, stream: 11n } as const
 /** On Arc the ERC-20 USDC balance is the native balance at 6 decimals: one USDC base unit is 1e12 wei. */
 const WEI_PER_UNIT = 10n ** 12n
 
@@ -242,6 +256,8 @@ const nativeOf = (who: Address, block: bigint) => retry(() => pub.getBalance({ a
 const nonceOf = (who: Address, block: bigint) => retry(() => pub.getTransactionCount({ address: who, blockNumber: block }))
 const timeOf = async (block: bigint) => (await retry(() => pub.getBlock({ blockNumber: block }))).timestamp
 const latest = () => retry(() => pub.getBlockNumber({ cacheTime: 0 }))
+/** A trade deadline an hour past the latest block this run has seen. */
+const deadline = async () => (await timeOf(head)) + 3600n
 
 // ── Checks ────────────────────────────────────────────────────────────────────
 
@@ -283,15 +299,17 @@ function checkThat(label: string, ok: boolean, detail: string): boolean {
 const note = (text: string) => console.log(`     ${text}`)
 const fmt = (units: bigint) => formatUnits(units, 6)
 
-/** A call that must revert with `errorName`, simulated for free at `block`. */
-async function expectRevert(label: string, address: Address, abi: Abi, functionName: string, args: readonly unknown[], errorName: string, block: bigint, from?: Address) {
-  let got = 'no revert'
+/** A call that must revert with `errorName`, simulated for free at `block`. `errorsFrom` decodes errors raised by
+ *  another contract the call reaches (a plugin's onLaunch under createToken). errorName 'ok' expects no revert. */
+async function expectRevert(label: string, address: Address, abi: Abi, functionName: string, args: readonly unknown[], errorName: string, block: bigint, from?: Address, errorsFrom?: Abi) {
+  let got = 'ok'
+  const fullAbi = errorsFrom ? ([...abi, ...errorsFrom.filter((x) => x.type === 'error')] as Abi) : abi
   try {
-    await retry(() => pub.simulateContract({ address, abi, functionName, args, account: from ?? me ?? dep.deployer as Address, blockNumber: block }))
+    await retry(() => pub.simulateContract({ address, abi: fullAbi, functionName, args, account: from ?? me ?? (dep.deployer as Address), blockNumber: block }))
   } catch (e) {
     got = revertName(e)
   }
-  check(`${label} reverts`, got, errorName)
+  check(errorName === 'ok' ? `${label} is accepted` : `${label} reverts`, got, errorName)
 }
 function revertName(e: unknown): string {
   if (e instanceof BaseError) {
@@ -371,24 +389,47 @@ function modelPoolSell(reserveToken: bigint, reserveUsdc: bigint, tokensIn: bigi
   return { gross, platformFee, creatorFee, usdcOut: gross - platformFee - creatorFee }
 }
 
-interface Stream {
-  unreleased: bigint
-  lastDrip: bigint
-  streamEnd: bigint
+/** LaunchToken's dividend stream (V13-SPEC §3, [D15], [D21]), as held in the token's storage. `perShare` and `rate`
+ *  are magnified by 2^128; `eligible` is the tracked eligible supply. */
+interface TokenStream {
+  perShare: bigint
+  rate: bigint
+  eligible: bigint
+  lastAccrual: bigint
+  end: bigint
 }
-/** Distribute to holders, [D21]: what a stream owes its holders at `now`. */
-function streamDue(s: Stream, now: bigint, eligible: boolean): bigint {
-  if (s.unreleased === 0n) return 0n
-  const due = now < s.streamEnd ? (s.unreleased * (now - s.lastDrip)) / (s.streamEnd - s.lastDrip) : s.unreleased
-  return due !== 0n && !eligible ? 0n : due
+const paused = (s: TokenStream) => s.eligible < E18
+/** The per-share value accrual would reach at time `t` (the token's _perShareNow). */
+function perShareAt(s: TokenStream, t: bigint): bigint {
+  if (s.lastAccrual >= s.end || paused(s)) return s.perShare
+  return s.perShare + (s.rate * (minOf(t, s.end) - s.lastAccrual)) / s.eligible
 }
-/** A delivery of `amount`: release what is due, then restart the line with the amount-weighted end. */
-function streamAfterFees(s: Stream, amount: bigint, now: bigint, eligible: boolean) {
-  const due = streamDue(s, now, eligible)
-  const kept = s.unreleased - due
-  const from = maxOf(s.streamEnd, now)
-  const end = from + divCeil(amount * (now + DRIP_PERIOD - from), kept + amount)
-  return { due, next: { unreleased: kept + amount, lastDrip: now, streamEnd: end } }
+/** What an eligible holder can claim at `t`: floor((perShare·balance + correction) / 2^128) - claimed. */
+const claimableAt = (s: TokenStream, t: bigint, balance: bigint, correction: bigint, claimed: bigint) =>
+  (perShareAt(s, t) * balance + correction) / MAGNITUDE - claimed
+/** What the running stream still has to pay from `t` on (the token's undistributed()). */
+function undistributedAt(s: TokenStream, t: bigint): bigint {
+  if (s.lastAccrual >= s.end) return 0n
+  const from = paused(s) ? s.lastAccrual : minOf(t, s.end)
+  return (s.rate * (s.end - from)) / MAGNITUDE
+}
+/** The token's _accrue at `t`: brings the per-share value up to now, or, paused, moves the end out. */
+function accrueAt(s: TokenStream, t: bigint): TokenStream {
+  if (s.lastAccrual >= s.end || s.lastAccrual === t) return s
+  if (paused(s)) return { ...s, end: s.end + (t - s.lastAccrual), lastAccrual: t }
+  const upTo = minOf(t, s.end)
+  return { ...s, perShare: s.perShare + (s.rate * (upTo - s.lastAccrual)) / s.eligible, lastAccrual: upTo }
+}
+/** The token's distribute(amount) at `t`: accrue; `amount` joins what the stream still owes; the end moves to the
+ *  amount-weighted average of the old end (or now) and now + DRIP_PERIOD, rounded down, at least now + 1; the rate is
+ *  everything owed over the time left, rounded down. A first stream runs exactly DRIP_PERIOD. */
+function distributeAt(s0: TokenStream, t: bigint, amount: bigint): TokenStream {
+  const s = accrueAt(s0, t)
+  const owed = s.end > t ? s.rate * (s.end - t) : 0n
+  const added = amount * MAGNITUDE
+  const from = maxOf(s.end, t)
+  const end = maxOf(from + (added * (t + DRIP_PERIOD - from)) / (owed + added), t + 1n)
+  return { ...s, rate: (owed + added) / (end - t), lastAccrual: t, end }
 }
 
 // ── Chain guard, key, progress ───────────────────────────────────────────────
@@ -612,11 +653,68 @@ const reservesAt = async (pair: Address, block: bigint) => {
   const [reserveToken, reserveUsdc] = await rd<readonly [bigint, bigint, number]>(pair, ABI.pair, 'getReserves', [], block)
   return { reserveToken, reserveUsdc }
 }
-const streamAt = async (token: Address, block: bigint): Promise<Stream> => ({
-  unreleased: await rd<bigint>(HOLDERS, ABI.holders, 'unreleased', [token], block),
-  lastDrip: await rd<bigint>(HOLDERS, ABI.holders, 'lastDrip', [token], block),
-  streamEnd: await rd<bigint>(HOLDERS, ABI.holders, 'streamEnd', [token], block),
-})
+const storageAt = async (address: Address, slot: bigint, block: bigint): Promise<bigint> => {
+  const word = await retry(() => pub.getStorageAt({ address, slot: `0x${slot.toString(16).padStart(64, '0')}`, blockNumber: block }))
+  return word ? hexToBigInt(word) : 0n
+}
+/** The token's dividend stream, read from its storage at `block`. */
+async function streamAt(token: Address, block: bigint): Promise<TokenStream> {
+  const packed = await storageAt(token, SLOT.stream, block)
+  return {
+    perShare: await storageAt(token, SLOT.perShare, block),
+    rate: await storageAt(token, SLOT.rate, block),
+    eligible: packed & (2n ** 128n - 1n),
+    lastAccrual: (packed >> 128n) & (2n ** 64n - 1n),
+    end: packed >> 192n,
+  }
+}
+/** A holder's dividend correction (int256 in the _corrections mapping). */
+async function correctionOf(token: Address, holder: Address, block: bigint): Promise<bigint> {
+  const slot = hexToBigInt(keccak256(encodeAbiParameters([{ type: 'address' }, { type: 'uint256' }], [holder, SLOT.corrections])))
+  const raw = await storageAt(token, slot, block)
+  return raw >= 2n ** 255n ? raw - 2n ** 256n : raw
+}
+interface HolderView {
+  stream: TokenStream
+  balance: bigint
+  correction: bigint
+  claimed: bigint
+  claimable: bigint
+  undistributed: bigint
+  streamRate: bigint
+  streamEnd: bigint
+  lastAccrual: bigint
+  totalDistributed: bigint
+  time: bigint
+}
+/** Everything about `holder`'s dividends at `block`, from storage and from the token's own views. */
+async function holderAt(token: Address, holder: Address, block: bigint): Promise<HolderView> {
+  return {
+    stream: await streamAt(token, block),
+    balance: await erc20Of(token, holder, block),
+    correction: await correctionOf(token, holder, block),
+    claimed: await rd<bigint>(token, ABI.token, 'claimed', [holder], block),
+    claimable: await rd<bigint>(token, ABI.token, 'claimable', [holder], block),
+    undistributed: await rd<bigint>(token, ABI.token, 'undistributed', [], block),
+    streamRate: await rd<bigint>(token, ABI.token, 'streamRate', [], block),
+    streamEnd: await rd<bigint>(token, ABI.token, 'streamEnd', [], block),
+    lastAccrual: await rd<bigint>(token, ABI.token, 'lastAccrual', [], block),
+    totalDistributed: await rd<bigint>(token, ABI.token, 'totalDistributed', [], block),
+    time: await timeOf(block),
+  }
+}
+/** The token's views at a block must equal the model fed with its storage at that block. */
+function viewsMatchModel(what: string, v: HolderView) {
+  check(`${what}: claimable, undistributed, streamRate, streamEnd, lastAccrual == model of the stored stream`, {
+    claimable: v.claimable, undistributed: v.undistributed, streamRate: v.streamRate, streamEnd: v.streamEnd, lastAccrual: v.lastAccrual,
+  }, {
+    claimable: claimableAt(v.stream, v.time, v.balance, v.correction, v.claimed),
+    undistributed: undistributedAt(v.stream, v.time),
+    streamRate: v.stream.rate / MAGNITUDE,
+    streamEnd: v.stream.end,
+    lastAccrual: v.stream.lastAccrual,
+  })
+}
 async function quoteCurveBuy(token: Address, usdcIn: bigint, block: bigint): Promise<BuyQuote> {
   const [tokensOut, platformFee, creatorFee, usdcSpent, graduates] = await rd<readonly [bigint, bigint, bigint, bigint, boolean]>(
     LP, ABI.pad, 'quoteBuy', [token, usdcIn], block)
@@ -731,7 +829,8 @@ async function wiring() {
   }
   check('split.MAX_PAYEES', await rd(SPLIT, ABI.split, 'MAX_PAYEES', [], at), 20n)
   check('buybackBurn.CAP_BPS', await rd(BUYBACK, ABI.buyback, 'CAP_BPS', [], at), CAP_BPS)
-  check('holders.DRIP_PERIOD', await rd(HOLDERS, ABI.holders, 'DRIP_PERIOD', [], at), DRIP_PERIOD)
+  check('buybackBurn.RUN_INTERVAL', await rd(BUYBACK, ABI.buyback, 'RUN_INTERVAL', [], at), RUN_INTERVAL)
+  check('buybackBurn.MIN_RUN_USDC', await rd(BUYBACK, ABI.buyback, 'MIN_RUN_USDC', [], at), MIN_RUN_USDC)
   check('combo.MAX_ENTRIES', await rd(COMBO, ABI.combo, 'MAX_ENTRIES', [], at), 5n)
   check('combo.TOTAL_BPS', await rd(COMBO, ABI.combo, 'TOTAL_BPS', [], at), 10_000n)
   check('usdc.decimals', await rd(USDC, ABI.erc20, 'decimals', [], at), 6)
@@ -853,6 +952,12 @@ async function create(kind: Kind) {
       factory: getAddress(await rd<string>(e.pair, ABI.pair, 'factory', [], B)),
       lpSupply: await rd<bigint>(e.pair, ABI.pair, 'totalSupply', [], B),
     }, { token, usdc: USDC, router: ROUTER, factory: FACTORY, lpSupply: 0n })
+    check('isLaunchPair: the new pair yes, the token no', [await rd(LP, ABI.pad, 'isLaunchPair', [e.pair], B), await rd(LP, ABI.pad, 'isLaunchPair', [token], B)], [true, false])
+    check('token dividends: DRIP_PERIOD, no stream yet', {
+      drip: await rd<bigint>(token, ABI.token, 'DRIP_PERIOD', [], B),
+      streamEnd: await rd<bigint>(token, ABI.token, 'streamEnd', [], B),
+      totalDistributed: await rd<bigint>(token, ABI.token, 'totalDistributed', [], B),
+    }, { drip: DRIP_PERIOD, streamEnd: 0n, totalDistributed: 0n })
 
     // The creator's first buy, in the same transaction, pays the creator fee like any other [D3].
     const trades = eventsOf<TradeEvent>(receipt, LP, ABI.pad, 'Trade')
@@ -877,6 +982,7 @@ async function create(kind: Kind) {
     })
     check('create: burner tokens', await erc20Of(token, me, B), model.tokensOut)
     check('create: launchpad holds the rest of the supply', await erc20Of(token, LP, B), TOTAL_SUPPLY - model.tokensOut)
+    await eligibleBooks('create', token, B)
 
     // Plugin configuration: onLaunch ran once, before the first buy (V13-SPEC §5).
     if (s.hooks) {
@@ -910,15 +1016,46 @@ async function create(kind: Kind) {
     }
     await identity('create', B)
 
-    // Free negative checks, once: the launch-fee bound [D22] and createToken's validation.
+    // Free negative checks, once: the launch-fee bound [D22] and createToken's validation, including the
+    // destinations it refuses (V13-SPEC §2.1 [review]). Simulated at this block, where this token and its pair exist.
     if (kind === KINDS[0]) {
-      const base = [s.name, s.symbol, '', Number(s.feeBps), s.plugin, s.data, 0n, 0n, launchFee] as const
-      if (launchFee > 0n) await expectRevert('createToken with maxLaunchFee below the fee', LP, ABI.pad, 'createToken', [...base.slice(0, 8), launchFee - 1n], 'LaunchFeeAboveMax', B)
-      await expectRevert('createToken at a 10.01% creator fee', LP, ABI.pad, 'createToken', [s.name, s.symbol, '', 1001, s.plugin, s.data, 0n, 0n, launchFee], 'CreatorFeeTooHigh', B)
-      await expectRevert('createToken paying the zero address', LP, ABI.pad, 'createToken', [s.name, s.symbol, '', 0, getAddress('0x0000000000000000000000000000000000000000'), '0x', 0n, 0n, launchFee], 'InvalidPlugin', B)
-      await expectRevert('createToken paying the launchpad', LP, ABI.pad, 'createToken', [s.name, s.symbol, '', 0, LP, '0x', 0n, 0n, launchFee], 'InvalidPlugin', B)
+      const launch = (plugin: Address, data: Hex, feeBps = 0, maxFee = launchFee) => ['Refused', 'NO', '', feeBps, plugin, data, 0n, 0n, maxFee] as const
+      if (launchFee > 0n) await expectRevert('createToken with maxLaunchFee below the fee', LP, ABI.pad, 'createToken', launch(s.plugin, s.data, Number(s.feeBps), launchFee - 1n), 'LaunchFeeAboveMax', B)
+      await expectRevert('createToken at a 10.01% creator fee', LP, ABI.pad, 'createToken', launch(s.plugin, s.data, 1001), 'CreatorFeeTooHigh', B)
+      const refused: [string, Address][] = [
+        ['the zero address', getAddress('0x0000000000000000000000000000000000000000')],
+        ['the launchpad', LP],
+        ['USDC', USDC],
+        ['the launch router', ROUTER],
+        ['the pair factory', FACTORY],
+        ['an existing launch token', token],
+        ['an existing launch pair', e.pair],
+      ]
+      // The next token's and pair's addresses are predictable (CREATE from the launchpad and the factory).
+      const nextToken = getContractAddress({ from: LP, nonce: BigInt(await nonceOf(LP, B)) })
+      const nextPair = getContractAddress({ from: FACTORY, nonce: BigInt(await nonceOf(FACTORY, B)) })
+      refused.push(['the new token itself (predicted address)', nextToken], ['the new token\'s own pair (predicted address)', nextPair])
+      for (const [label, plugin] of refused) await expectRevert(`createToken paying ${label}`, LP, ABI.pad, 'createToken', launch(plugin, '0x'), 'InvalidPlugin', B)
+      await expectRevert('createToken with pluginData for a plain address (a mistyped plugin)', LP, ABI.pad, 'createToken', launch(CREATOR_WALLET, '0x01'), 'DataForNonPlugin', B)
+      await expectRevert('createToken paying 0x…dEaD (burning the fees is a choice)', LP, ABI.pad, 'createToken', launch(DEAD, '0x'), 'ok', B)
+      const splitToPair = encodeAbiParameters([{ type: 'address[]' }, { type: 'uint256[]' }], [[e.pair], [1n]])
+      await expectRevert('a Split paying a launch pair (anyone could skim it)', LP, ABI.pad, 'createToken', launch(SPLIT, splitToPair), 'InvalidRecipient', B, undefined, ABI.split)
+      const comboToToken = encodeAbiParameters([{ type: 'address[]' }, { type: 'uint16[]' }, { type: 'bytes[]' }], [[token], [10_000], ['0x']])
+      await expectRevert('a Combo paying a launch token', LP, ABI.pad, 'createToken', launch(COMBO, comboToToken), 'InvalidRecipient', B, undefined, ABI.combo)
     }
   })
+}
+
+/** LaunchToken tracks its eligible supply as balances cross the excluded boundary; it must always equal
+ *  totalSupply - launchpad - pair - 0x…dEaD (V13-SPEC §3), and the burner is its only eligible holder here. */
+async function eligibleBooks(what: string, token: Address, block: bigint) {
+  const pair = (await curveAt(token, block)).pair
+  const formula = (await rd<bigint>(token, ABI.token, 'totalSupply', [], block)) - (await erc20Of(token, LP, block))
+    - (await erc20Of(token, pair, block)) - (await erc20Of(token, DEAD, block))
+  const tracked = (await streamAt(token, block)).eligible
+  check(`${what}: tracked eligible supply == totalSupply - launchpad - pair - dEaD`, tracked, formula)
+  if (me) check(`${what}: the burner is the only eligible holder`, formula, await erc20Of(token, me, block))
+  check(`${what}: eligibleSupply()`, await rd<bigint>(token, ABI.token, 'eligibleSupply', [], block), formula < E18 ? 0n : formula)
 }
 
 async function curveBuy(kind: Kind) {
@@ -927,7 +1064,7 @@ async function curveBuy(kind: Kind) {
     const s = SPECS[kind]
     const token = tokenOf(kind)
     const pre = await quoteCurveBuy(token, AMOUNTS.curveBuy, head)
-    const { receipt, args } = await tx(id, `buy ${s.symbol} (curve)`, LP, ABI.pad, 'buy', [token, AMOUNTS.curveBuy, pre.tokensOut, me])
+    const { receipt, args } = await tx(id, `buy ${s.symbol} (curve)`, LP, ABI.pad, 'buy', [token, AMOUNTS.curveBuy, pre.tokensOut, me, await deadline()])
     const B = receipt.blockNumber
     const B0 = B - 1n
     const usdcIn = args[1] as bigint
@@ -947,6 +1084,7 @@ async function curveBuy(kind: Kind) {
       virtualUsdc: c0.virtualUsdc + net, virtualTokens: c0.virtualTokens - q.tokensOut, tokensSold: c0.tokensSold + q.tokensOut,
     })
     await moves('buy', receipt, token, { padUsdc: q.usdcSpent, pendingFees: q.platformFee, pendingCreator: q.creatorFee, burnerTokens: q.tokensOut, burnerUsdc: -q.usdcSpent })
+    await eligibleBooks('buy', token, B)
     await identity('buy', B)
     // V13-SPEC §6.4: selling straight back what was just bought returns less than was paid.
     const [back] = await rd<readonly [bigint, bigint, bigint]>(LP, ABI.pad, 'quoteSell', [token, q.tokensOut], B)
@@ -957,6 +1095,10 @@ async function curveBuy(kind: Kind) {
       await expectRevert('router.quoteBuy before graduation', ROUTER, ABI.router, 'quoteBuy', [token, usd(1)], 'NotGraduated', B)
       await expectRevert('a direct LaunchPair.swap', pair, ABI.pair, 'swap', [1n, 0n, me], 'OnlyRouter', B)
       await expectRevert('accrueTradeFees from anyone but the router', LP, ABI.pad, 'accrueTradeFees', [token, 1n, 1n], 'Forbidden', B)
+      // Curve trades take a deadline, the launch router's rule (V13-SPEC §5 [review]).
+      const late = (await timeOf(B)) - 1n
+      await expectRevert('a curve buy past its deadline', LP, ABI.pad, 'buy', [token, usd(1), 0n, me, late], 'Expired', B)
+      await expectRevert('a curve sell past its deadline', LP, ABI.pad, 'sell', [token, E18, 0n, me, late], 'Expired', B)
     }
   })
 }
@@ -969,7 +1111,7 @@ async function curveSell(kind: Kind) {
     const token = tokenOf(kind)
     const half = (await erc20Of(token, me, head)) / 2n
     const [preOut] = await rd<readonly [bigint, bigint, bigint]>(LP, ABI.pad, 'quoteSell', [token, half], head)
-    const { receipt, args } = await tx(id, `sell ${s.symbol} (curve, half)`, LP, ABI.pad, 'sell', [token, half, preOut, me])
+    const { receipt, args } = await tx(id, `sell ${s.symbol} (curve, half)`, LP, ABI.pad, 'sell', [token, half, preOut, me, await deadline()])
     const B = receipt.blockNumber
     const B0 = B - 1n
     const tokensIn = args[1] as bigint
@@ -986,6 +1128,7 @@ async function curveSell(kind: Kind) {
     }])
     check('tokensSold after', (await curveAt(token, B)).tokensSold, c0.tokensSold - tokensIn)
     await moves('sell', receipt, token, { padUsdc: -usdcOut, pendingFees: platformFee, pendingCreator: creatorFee, burnerTokens: -tokensIn, burnerUsdc: usdcOut })
+    await eligibleBooks('sell', token, B)
     await identity('sell', B)
   })
 }
@@ -998,22 +1141,31 @@ async function credited(what: string, receipt: TransactionReceipt, plugin: Addre
 }
 
 /** Distribute to holders receiving `amount` for `token` in `receipt`: the stream moves exactly as [D21] says. */
+/** Distribute to holders receiving `amount` for `token` in `receipt`: a thin forwarder (V13-SPEC §2.2) whose onFees
+ *  hands everything to the token's distribute, which streams it over 24 hours ([D15], [D21]). The token's stream must
+ *  move exactly as its model says: accrue, join what is owed, amount-weighted end rounded down, rate rounded down. */
 async function holdersCredited(what: string, receipt: TransactionReceipt, token: Address, from: Address, amount: bigint) {
   const B = receipt.blockNumber
   const B0 = B - 1n
   const now = await timeOf(B)
-  const s0 = await streamAt(token, B0)
-  const eligible = (await rd<bigint>(token, ABI.token, 'eligibleSupply', [], B0)) > 0n
-  const { due, next } = streamAfterFees(s0, amount, now, eligible)
   check(`${what}: FeesReceived`, eventsOf(receipt, HOLDERS, ABI.holders, 'FeesReceived'), [{ token, from, amount }])
-  check(`${what}: stream (unreleased, lastDrip, streamEnd)`, await streamAt(token, B), next)
-  if (s0.unreleased === 0n) check(`${what}: a delivery to an empty stream runs exactly DRIP_PERIOD`, next.streamEnd - now, DRIP_PERIOD)
-  check(`${what}: FeesStreamed`, eventsOf(receipt, HOLDERS, ABI.holders, 'FeesStreamed'), [{ token, amount, unreleased: next.unreleased, streamEnd: next.streamEnd }])
-  check(`${what}: what the old stream owed went out first`, eventsOf(receipt, HOLDERS, ABI.holders, 'Distributed'), due > 0n ? [{ token, amount: due }] : [])
-  check(`${what}: holders plugin USDC`, (await usdcOf(HOLDERS, B)) - (await usdcOf(HOLDERS, B0)), amount - due)
-  check(`${what}: token totalDistributed`, (await rd<bigint>(token, ABI.token, 'totalDistributed', [], B)) - (await rd<bigint>(token, ABI.token, 'totalDistributed', [], B0)), due)
-  check(`${what}: plugin totalDistributed`, (await rd<bigint>(HOLDERS, ABI.holders, 'totalDistributed', [token], B)) - (await rd<bigint>(HOLDERS, ABI.holders, 'totalDistributed', [token], B0)), due)
-  if (due > 0n) note(`${what}: ${fmt(due)} of the running stream was due and was distributed first`)
+  check(`${what}: the plugin forwarded it all (Distributed)`, eventsOf(receipt, HOLDERS, ABI.holders, 'Distributed'), [{ token, amount }])
+  check(`${what}: the token's distribute took it (DividendsDistributed)`, eventsOf(receipt, token, ABI.token, 'DividendsDistributed'), [{ from: HOLDERS, amount }])
+  check(`${what}: holders plugin keeps nothing (USDC, usdcHeld before and after)`, [
+    await usdcOf(HOLDERS, B0), await usdcOf(HOLDERS, B), await rd(HOLDERS, ABI.holders, 'usdcHeld', [token], B0), await rd(HOLDERS, ABI.holders, 'usdcHeld', [token], B),
+  ], [0n, 0n, 0n, 0n])
+  const delta = async (read: (b: bigint) => Promise<bigint>) => (await read(B)) - (await read(B0))
+  check(`${what}: token USDC, token totalDistributed, plugin totalDistributed`, [
+    await delta((b) => usdcOf(token, b)),
+    await delta((b) => rd<bigint>(token, ABI.token, 'totalDistributed', [], b)),
+    await delta((b) => rd<bigint>(HOLDERS, ABI.holders, 'totalDistributed', [token], b)),
+  ], [amount, amount, amount])
+  const s0 = await streamAt(token, B0)
+  const expected = distributeAt(s0, now, amount)
+  check(`${what}: token stream (per-share, rate, eligible, lastAccrual, end) == model`, await streamAt(token, B), expected)
+  if (s0.end === 0n) check(`${what}: a first stream runs exactly DRIP_PERIOD (streamEnd - now)`, expected.end - now, DRIP_PERIOD)
+  else note(`${what}: joined a running stream: end ${s0.end - now} s → ${expected.end - now} s from now (amount-weighted, rounded down)`)
+  if (me) viewsMatchModel(what, await holderAt(token, me, B))
 }
 
 async function collect(kind: Kind, round: number) {
@@ -1087,22 +1239,67 @@ async function releaseAll(round: number) {
   }
 }
 
-async function buyback(kind: Kind, round: number) {
+/** Buyback & burn pacing (V13-SPEC §2.2 [review]): what a run offers at time `t`. The cap is 0.25% of the USDC-side
+ *  reserve; a token's first run gets a full cap, later runs cap × min(t - lastRunAt, 1 h) / 1 h, rounded down; an
+ *  offer under MIN_RUN_USDC is no run (0). */
+function runOffer(held: bigint, cap: bigint, lastRunAt: bigint, t: bigint): bigint {
+  const budget = lastRunAt === 0n || t - lastRunAt >= RUN_INTERVAL ? cap : (cap * (t - lastRunAt)) / RUN_INTERVAL
+  const offer = minOf(held, budget)
+  return offer < MIN_RUN_USDC ? 0n : offer
+}
+
+/** Waits until the chain's latest block is at least `target` seconds, and reads from there on. */
+async function waitUntilTime(target: bigint) {
+  for (;;) {
+    const b = await latest()
+    if (b >= head && (await timeOf(b)) >= target) {
+      head = b
+      return
+    }
+    await sleep(1000)
+  }
+}
+
+async function buyback(kind: Kind, round: string) {
   const id = `run${round}:${kind}`
   await step(id, async () => {
     const s = SPECS[kind]
     const token = tokenOf(kind)
-    const { receipt } = await tx(id, `buyback run ${s.symbol}`, BUYBACK, ABI.buyback, 'run', [token])
+    const what = `buyback run ${s.symbol}`
+    if (!minedTx(id, what)) {
+      // A later run a few blocks after the last one: let a few seconds pass, so its prorated budget is above zero.
+      const last = await rd<bigint>(BUYBACK, ABI.buyback, 'lastRunAt', [token], head)
+      if (last !== 0n) await waitUntilTime(last + 5n)
+      const [preview] = await rd<readonly [bigint, boolean]>(BUYBACK, ABI.buyback, 'previewRun', [token], head)
+      if (preview === 0n) {
+        // Nothing above MIN_RUN_USDC is waiting (the Arc-USDC run's first run spent it all): the plugin refuses, free.
+        const held = await rd<bigint>(BUYBACK, ABI.buyback, 'usdcHeld', [token], head)
+        checkThat('nothing to buy: usdcHeld under MIN_RUN_USDC, previewRun 0', held < MIN_RUN_USDC, `${held} unit(s) waiting`)
+        await expectRevert('a run with nothing to buy', BUYBACK, ABI.buyback, 'run', [token], 'NothingToBuy', head)
+        return
+      }
+    }
+    const { receipt } = await tx(id, what, BUYBACK, ABI.buyback, 'run', [token])
     const B = receipt.blockNumber
     const B0 = B - 1n
+    const [t0, t] = [await timeOf(B0), await timeOf(B)]
     const graduated = await rd<boolean>(LP, ABI.pad, 'isGraduated', [token], B0)
     const held = await rd<bigint>(BUYBACK, ABI.buyback, 'usdcHeld', [token], B0)
+    const lastRunAt = await rd<bigint>(BUYBACK, ABI.buyback, 'lastRunAt', [token], B0)
     const pair = (await curveAt(token, B0)).pair
     const r0 = await reservesAt(pair, B0)
     const reserve = graduated ? r0.reserveUsdc : await rd<bigint>(LP, ABI.pad, 'virtualUsdcOf', [token], B0)
     const cap = (reserve * CAP_BPS) / BPS
-    const offer = minOf(held, cap)
-    check('previewRun == min(usdcHeld, 0.25% of the USDC-side reserve)', await rd(BUYBACK, ABI.buyback, 'previewRun', [token], B0), [offer, graduated])
+    const offer = runOffer(held, cap, lastRunAt, t)
+    check('previewRun (block before) == the pacing model at its time', await rd(BUYBACK, ABI.buyback, 'previewRun', [token], B0), [runOffer(held, cap, lastRunAt, t0), graduated])
+    if (lastRunAt === 0n) {
+      check('first run: offer == min(usdcHeld, full cap)', offer, minOf(held, cap))
+    } else {
+      const elapsed = t - lastRunAt
+      const budget = elapsed >= RUN_INTERVAL ? cap : (cap * elapsed) / RUN_INTERVAL
+      check(`paced run, ${elapsed} s after the last: offer == min(usdcHeld, cap × ${elapsed}/3600)`, offer, minOf(held, budget))
+      if (elapsed < RUN_INTERVAL) checkThat('a run within the hour offers less than one cap', offer < cap, `${fmt(offer)} < ${fmt(cap)}`)
+    }
     let tokensOut: bigint
     let platformFee: bigint
     let creatorFee: bigint
@@ -1124,9 +1321,8 @@ async function buyback(kind: Kind, round: number) {
       }])
       await moves('buyback', receipt, token, { padUsdc: offer, pendingFees: platformFee, pendingCreator: creatorFee, burnerUsdc: 0n })
     }
-    check('BuybackRun', eventsOf(receipt, BUYBACK, ABI.buyback, 'BuybackRun'), [{ token, caller: me, graduated, usdcSpent: offer, tokensBurned: tokensOut }])
+    check('BuybackRun (spend == the model at the run\'s time)', eventsOf(receipt, BUYBACK, ABI.buyback, 'BuybackRun'), [{ token, caller: me, graduated, usdcSpent: offer, tokensBurned: tokensOut }])
     checkThat('spend ≤ 0.25% cap', offer <= cap, `${fmt(offer)} ≤ ${fmt(cap)} (reserve ${fmt(reserve)}, waiting ${fmt(held)})`)
-    if (held > cap) check('the cap binds: spend == cap', offer, cap)
     const supply = async (b: bigint) => rd<bigint>(token, ABI.token, 'totalSupply', [], b)
     check('total supply fell by the tokens bought (burned)', (await supply(B)) - (await supply(B0)), -tokensOut)
     check('buyback holds no tokens before or after', [await erc20Of(token, BUYBACK, B0), await erc20Of(token, BUYBACK, B)], [0n, 0n])
@@ -1136,72 +1332,91 @@ async function buyback(kind: Kind, round: number) {
       (await rd<bigint>(BUYBACK, ABI.buyback, 'totalUsdcSpent', [token], B)) - (await rd<bigint>(BUYBACK, ABI.buyback, 'totalUsdcSpent', [token], B0)),
       (await rd<bigint>(BUYBACK, ABI.buyback, 'totalTokensBurned', [token], B)) - (await rd<bigint>(BUYBACK, ABI.buyback, 'totalTokensBurned', [token], B0)),
     ], [offer, tokensOut])
-    check('nextRunBlock == this block + 1', await rd(BUYBACK, ABI.buyback, 'nextRunBlock', [token], B), B + 1n)
+    check('lastRunAt == this block\'s time, nextRunBlock == this block + 1', [
+      await rd(BUYBACK, ABI.buyback, 'lastRunAt', [token], B), await rd(BUYBACK, ABI.buyback, 'nextRunBlock', [token], B),
+    ], [t, B + 1n])
     check('previewRun in the same block offers nothing', await rd(BUYBACK, ABI.buyback, 'previewRun', [token], B), [0n, graduated])
     await expectRevert('a second run in the same block', BUYBACK, ABI.buyback, 'run', [token], 'AlreadyRanThisBlock', B)
+    await eligibleBooks('buyback', token, B)
     await identity('buyback', B)
   })
 }
 
 async function sample(round: number) {
-  if (!HOLDER_KINDS.length) return
+  if (!HOLDER_KINDS.length || !me) return
+  const holder = me
   await step(`sample${round}`, async () => {
-    // Distribute to holders drips over 24 hours [D21]: what a holder can be paid grows with time, by the formula.
+    // The token streams dividends second by second ([D15], [D21]): a holder's claimable grows with time at the
+    // stream's rate times its share of the eligible supply, and what the stream still owes falls.
     const b1 = maxOf(await latest(), head)
-    const t1 = await timeOf(b1)
-    const first = new Map<Kind, bigint>()
-    for (const kind of HOLDER_KINDS) first.set(kind, await rd<bigint>(HOLDERS, ABI.holders, 'releasable', [tokenOf(kind)], b1))
-    note(`waiting ${SAMPLE_SECONDS} s for the drip to grow`)
+    const first = new Map<Kind, HolderView>()
+    for (const kind of HOLDER_KINDS) first.set(kind, await holderAt(tokenOf(kind), holder, b1))
+    note(`waiting ${SAMPLE_SECONDS} s for the stream to pay out`)
     await sleep(SAMPLE_SECONDS * 1000)
     const b2 = maxOf(await latest(), b1 + 1n)
-    const t2 = await timeOf(b2)
     for (const kind of HOLDER_KINDS) {
       const token = tokenOf(kind)
-      const s = await streamAt(token, b1)
-      check(`${kind}: stream unchanged between the samples`, await streamAt(token, b2), s)
-      const r1 = first.get(kind) ?? 0n
-      const r2 = await rd<bigint>(HOLDERS, ABI.holders, 'releasable', [token], b2)
-      check(`${kind}: releasable at t1 == unreleased·(t1-lastDrip)/(end-lastDrip)`, r1, streamDue(s, t1, true))
-      check(`${kind}: releasable at t2 (${t2 - t1} s later)`, r2, streamDue(s, t2, true))
-      checkThat(`${kind}: releasable grows with time`, r2 > r1, `${fmt(r1)} → ${fmt(r2)} of ${fmt(s.unreleased)} USDC`)
+      const v1 = first.get(kind)
+      if (!v1) throw new Error(`no first sample for ${kind}`)
+      const v2 = await holderAt(token, holder, b2)
+      const dt = v2.time - v1.time
+      check(`${kind}: nothing touched the token between the samples (stored stream, balance, correction)`, [v2.stream, v2.balance, v2.correction], [v1.stream, v1.balance, v1.correction])
+      viewsMatchModel(`${kind} at t1`, v1)
+      viewsMatchModel(`${kind} at t2 (${dt} s later)`, v2)
+      const grew = v2.claimable - v1.claimable
+      const approx = (v1.streamRate * dt * v1.balance) / v1.stream.eligible
+      const share = Number((v1.balance * 10_000n) / v1.stream.eligible) / 10_000
+      checkThat(`${kind}: claimable grows with time`, grew > 0n, `${fmt(v1.claimable)} → ${fmt(v2.claimable)} USDC in ${dt} s`)
+      checkThat(`${kind}: by ≈ streamRate × dt × share (within dt + 2 units: streamRate is rounded down)`, grew - approx <= dt + 2n && approx - grew <= dt + 2n,
+        `${grew} units vs ${v1.streamRate}/s × ${dt} s × ${share} = ${approx}`)
+      checkThat(`${kind}: undistributed falls`, v2.undistributed < v1.undistributed || v1.stream.rate * dt < MAGNITUDE,
+        `${fmt(v1.undistributed)} → ${fmt(v2.undistributed)} USDC`)
     }
   })
 }
 
-async function drip(kind: Kind, round: number) {
-  const id = `drip${round}:${kind}`
+/** The burner claims its dividends on the token (V13-SPEC §3): the claim pays exactly what claimable says at the
+ *  claim's block, the stream accrues first, and, as the only eligible holder, the burner has earned everything the
+ *  stream has paid out so far. */
+async function claim(kind: Kind, round: number) {
+  const id = `claim${round}:${kind}`
   await step(id, async () => {
     if (!me) return
     const token = tokenOf(kind)
-    const { receipt } = await tx(id, `dripAndClaim ${SPECS[kind].symbol}`, HOLDERS, ABI.holders, 'dripAndClaim', [token])
+    const { receipt } = await tx(id, `claim ${SPECS[kind].symbol} dividends`, token, ABI.token, 'claim', [])
     const B = receipt.blockNumber
     const B0 = B - 1n
-    const now = await timeOf(B)
-    const s0 = await streamAt(token, B0)
-    const eligibleSupply = await rd<bigint>(token, ABI.token, 'eligibleSupply', [], B0)
-    const sole = eligibleSupply === (await erc20Of(token, me, B0))
-    const released = streamDue(s0, now, eligibleSupply > 0n)
-    checkThat('something was due', released > 0n, `${fmt(released)} of ${fmt(s0.unreleased)} USDC after ${now - s0.lastDrip} s`)
-    check('Distributed == unreleased·(now-lastDrip)/(end-lastDrip)', eventsOf(receipt, HOLDERS, ABI.holders, 'Distributed'), [{ token, amount: released }])
-    check('the token took it through distribute', eventsOf(receipt, token, ABI.token, 'DividendsDistributed'), [{ from: HOLDERS, amount: released }])
-    check('stream after', await streamAt(token, B), { unreleased: s0.unreleased - released, lastDrip: now, streamEnd: s0.streamEnd })
-    const claimableBefore = await rd<bigint>(token, ABI.token, 'claimable', [me], B0)
-    const claims = eventsOf<{ holder: Address; amount: bigint }>(receipt, token, ABI.token, 'DividendClaimed')
-    check('one claim, paid to the caller', claims.map((c) => c.holder), [me])
-    const claimed = claims[0]?.amount ?? 0n
-    checkThat('the claim pays > 0', claimed > 0n, fmt(claimed))
-    checkThat('the claim is never more than released', claimed <= claimableBefore + released, `${fmt(claimed)} ≤ ${fmt(claimableBefore)} waiting + ${fmt(released)} released`)
-    if (sole) checkThat('sole eligible holder: all of it, less at most 1 unit of rounding', claimed + 1n >= claimableBefore + released, `${claimableBefore + released - claimed} unit(s) of dust`)
-    await burnerSide('dripAndClaim', receipt, claimed)
-    check('holders plugin USDC', (await usdcOf(HOLDERS, B)) - (await usdcOf(HOLDERS, B0)), -released)
-    check("token's USDC (dividends not yet claimed)", (await usdcOf(token, B)) - (await usdcOf(token, B0)), released - claimed)
-    check('claimed(burner)', (await rd<bigint>(token, ABI.token, 'claimed', [me], B)) - (await rd<bigint>(token, ABI.token, 'claimed', [me], B0)), claimed)
-    check('claimable(burner) after', await rd<bigint>(token, ABI.token, 'claimable', [me], B), 0n)
-    const distributed = await rd<bigint>(token, ABI.token, 'totalDistributed', [], B)
-    check('token.totalDistributed == plugin.totalDistributed(token)', distributed, await rd<bigint>(HOLDERS, ABI.holders, 'totalDistributed', [token], B))
-    const claimedTotal = await rd<bigint>(token, ABI.token, 'claimed', [me], B)
-    checkThat('Σ claimed + Σ claimable ≤ Σ distributed (§6.6)', claimedTotal <= distributed, `${fmt(claimedTotal)} ≤ ${fmt(distributed)}`)
+    const v0 = await holderAt(token, me, B0)
+    const v1 = await holderAt(token, me, B)
+    // What claimable said at the claim's block: the block before's stored stream, accrued to this block's time.
+    const due = claimableAt(v0.stream, v1.time, v0.balance, v0.correction, v0.claimed)
+    viewsMatchModel('block before the claim', v0)
+    check("DividendClaimed == claimable at the claim's block", eventsOf(receipt, token, ABI.token, 'DividendClaimed'), [{ holder: me, amount: due }])
+    checkThat('the claim pays > 0', due > 0n, `${fmt(due)} USDC (claimable read a block earlier: ${fmt(v0.claimable)})`)
+    check('claimed(burner) rose by it; claimable is 0 after', [v1.claimed - v0.claimed, v1.claimable], [due, 0n])
+    await burnerSide('claim', receipt, due)
+    check("token's USDC fell by it", (await usdcOf(token, B)) - (await usdcOf(token, B0)), -due)
+    check('the claim accrued the stream first (stored stream == model)', v1.stream, accrueAt(v0.stream, v1.time))
+    viewsMatchModel('after the claim', v1)
+    // Both readings equal the model (above); between them undistributed can only fall. Arc makes two blocks a second,
+    // so the block before may share the claim's timestamp, and a stream under 1 unit/s may not fall a whole unit in 1 s.
+    checkThat('undistributed never rises', v1.undistributed <= v0.undistributed,
+      `${fmt(v0.undistributed)} → ${fmt(v1.undistributed)} USDC over ${v1.time - v0.time} s at ${fmt(v1.streamRate)}/s`)
+    await conservation('after the claim', token, B)
   })
+}
+
+/** The burner is the only eligible holder of the holder tokens, so it has earned everything the stream paid out:
+ *  claimed + claimable + undistributed == totalDistributed, less at most 2 units of rounding. Also §6.6. */
+async function conservation(what: string, token: Address, block: bigint) {
+  if (!me) return
+  const v = await holderAt(token, me, block)
+  const earned = v.claimed + v.claimable
+  const dust = v.totalDistributed - earned - v.undistributed
+  checkThat(`${what}: sole holder earned all that streamed: claimed + claimable + undistributed == totalDistributed, ≤ 2 units dust`, dust >= 0n && dust <= 2n, `${dust} unit(s) of dust`)
+  checkThat(`${what}: Σ claimed + Σ claimable ≤ Σ distributed (§6.6)`, earned <= v.totalDistributed, `${fmt(earned)} ≤ ${fmt(v.totalDistributed)}`)
+  check(`${what}: token.totalDistributed == plugin.totalDistributed(token)`, v.totalDistributed, await rd<bigint>(HOLDERS, ABI.holders, 'totalDistributed', [token], block))
+  check(`${what}: token USDC == distributed - claimed`, await usdcOf(token, block), v.totalDistributed - v.claimed)
 }
 
 async function graduate(kind: Kind) {
@@ -1219,7 +1434,7 @@ async function graduate(kind: Kind) {
       if (have < pre.usdcSpent) await tx(id, 'mint rUSDC (top-up)', USDC, ABI.erc20, 'mint', [me, pre.usdcSpent - have + usd(1000)])
       minOut = pre.tokensOut
     }
-    const { receipt, args } = await tx(id, what, LP, ABI.pad, 'buy', [token, AMOUNTS.graduateOffer, minOut, me])
+    const { receipt, args } = await tx(id, what, LP, ABI.pad, 'buy', [token, AMOUNTS.graduateOffer, minOut, me, await deadline()])
     const B = receipt.blockNumber
     const B0 = B - 1n
     const usdcIn = args[1] as bigint
@@ -1261,9 +1476,10 @@ async function graduate(kind: Kind) {
     await moves('graduation', receipt, token, {
       padUsdc: q.usdcSpent - usdcSeeded, pendingFees: q.platformFee, pendingCreator: q.creatorFee, burnerTokens: remaining, burnerUsdc: -q.usdcSpent,
     })
+    await eligibleBooks('graduation', token, B)
     await identity('graduation (the float leaves the sum)', B)
     await expectRevert('launchpad.quoteBuy after graduation', LP, ABI.pad, 'quoteBuy', [token, usd(1)], 'CurveGraduated', B)
-    await expectRevert('a curve sell after graduation', LP, ABI.pad, 'sell', [token, E18, 0n, me], 'CurveGraduated', B)
+    await expectRevert('a curve sell after graduation', LP, ABI.pad, 'sell', [token, E18, 0n, me, (await timeOf(B)) + 3600n], 'CurveGraduated', B)
     await expectRevert('a direct LaunchPair.swap after graduation', c0.pair, ABI.pair, 'swap', [E18, 0n, me], 'OnlyRouter', B)
   })
 }
@@ -1275,8 +1491,7 @@ async function poolBuy(kind: Kind) {
     const s = SPECS[kind]
     const token = tokenOf(kind)
     const [preOut] = await rd<readonly [bigint, bigint, bigint]>(ROUTER, ABI.router, 'quoteBuy', [token, AMOUNTS.poolBuy], head)
-    const deadline = (await timeOf(head)) + 3600n
-    const { receipt, args } = await tx(id, `buy ${s.symbol} (launch router)`, ROUTER, ABI.router, 'buy', [token, AMOUNTS.poolBuy, preOut, me, deadline])
+    const { receipt, args } = await tx(id, `buy ${s.symbol} (launch router)`, ROUTER, ABI.router, 'buy', [token, AMOUNTS.poolBuy, preOut, me, await deadline()])
     const B = receipt.blockNumber
     const B0 = B - 1n
     const usdcIn = args[1] as bigint
@@ -1290,6 +1505,7 @@ async function poolBuy(kind: Kind) {
     check('pool reserves after', await reservesAt(pair, B), { reserveToken: r0.reserveToken - tokensOut, reserveUsdc: r0.reserveUsdc + m.net })
     await moves('pool buy', receipt, token, { padUsdc: platformFee + creatorFee, pendingFees: platformFee, pendingCreator: creatorFee, burnerTokens: tokensOut, burnerUsdc: -usdcIn })
     progress.notes[`${id}:tokensOut`] = tokensOut.toString()
+    await eligibleBooks('pool buy', token, B)
     await identity('pool buy', B)
   })
 }
@@ -1303,8 +1519,7 @@ async function poolSell(kind: Kind) {
     const bought = BigInt(progress.notes[`poolbuy:${kind}:tokensOut`] ?? '0')
     const tokensInPlan = bought > 0n ? bought / 2n : (await erc20Of(token, me, head)) / 1000n
     const [preOut] = await rd<readonly [bigint, bigint, bigint]>(ROUTER, ABI.router, 'quoteSell', [token, tokensInPlan], head)
-    const deadline = (await timeOf(head)) + 3600n
-    const { receipt, args } = await tx(id, `sell ${s.symbol} (launch router)`, ROUTER, ABI.router, 'sell', [token, tokensInPlan, preOut, me, deadline])
+    const { receipt, args } = await tx(id, `sell ${s.symbol} (launch router)`, ROUTER, ABI.router, 'sell', [token, tokensInPlan, preOut, me, await deadline()])
     const B = receipt.blockNumber
     const B0 = B - 1n
     const tokensIn = args[1] as bigint
@@ -1317,6 +1532,7 @@ async function poolSell(kind: Kind) {
     check('PoolFeesAccrued (recorded per token)', eventsOf(receipt, LP, ABI.pad, 'PoolFeesAccrued'), [{ token, platformFee, creatorFee }])
     check('pool reserves after', await reservesAt(pair, B), { reserveToken: r0.reserveToken + tokensIn, reserveUsdc: r0.reserveUsdc - m.gross })
     await moves('pool sell', receipt, token, { padUsdc: platformFee + creatorFee, pendingFees: platformFee, pendingCreator: creatorFee, burnerTokens: -tokensIn, burnerUsdc: usdcOut })
+    await eligibleBooks('pool sell', token, B)
     await identity('pool sell', B)
   })
 }
@@ -1349,7 +1565,7 @@ async function finalState() {
     }
     check('split USDC == Σ usdcHeld over its tokens', await usdcOf(SPLIT, B), await held(SPLIT, ABI.split, ['split']))
     check('buyback USDC == Σ usdcHeld over its tokens', await usdcOf(BUYBACK, B), await held(BUYBACK, ABI.buyback, ['buyback', 'combo']))
-    check('holders USDC == Σ usdcHeld (unreleased) over its tokens', await usdcOf(HOLDERS, B), await held(HOLDERS, ABI.holders, ['holders', 'combo']))
+    check('holders USDC == Σ usdcHeld == 0 (it forwards everything to the tokens)', [await usdcOf(HOLDERS, B), await held(HOLDERS, ABI.holders, ['holders', 'combo'])], [0n, 0n])
     check('combo USDC == 0 (it forwards everything)', await usdcOf(COMBO, B), 0n)
     await identity('final', B)
     for (const k of made) {
@@ -1361,13 +1577,12 @@ async function finalState() {
         check(`${SPECS[k].symbol}: every token burned was burned by the buyback`, TOTAL_SUPPLY - supply, await rd<bigint>(BUYBACK, ABI.buyback, 'totalTokensBurned', [token], B))
       }
       if (HOLDER_KINDS.includes(k) && me) {
-        const distributed = await rd<bigint>(token, ABI.token, 'totalDistributed', [], B)
-        const claimed = await rd<bigint>(token, ABI.token, 'claimed', [me], B)
-        const claimable = await rd<bigint>(token, ABI.token, 'claimable', [me], B)
-        checkThat(`${SPECS[k].symbol}: Σ claimed + Σ claimable ≤ Σ distributed (§6.6)`, claimed + claimable <= distributed, `${fmt(claimed)} + ${fmt(claimable)} ≤ ${fmt(distributed)}`)
-        check(`${SPECS[k].symbol}: token USDC == distributed - claimed`, await usdcOf(token, B), distributed - claimed)
-        line.push(`dividends ${fmt(distributed)} distributed, ${fmt(claimed)} claimed`)
+        const v = await holderAt(token, me, B)
+        viewsMatchModel(SPECS[k].symbol, v)
+        await conservation(SPECS[k].symbol, token, B)
+        line.push(`dividends ${fmt(v.totalDistributed)} distributed, ${fmt(v.claimed)} claimed, ${fmt(v.claimable)} claimable, ${fmt(v.undistributed)} still streaming until ${new Date(Number(v.streamEnd) * 1000).toISOString()}`)
       }
+      if (me) await eligibleBooks(SPECS[k].symbol, token, B)
       if (c.graduated) {
         const r = await reservesAt(c.pair, B)
         check(`${SPECS[k].symbol}: pool reserves == pool balances`, r, { reserveToken: await erc20Of(token, c.pair, B), reserveUsdc: await usdcOf(c.pair, B) })
@@ -1439,10 +1654,13 @@ try {
   for (const k of KINDS) {
     await collect(k, 1)
     if (k === 'split') await releaseAll(1)
-    if (BUYBACK_KINDS.includes(k)) await buyback(k, 1)
+    if (BUYBACK_KINDS.includes(k)) {
+      await buyback(k, '1') // a token's first run: a full cap
+      await buyback(k, '1b') // a few blocks later: cap × elapsed / 1 h
+    }
   }
   await sample(1)
-  for (const k of HOLDER_KINDS) await drip(k, 1)
+  for (const k of HOLDER_KINDS) await claim(k, 1)
   if (!REAL) {
     for (const k of KINDS) await graduate(k)
     for (const k of KINDS) {
@@ -1452,10 +1670,10 @@ try {
     for (const k of KINDS) {
       await collect(k, 2)
       if (k === 'split') await releaseAll(2)
-      if (BUYBACK_KINDS.includes(k)) await buyback(k, 2)
+      if (BUYBACK_KINDS.includes(k)) await buyback(k, '2') // in the pool, through the router, still paced
     }
     await sample(2)
-    for (const k of HOLDER_KINDS) await drip(k, 2)
+    for (const k of HOLDER_KINDS) await claim(k, 2)
   }
   await collectPlatformFees()
   await finalState()
