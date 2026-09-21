@@ -126,6 +126,52 @@ invariants: the router never ends a call holding a balance of any token (it's a 
 `k` never decreases for either pair, and each pair's on-chain balance always covers its reported
 reserves.
 
+## 3b. Launchpad v1.3 — review record (2026-09-21)
+
+v1.3 (docs/launchpad/V13-SPEC.md) adds creator fees routed to plugins, a separate launch-pool suite, a dividend
+token and four reference plugins. Everything below ran on the final code unless noted.
+
+**Adversarial reviews.** Three independent Claude reviews (money flow and accounting; plugin trust boundaries;
+the dividend token), Grok #3 (`docs/launchpad/GROK-REVIEW-3.md`), a final Claude review of everything changed
+after them, and Grok #4 (`GROK-REVIEW-4.md`). What they changed:
+- **Holder dividends could be sniped** (Grok #3 High): any design that releases a matured lump to whoever holds
+  at release time stays snipeable, so dividends now accrue second by second inside `LaunchToken`
+  (StakingRewards-style); a buy, claim and sell in one transaction earns exactly 0, and the stream pauses while
+  nobody holds. Confirmed closed by Grok #4 and the final review.
+- **Buyback & burn could be farmed** by chaining one run per block (Medium): spending is paced to 0.25% of the
+  USDC-side reserve per hour, so front-running it means holding for ~3 h (0.5% creator fee) up to ~49 h (10%).
+- **Fee destinations that can never pass fees on** (Low): `createToken`, Split and Combo refuse USDC, the router,
+  the pair factory, any launch token and any launch pair (a new `isLaunchPair` registry: fees sent to a pair can
+  be skimmed by anyone); plugin data sent to a non-plugin reverts `DataForNonPlugin`.
+- **Curve trades had no deadline** (Low): `buy`/`sell` take one and revert `Expired`.
+- Stale stream views, buyback dust (`MIN_RUN_USDC`), and every accepted limit written into V13-SPEC §9.
+Nothing above Low was left open. Each finding and decision is in V13-SPEC §9 and the commit history.
+
+**Static analysis** (final code): Slither 0 High; the v1.3 Mediums are the same verified false-positive classes as
+§1 (`receive`/`fallback` revert so nothing locks ether; `nonReentrant` on every flagged reentrancy with state
+written before untrusted calls; fees computed from a floored gross that rounds in the pool's favour;
+Uniswap-V2 `== 0` checks and `== 0` checks on computed amounts). `LaunchToken` has no Mediums. Aderyn: the same
+four High false-positive classes, same instances (`ArchitexLaunchpad.initialize` is deployer-only, one-shot and
+checks its wiring; `LaunchToken.initPair` is launchpad-only and one-shot).
+
+**Symbolic execution** (Mythril, 1200 s execution budget): `ArchitexLaunchpad` 0 findings; `LaunchToken` 0;
+`BuybackBurnPlugin` 0; `HolderDistributionPlugin` 5 Low, all expected (it calls the configured launch token it was
+handed, after `_requireConfigured`, inside `nonReentrant`); `LaunchPair` 0 and `LaunchPairFactory` 0 (run before
+the review fixes, which did not touch them); `LaunchRouter` 3 Low (deadline checks on `block.timestamp`, a
+constructor read from the launchpad).
+
+**Tests.** 611 Foundry tests on the final code, including invariant suites for the launchpad (the launchpad's
+USDC equals its books; tracked eligible supply equals the balance formula) and the plugins; 79 end-to-end tests
+of the real plugins against the real launchpad, launch pools and router (every trade checked against fees
+computed from the spec; whole-system USDC conservation after every step); an independent per-holder shadow model
+of the dividend stream; mutation checks (the stream's tests catch 11 of 12 token mutants, the survivor being
+equivalent).
+
+**Testnet rehearsals** (docs/launchpad/V13-REHEARSAL.md): the whole suite deployed on Arc Testnet with a mintable
+test USDC and with real test USDC; five tokens (one per plugin) taken through graduation, pool trades,
+collections, buybacks and claims; the books checked after every transaction. Second run on the reviewed
+contracts: 90 transactions, 1,424 checks, 0 failures; deployed bytecode equal to the local build.
+
 ## 4. Third-party scanners — after mainnet deploy + Etherscan-equivalent verification
 
 These need a **deployed, verified contract address** and most need an account on their site —
