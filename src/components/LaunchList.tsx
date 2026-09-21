@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
 import type { Address } from 'viem'
 import { formatSwapUrl } from '../lib/swapUrl'
 import { launchFacts, type LaunchRecord } from '../lib/launch'
+import { parseLaunchAddress } from '../lib/launchPages'
 import { relativeTime } from '../lib/recent'
 import { shortAddress } from '../lib/format'
 import { useLaunches } from '../hooks/useLaunches'
@@ -17,13 +18,25 @@ interface LaunchListProps {
 }
 
 export function LaunchList({ onOpen, onCreate }: LaunchListProps) {
-  const { launches, isLoading } = useLaunches()
+  const { launches, total, hasMore, isLoadingMore, loadMore, isLoading } = useLaunches()
   const [now, setNow] = useState(() => Date.now())
   const [pluginsOpen, setPluginsOpen] = useState(false)
+  const [lookup, setLookup] = useState('')
+  const [lookupError, setLookupError] = useState('')
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 30_000)
     return () => window.clearInterval(timer)
   }, [])
+
+  const openLookup = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const token = parseLaunchAddress(lookup)
+    if (!token) {
+      setLookupError('That is not a valid token address.')
+      return
+    }
+    onOpen(token)
+  }
 
   return (
     <div className="pools-page">
@@ -49,8 +62,30 @@ export function LaunchList({ onOpen, onCreate }: LaunchListProps) {
       <section className="ruled-section">
         <div className="section-heading-row">
           <h2>All launches</h2>
-          <span>{launches.length} {launches.length === 1 ? 'launch' : 'launches'}</span>
+          <span>{total} {total === 1 ? 'launch' : 'launches'}</span>
         </div>
+        <form className="mb-6" onSubmit={openLookup}>
+          <label htmlFor="launch-lookup" className="amount-label">Open a launch by token address</label>
+          <div className="mt-2 flex gap-2">
+            <div className="field-with-suffix min-w-0 flex-1">
+              <input
+                id="launch-lookup"
+                placeholder="0x…"
+                value={lookup}
+                onChange={(event) => {
+                  setLookup(event.target.value)
+                  setLookupError('')
+                }}
+                autoComplete="off"
+                spellCheck={false}
+                aria-invalid={Boolean(lookupError)}
+                aria-describedby={lookupError ? 'launch-lookup-error' : undefined}
+              />
+            </div>
+            <GhostButton type="submit" disabled={!lookup.trim()}>Open</GhostButton>
+          </div>
+          {lookupError && <p id="launch-lookup-error" className="mt-2 text-sm text-loss" role="alert">{lookupError}</p>}
+        </form>
         {isLoading ? (
           <TableSkeleton rows={5} />
         ) : launches.length === 0 ? (
@@ -75,6 +110,12 @@ export function LaunchList({ onOpen, onCreate }: LaunchListProps) {
                 ))}
               </tbody>
             </table>
+          </div>
+        )}
+        {!isLoading && hasMore && (
+          <div className="mt-6 flex flex-wrap items-center justify-between gap-4 text-sm text-g500">
+            <span>Showing the newest {launches.length} of {total}</span>
+            <GhostButton disabled={isLoadingMore} onClick={loadMore}>{isLoadingMore ? 'Loading…' : 'Show older launches'}</GhostButton>
           </div>
         )}
       </section>
