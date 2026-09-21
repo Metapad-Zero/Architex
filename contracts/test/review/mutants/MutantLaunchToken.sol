@@ -5,7 +5,7 @@ import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/math/Math.sol";
 import "@openzeppelin/contracts/utils/math/SafeCast.sol";
-import "../interfaces/ILaunchToken.sol";
+import "../../../interfaces/ILaunchToken.sol";
 
 /// @title LaunchToken v2 (launchpad v1.3)
 /// @notice Fixed-supply ERC-20 minted entirely to the launchpad at construction. No owner, no mint.
@@ -40,7 +40,7 @@ import "../interfaces/ILaunchToken.sol";
 ///   so per-share × balance stays inside int256 (the corrections) for a cumulative 1.7e23 USDC distributed per
 ///   token, and every rate and remaining amount fits uint256 for amounts below 2^128 units; all USDC in existence
 ///   is about 1e11.
-contract LaunchToken is ERC20, ILaunchToken {
+contract MutantLaunchToken is ERC20, ILaunchToken {
     using SafeERC20 for IERC20;
     using SafeCast for uint256;
     using SafeCast for int256;
@@ -190,22 +190,13 @@ contract LaunchToken is ERC20, ILaunchToken {
     }
 
     /// @inheritdoc ILaunchTokenExtensions
-    /// @dev _rate is left as it was when a stream ends or pauses, so the view reports 0 itself in those states.
     function streamRate() external view returns (uint256) {
-        Stream memory stream = _stream;
-        if (block.timestamp >= stream.end || _paused(stream)) return 0;
         return _rate / _MAGNITUDE;
     }
 
     /// @inheritdoc ILaunchTokenExtensions
-    /// @dev While paused the stored end moves out only when something accrues, so the view adds the paused time so far,
-    ///      exactly as the next _accrue would.
     function streamEnd() external view returns (uint256) {
-        Stream memory stream = _stream;
-        if (stream.lastAccrual < stream.end && _paused(stream)) {
-            return stream.end + (block.timestamp - stream.lastAccrual);
-        }
-        return stream.end;
+        return _stream.end;
     }
 
     /// @inheritdoc ILaunchTokenExtensions
@@ -297,7 +288,6 @@ contract LaunchToken is ERC20, ILaunchToken {
     function _update(address from, address to, uint256 value) internal override {
         address pair_ = pair;
         if (to == pair_ && pair_ != address(0) && !graduated) revert PairLockedUntilGraduation();
-        _accrue();
         super._update(from, to, value);
 
         bool fromEligible = !isExcluded(from);
@@ -312,5 +302,6 @@ contract LaunchToken is ERC20, ILaunchToken {
             if (fromEligible) _corrections[from] += correction;
             if (toEligible) _corrections[to] -= correction;
         }
+        _accrue(); // MUTATION: accrue last, after eligible supply and corrections moved
     }
 }

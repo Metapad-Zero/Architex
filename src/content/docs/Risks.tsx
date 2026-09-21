@@ -78,6 +78,20 @@ export function DocsRisks() {
           to no token and can't be recovered. That's why the builder refuses a plugin as a Split
           payee.
         </li>
+        <li>
+          The listed plugins are shared by every token that picks them. If USDC ever blocked one, or
+          blocked a launch token itself, collections for the tokens involved would fail and their
+          fees would stay in the launchpad; a blocked token's holders couldn't claim either.
+        </li>
+        <li>
+          Buyback &amp; burn spends at most 0.25% of the pool's USDC side an hour. On a busy token
+          with a high creator fee, fees can arrive faster than that, and the USDC waiting to buy
+          back grows until volume cools. Nothing is lost; it's just slower.
+        </li>
+        <li>
+          Holder dividends are shared by the second. If everyone else sells, whoever still holds
+          collects the whole stream while they're alone, and anyone who buys shares it from then on.
+        </li>
       </ul>
 
       <h3 className="mt-6 text-base font-semibold text-ink">Curves can stall, and graduation isn't a promise of anything</h3>

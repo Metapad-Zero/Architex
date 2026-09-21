@@ -519,8 +519,13 @@ contract LaunchTokenDividendInvariant is LaunchpadV13Base {
         uint256 formula = token.totalSupply() - token.balanceOf(address(pad)) - token.balanceOf(pad.pairOf(address(token)))
             - token.balanceOf(DEAD);
         assertEq(token.eligibleSupply(), formula < token.MIN_ELIGIBLE_SUPPLY() ? 0 : formula);
-        if (token.lastAccrual() < token.streamEnd()) {
-            assertLe(token.streamEnd() - token.lastAccrual(), token.DRIP_PERIOD());
+        // streamEnd() reports the end as of now, so while paused it includes the paused time since lastAccrual; the
+        // stored end the window bound is about is that minus the paused time.
+        uint256 last = token.lastAccrual();
+        uint256 end = token.streamEnd();
+        if (last < end) {
+            if (token.eligibleSupply() == 0) end -= vm.getBlockTimestamp() - last;
+            assertLe(end - last, token.DRIP_PERIOD());
         }
     }
 

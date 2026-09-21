@@ -36,11 +36,13 @@ interface ILaunchTokenExtensions {
     function totalDistributed() external view returns (uint256);
     /// @notice What `holder` could claim now: everything it has earned up to this second, less what it claimed.
     function claimable(address holder) external view returns (uint256);
-    /// @notice The stream's current payout to all eligible holders together, in USDC units per second (rounded down;
-    ///         for display, the exact rate is kept magnified).
+    /// @notice What the stream pays all eligible holders together right now, in USDC units per second (rounded down;
+    ///         for display, the exact rate is kept magnified). 0 while nothing is paying: before the first distribute,
+    ///         once the stream has ended, and while it is paused (eligible supply under MIN_ELIGIBLE_SUPPLY).
     function streamRate() external view returns (uint256);
-    /// @notice When the running stream ends, unless it pauses (the end then moves out by the paused time) or more
-    ///         is distributed; the last end if none runs, 0 if nothing was ever distributed.
+    /// @notice When the running stream ends if nothing changes. While it is paused the end keeps moving out with time,
+    ///         so this reports the end as of now (the stored end plus the paused time so far). More distributed moves it
+    ///         too. The last end if none runs, 0 if nothing was ever distributed.
     function streamEnd() external view returns (uint256);
     /// @notice The time the stream was last accrued up to.
     function lastAccrual() external view returns (uint256);

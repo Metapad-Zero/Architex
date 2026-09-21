@@ -160,9 +160,13 @@ buys at least one token wei, on the curve and in the pool. At most 2 units per t
   `eligibleSupply()` reports 0 and the stream pauses. Without it, a sole holder of 1 wei could recycle
   flash-loaned USDC through distribute/claim until the per-share value overflowed on large transfers, which
   would freeze the curve. Each holder's share rounds down by at most 1 unit; the dust stays in the token.
-- **Cost [built]**: while a stream runs, each transfer, buy, sell and claim pays ~12k gas more for the accrual
-  (one-time ~29k on the first accrual of a token's first distribution); with no stream, ~3k per transfer and
-  ~6k per curve buy or sell (eligible-supply tracking). Deploying a token costs ~0.36M more.
+- **Cost [built, measured in review]**: a plain transfer costs ~47k with no dividends. Once a token has had any
+  distribution, a transfer in a new second while a stream runs costs ~15k more (~6k in the same second, ~6k after
+  the stream ends), a first-time receiver ~40k more (its correction slot is written for the first time; nearly
+  every curve buyer), and the first transfer after a token's first distribution ~66k more, once. On the real
+  launchpad a running stream adds ~23–29k to a curve or pool trade (end-to-end tests). Anyone can switch this
+  accounting on for any token with `distribute(1)` (0.000001 USDC) and keep a stream running with 1 unit a day;
+  the cost is bounded and nothing can revert. Deploying a token costs ~0.4M more than v1.2's token.
 
 ## 4. Launch pools (separate suite)
 
@@ -296,6 +300,27 @@ buys at least one token wei, on the curve and in the pool. At most 2 units per t
   `onLaunch` for that token at any time (that is how a Combo configures its entries). So a creator's wallet
   can mark its token configured on Split later, which changes nothing about where fees go. The site decides
   from `pluginOf` and the stored `pluginHooks` flag (and `allocationOf` for a Combo), never from events.
+- **Future launch addresses as fee destinations** (Grok review #4, final review). The destination checks know
+  every launch pair and launch token that exists at launch time. Launch pairs and tokens are deployed with
+  CREATE, so the address of the *next* pair or token can be computed in advance; a creator who names one as
+  their plugin, a Split payee or a Combo target passes the checks. Fees sent to a future pair can later be
+  taken by anyone with `skim`; fees sent to a future token are stuck. Only the creator chooses destinations,
+  and could as easily name their own wallet, so this moves nobody else's funds; the site only offers
+  destinations it can check.
+- **Combo remainder.** Each Combo slice is `amount × bps / 10,000` rounded down and the last entry takes the
+  remainder, so it gains at most (entries − 1) raw units per collection (0.000004 USDC with five entries). The
+  creator chooses the order.
+- **Buyback pacing can lag a busy, high-fee token.** Buyback & burn spends at most 0.25% of the USDC-side reserve
+  an hour, so fees arriving faster than that wait in the plugin: for a 25,000 USDC pool, from about 15,000
+  USDC of daily volume at a 10% creator fee (30,000 at 5%, 150,000 at 1%). Nothing is lost; the buyback catches
+  up as volume falls or the reserve grows.
+- **Blocklisted launch token.** If Circle blocklists a launch token contract, its claims and `distribute` revert:
+  holders can't claim what they earned, and Distribute-to-holders collections for it (behind a Combo, the whole
+  collection) fail and stay with the launchpad **[D10]**.
+- **A sole holder takes the whole stream while alone.** Dividends are pro-rata by the second. After everyone
+  else sells, whoever holds at least one whole token collects everything the stream pays while they are the
+  only holder. Nothing builds up for them in advance (the stream pauses while nobody holds), and anyone who
+  buys in shares from that second on.
 
 ## 10. Not in v1.3
 
