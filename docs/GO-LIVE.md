@@ -116,11 +116,15 @@ Passkeys made on `localhost` or a `*.vercel.app` preview do not exist on the rea
       `scripts/amm-smoke.ts` on USDC/EURC: swap out of USDC, swap back, withdraw 10%. 27 checks exact,
       gas included; pair reserves equal the chain-native balance to the wei. Before this, no USDC had
       ever passed through an Architex pair, and USDC/EURC is the first mainnet pool.
-- [ ] Launchpad (bonding curves that graduate into Architex pairs): built, reviewed twice, 152 tests,
-      proven against the deployed testnet bytecode. LIVE ON TESTNET as v1.2, a 25,000 USDC curve (0x9429…84FD, bytecode verified, live smoke test passes).
-      Mainnet only after the "Before mainnet" list: `docs/launchpad/TESTNET-DEPLOY.md`. Remaining
-      there: a full graduation rehearsal on testnet, and `FEE_TO_SETTER` moved to the Ledger.
-      `LAUNCH_FEE` decided 2026-09-21: 1 USDC.
+- [x] **Launchpad live on mainnet** 2026-09-21: `0x9Ac420d77E019D5e9F79a3020B0b5eB28d72B959` (block
+      22026362, 1 USDC launch fee, v1.2 curve, bytecode-verified; record in
+      `broadcast/DeployLaunchpad.s.sol/5042/`). Deployed from the same hot wallet, which is also its
+      `feeTo` and `feeToSetter` for now — **hand both launchpad roles to the Ledger** with the
+      factory's (`setFeeToSetter` on each contract; `setFeeTo` on the launchpad if fees should land
+      elsewhere). Before the Launch tab went live, a launch-path audit ran and its fixes were
+      reviewed (commits through `963d6e2`). Still not done from the testnet "Before mainnet" list: a
+      full graduation rehearsal — each piece is proven, including against the pair bytecode now on
+      mainnet, but no token has graduated end to end.
 - [x] Pre-audit tooling: Slither + Aderyn + Solhint on every push/PR (`.github/workflows/contracts-security.yml`),
       Echidna property fuzzing alongside the existing Foundry invariants, Mythril symbolic execution
       run manually before mainnet moves. See `SECURITY.md` — baseline run 2026-09-20, 0 high/critical.
