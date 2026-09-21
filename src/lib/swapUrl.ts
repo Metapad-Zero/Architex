@@ -1,6 +1,9 @@
+import { isCanonicalToken, type Token } from './tokens'
+
 /**
  * Shareable swap state in the hash: `#swap?in=WBTC&out=WETH&amount=0.01`.
- * Tokens are matched by symbol (case-insensitive) or address; anything unknown is ignored.
+ * Deployment tokens go by symbol (case-insensitive); any other token only by address, because
+ * anyone can deploy a token with any symbol. Anything unknown is ignored.
  */
 export interface SwapUrlState {
   in?: string
@@ -33,6 +36,18 @@ export function formatSwapUrl(state: SwapUrlState): string {
   if (state.mode === 'exactOut') params.set('mode', 'exactOut')
   const query = params.toString()
   return query ? `#swap?${query}` : '#swap'
+}
+
+export function tokenRef(token: Pick<Token, 'address' | 'symbol'>): string {
+  return isCanonicalToken(token.address) ? token.symbol : token.address
+}
+
+export function findTokenByRef(tokens: readonly Token[], ref: string | undefined): Token | undefined {
+  if (!ref) return undefined
+  const needle = ref.toLowerCase()
+  const byAddress = tokens.find((token) => token.address.toLowerCase() === needle)
+  if (byAddress) return byAddress
+  return tokens.find((token) => token.symbol.toLowerCase() === needle && isCanonicalToken(token.address))
 }
 
 const LAST_PAIR_KEY = 'architex.lastPair'

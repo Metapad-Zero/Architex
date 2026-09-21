@@ -5,10 +5,9 @@ import { useConnectSheet } from '../hooks/useConnectSheet'
 import { activeChain } from '../chain'
 import { quote as ratioQuote, reservesFor, type QuoteMode } from '../lib/amm'
 import { isDeployed } from '../lib/deployment'
-import { isCanonicalToken } from '../lib/tokens'
 import { formatAmount, formatUsd, parseAmount } from '../lib/format'
 import { useRecent } from '../lib/recent'
-import { formatSwapUrl, parseSwapUrl, readLastPair, writeLastPair } from '../lib/swapUrl'
+import { findTokenByRef, formatSwapUrl, parseSwapUrl, readLastPair, tokenRef, writeLastPair } from '../lib/swapUrl'
 import type { Token } from '../lib/tokens'
 import { useAllowances } from '../hooks/useAllowances'
 import { useBalances } from '../hooks/useBalances'
@@ -31,14 +30,6 @@ const SwapPriceChart = lazy(() => import('./SwapPriceChart'))
 
 function findToken(tokens: readonly Token[], address: Address | undefined): Token | undefined {
   return tokens.find((token) => token.address.toLowerCase() === address?.toLowerCase())
-}
-
-function findTokenByRef(tokens: readonly Token[], ref: string | undefined): Token | undefined {
-  if (!ref) return undefined
-  const needle = ref.toLowerCase()
-  const byAddress = tokens.find((token) => token.address.toLowerCase() === needle)
-  if (byAddress) return byAddress
-  return tokens.find((token) => token.symbol.toLowerCase() === needle && isCanonicalToken(token.address))
 }
 
 export function SwapSheet() {
@@ -72,8 +63,9 @@ export function SwapSheet() {
   // Keep the URL shareable and remember the pair; replaceState so the back button is not spammed.
   useEffect(() => {
     if (!tokenIn || !tokenOut) return
-    writeLastPair({ in: tokenIn.symbol, out: tokenOut.symbol })
-    const next = formatSwapUrl({ in: tokenIn.symbol, out: tokenOut.symbol, amount: enteredAmount || undefined, mode })
+    const pair = { in: tokenRef(tokenIn), out: tokenRef(tokenOut) }
+    writeLastPair(pair)
+    const next = formatSwapUrl({ ...pair, amount: enteredAmount || undefined, mode })
     if (window.location.hash !== next && (window.location.hash.startsWith('#swap') || window.location.hash === '')) {
       window.history.replaceState(null, '', next)
     }
