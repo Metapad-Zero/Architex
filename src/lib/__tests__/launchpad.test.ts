@@ -1,12 +1,12 @@
 import { describe, expect, test } from 'bun:test'
 import { decodeErrorResult, encodeErrorResult, encodeFunctionData, getAddress, parseAbi, zeroAddress, type Hex } from 'viem'
-import { buybackPluginAbi, launchRouterAbi, launchpadAbi, launchpadWithPluginErrorsAbi, splitPluginAbi } from '../abi'
+import { buybackPluginAbi, launchRouterAbi, launchTokenAbi, launchpadAbi, launchpadWithPluginErrorsAbi, splitPluginAbi } from '../abi'
 import type { LaunchSuite } from '../deployment'
 import { explainRevert } from '../errors'
 import { formatCurveSold, soldLabel, utf8ByteLength } from '../launch'
 import { holderPluginAbi } from '../plugins/holders'
 import { encodeComboData, encodeSplitData } from '../plugins/plan'
-import { describeLaunchRouterCall, describeLaunchpadCall, describePluginCall } from '../signingIntent'
+import { describeLaunchRouterCall, describeLaunchTokenCall, describeLaunchpadCall, describePluginCall } from '../signingIntent'
 import type { Token } from '../tokens'
 
 const account = getAddress('0x00000000000000000000000000000000000000a1')
@@ -181,10 +181,21 @@ describe('launchpad signing intent', () => {
     expect(release?.lines[1]).toEqual({ label: 'Paid to', value: 'You' })
     const run = describePluginCall(suite.buybackPlugin, encodeFunctionData({ abi: buybackPluginAbi, functionName: 'run', args: [token] }), account, tokens, suite)
     expect(run?.title).toBe('Run DOGE buyback')
-    const claim = describePluginCall(suite.holderPlugin, encodeFunctionData({ abi: holderPluginAbi, functionName: 'dripAndClaim', args: [token] }), account, tokens, suite)
-    expect(claim?.title).toBe('Claim DOGE USDC')
+    // Distribute to holders only forwards fees to the token: it has no action of its own to describe.
+    expect(describePluginCall(suite.holderPlugin, encodeFunctionData({ abi: holderPluginAbi, functionName: 'totalDistributed', args: [token] }), account, tokens, suite)).toBe(undefined)
     // The same calldata sent to an address that is not the listed plugin is not described as that plugin's action.
     expect(describePluginCall(bob, encodeFunctionData({ abi: buybackPluginAbi, functionName: 'run', args: [token] }), account, tokens, suite)).toBe(undefined)
     expect(describePluginCall(suite.splitPlugin, '0x', account, tokens, { ...suite, splitPlugin: zeroAddress })).toBe(undefined)
+  })
+
+  test('decodes a holder’s claim, and a direct payment to holders, on the token itself', () => {
+    const claim = describeLaunchTokenCall(token, encodeFunctionData({ abi: launchTokenAbi, functionName: 'claim' }), tokens)
+    expect(claim?.title).toBe('Claim DOGE dividends')
+    expect(claim?.lines).toEqual([{ label: 'Paid to', value: 'You' }])
+    const forBob = describeLaunchTokenCall(token, encodeFunctionData({ abi: launchTokenAbi, functionName: 'claimFor', args: [bob] }), tokens)
+    expect(forBob?.lines).toEqual([{ label: 'Paid to', value: '0x2222…2222' }])
+    const pay = describeLaunchTokenCall(token, encodeFunctionData({ abi: launchTokenAbi, functionName: 'distribute', args: [25_000_000n] }), tokens)
+    expect(pay?.title).toBe('Pay DOGE holders')
+    expect(pay?.lines).toEqual([{ label: 'You pay', value: '25 USDC' }])
   })
 })

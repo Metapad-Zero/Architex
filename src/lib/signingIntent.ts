@@ -4,7 +4,6 @@ import { buybackPluginAbi, factoryAbi, launchRouterAbi, launchTokenAbi, launchpa
 import { bytes32ToAddress, domainLabel, isMessenger, isTransmitter } from './cctp'
 import { deployment, launchSuite, type LaunchSuite } from './deployment'
 import { formatAmount, formatPct, shortAddress } from './format'
-import { holderPluginAbi } from './plugins/holders'
 import { rememberedToken, type Token } from './tokens'
 import type { SigningRequest } from './unlock'
 
@@ -235,7 +234,10 @@ export function describeLaunchRouterCall(data: Hex, from: string | undefined, to
   return undefined
 }
 
-/** The reference plugins' public actions: release a Split payee, run a buyback, drip or claim holders' USDC. */
+/**
+ * The reference plugins' public actions: release a Split payee, run a buyback. (Distribute to holders has none: it
+ * forwards fees to the token, and holders claim on the token itself.)
+ */
 export function describePluginCall(to: Address, data: Hex, from: string | undefined, tokens: readonly Token[], suite: LaunchSuite = launchSuite): SigningIntent | undefined {
   const listed = listedPluginAt(to, suite)
   if (listed?.kind === 'split') {
@@ -262,37 +264,31 @@ export function describePluginCall(to: Address, data: Hex, from: string | undefi
       }
     }
   }
-  if (listed?.kind === 'holders') {
-    const call = decode(holderPluginAbi, data)
-    if (call?.functionName === 'dripAndClaim') {
-      const [token] = call.args
-      return {
-        title: `Claim ${symbol(token, tokens)} USDC`,
-        lines: [
-          { label: 'Token', value: symbol(token, tokens) },
-          { label: 'Paid to', value: 'You' },
-        ],
-        note: 'Releases what is due to every holder, then pays you your share.',
-      }
-    }
-    if (call?.functionName === 'drip') {
-      const [token] = call.args
-      return { title: 'Drip to holders', lines: [{ label: 'Token', value: symbol(token, tokens) }] }
-    }
-  }
   return undefined
 }
 
-/** A launch token's own dividend and burn calls. */
-function describeLaunchTokenCall(to: Address, data: Hex, tokens: readonly Token[]): SigningIntent | undefined {
+/** A launch token's own dividend and burn calls: claiming what a holder has earned, paying holders, burning. */
+export function describeLaunchTokenCall(to: Address, data: Hex, tokens: readonly Token[]): SigningIntent | undefined {
   const call = decode(launchTokenAbi, data)
   if (!call) return undefined
   switch (call.functionName) {
     case 'claim':
-      return { title: `Claim ${symbol(to, tokens)} USDC`, lines: [{ label: 'Paid to', value: 'You' }] }
+      return {
+        title: `Claim ${symbol(to, tokens)} dividends`,
+        lines: [{ label: 'Paid to', value: 'You' }],
+        note: 'Pays you the USDC you have earned so far, in full, up to the second it lands.',
+      }
     case 'claimFor': {
       const [holder] = call.args
-      return { title: `Claim ${symbol(to, tokens)} USDC`, lines: [{ label: 'Paid to', value: shortAddress(holder) }] }
+      return { title: `Claim ${symbol(to, tokens)} dividends`, lines: [{ label: 'Paid to', value: shortAddress(holder) }] }
+    }
+    case 'distribute': {
+      const [paid] = call.args
+      return {
+        title: `Pay ${symbol(to, tokens)} holders`,
+        lines: [{ label: 'You pay', value: amount(paid, usdcAddress(), tokens) }],
+        note: 'Streams this USDC to the token’s holders over about a day. It does not come back.',
+      }
     }
     case 'burn': {
       const [burned] = call.args

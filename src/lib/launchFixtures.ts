@@ -23,7 +23,8 @@ export const LAUNCHPAD_FIXTURE_XSS_PAYLOAD = '<img src=x onerror=alert(1)>'
 
 const USDC = 1_000_000n
 const E18 = 10n ** 18n
-const MAGNITUDE = 10n ** 36n
+/** LaunchToken's dividend magnitude. */
+const MAGNITUDE = 2n ** 128n
 const DRIP_PERIOD = 86_400
 /** Buyback & burn pacing: the budget refills over an hour; offers under 3 units are no run. */
 const RUN_INTERVAL = 3_600
@@ -66,13 +67,19 @@ interface BuybackBook {
   lastRunAt: number
 }
 
+/**
+ * A launch token's dividend stream, kept the way LaunchToken keeps it: `rate` pays the eligible supply continuously
+ * from `lastAccrual` to `end`, magnified by 2^128, and pauses (its end moving out) under one whole eligible token.
+ */
 interface HolderBook {
-  unreleased: bigint
-  lastDrip: number
-  streamEnd: number
+  /** USDC × 2^128 per second, to the whole eligible supply. */
+  rate: bigint
+  lastAccrual: number
+  end: number
+  /** Magnified USDC per token-wei earned so far. */
+  perShare: bigint
   distributed: bigint
-  /** USDC per token-wei, scaled by 1e36. */
-  index: bigint
+  /** Per tracked wallet: the per-share value it was last settled at, and what it has earned and not claimed. */
   snaps: Map<string, bigint>
   accrued: Map<string, bigint>
   /** Eligible supply held by wallets this fixture does not track. */
@@ -143,7 +150,8 @@ export function fixtureBalance(owner: Address | undefined, token: Address): bigi
 function setBalance(owner: Address, token: Address, value: bigint): void {
   if (value < 0n) throw new Error('ERC20InsufficientBalance')
   const holders = store.holders.get(token.toLowerCase())
-  if (holders) settleHolder(holders, owner, token)
+  // As the token does on every transfer: accrue the stream with the supply that held until now, then settle.
+  if (holders) settleHolder(holders, owner, token, nowSeconds())
   store.balances.set(key(owner, token), value)
 }
 
@@ -154,44 +162,77 @@ function spendAllowance(owner: Address, spender: Address, amount: bigint): void 
   store.allowances.set(slot, allowed - amount)
 }
 
-// ─── Holder dividends (the token's tracker, simplified) ──────────────────────
+// ─── Holder dividends (the token's stream, simplified) ───────────────────────
 
-function eligibleSupply(token: Address, book: HolderBook): bigint {
+/** The raw eligible supply: wallets outside the excluded set (the curve and the pool are never in `balances`). */
+function rawEligible(token: Address, book: HolderBook): bigint {
   let tracked = 0n
   for (const [slot, value] of store.balances) {
     if (slot.endsWith(`:${token.toLowerCase()}`)) tracked += value
   }
-  const supply = book.others + tracked
+  return book.others + tracked
+}
+
+function eligibleSupply(token: Address, book: HolderBook): bigint {
+  const supply = rawEligible(token, book)
   return supply < E18 ? 0n : supply
 }
 
-function settleHolder(book: HolderBook, owner: Address, token: Address): void {
+/** The per-share value accrued up to `now`, without writing it (LaunchToken._perShareNow). */
+function perShareAt(token: Address, book: HolderBook, now: number): bigint {
+  if (book.lastAccrual >= book.end) return book.perShare
+  const eligible = rawEligible(token, book)
+  if (eligible < E18) return book.perShare
+  const upTo = Math.min(now, book.end)
+  return book.perShare + (book.rate * BigInt(upTo - book.lastAccrual)) / eligible
+}
+
+/** LaunchToken._accrue: pays the stream up to `now`, or moves its end out while fewer than one token is eligible. */
+function accrueStream(token: Address, book: HolderBook, now: number): void {
+  if (book.lastAccrual >= book.end || book.lastAccrual >= now) return
+  if (rawEligible(token, book) < E18) {
+    book.end += now - book.lastAccrual
+    book.lastAccrual = now
+    return
+  }
+  book.perShare = perShareAt(token, book, now)
+  book.lastAccrual = Math.min(now, book.end)
+}
+
+/** LaunchToken.distribute: the amount joins what the stream owes; the end moves to the amount-weighted average. */
+function distribute(token: Address, book: HolderBook, amount: bigint, now: number): void {
+  if (amount === 0n) return
+  accrueStream(token, book, now)
+  const owed = book.end > now ? book.rate * BigInt(book.end - now) : 0n
+  const added = amount * MAGNITUDE
+  const from = Math.max(book.end, now)
+  const to = now + DRIP_PERIOD
+  const end = Math.max(from + Number((added * BigInt(to - from)) / (owed + added)), now + 1)
+  book.rate = (owed + added) / BigInt(end - now)
+  book.lastAccrual = now
+  book.end = end
+  book.distributed += amount
+}
+
+/** What the running stream still owes from now on (LaunchToken.undistributed). */
+function undistributed(token: Address, book: HolderBook, now: number): bigint {
+  if (book.lastAccrual >= book.end) return 0n
+  const from = rawEligible(token, book) < E18 ? book.lastAccrual : Math.min(now, book.end)
+  return (book.rate * BigInt(book.end - from)) / MAGNITUDE
+}
+
+function settleHolder(book: HolderBook, owner: Address, token: Address, now: number): void {
+  accrueStream(token, book, now)
   const id = owner.toLowerCase()
-  const snap = book.snaps.get(id) ?? 0n
-  const balance = fixtureBalance(owner, token)
-  book.accrued.set(id, (book.accrued.get(id) ?? 0n) + ((book.index - snap) * balance) / MAGNITUDE)
-  book.snaps.set(id, book.index)
+  const earned = ((book.perShare - (book.snaps.get(id) ?? 0n)) * fixtureBalance(owner, token)) / MAGNITUDE
+  book.accrued.set(id, (book.accrued.get(id) ?? 0n) + earned)
+  book.snaps.set(id, book.perShare)
 }
 
-function holderClaimable(book: HolderBook, owner: Address, token: Address): bigint {
+function holderClaimable(book: HolderBook, owner: Address, token: Address, now: number): bigint {
   const id = owner.toLowerCase()
-  return (book.accrued.get(id) ?? 0n) + ((book.index - (book.snaps.get(id) ?? 0n)) * fixtureBalance(owner, token)) / MAGNITUDE
-}
-
-function holderReleasable(book: HolderBook, token: Address, now = nowSeconds()): bigint {
-  if (book.unreleased === 0n || eligibleSupply(token, book) === 0n) return 0n
-  if (now >= book.streamEnd) return book.unreleased
-  return (book.unreleased * BigInt(now - book.lastDrip)) / BigInt(book.streamEnd - book.lastDrip)
-}
-
-function drip(token: Address, book: HolderBook, now = nowSeconds()): bigint {
-  const due = holderReleasable(book, token, now)
-  if (due === 0n) return 0n
-  book.unreleased -= due
-  book.distributed += due
-  book.lastDrip = now
-  book.index += (due * MAGNITUDE) / eligibleSupply(token, book)
-  return due
+  const earned = ((perShareAt(token, book, now) - (book.snaps.get(id) ?? 0n)) * fixtureBalance(owner, token)) / MAGNITUDE
+  return (book.accrued.get(id) ?? 0n) + earned
 }
 
 // ─── Plugins ─────────────────────────────────────────────────────────────────
@@ -210,11 +251,11 @@ function configure(token: Address, plugin: Address, data: Hex): void {
       return
     case 'holders':
       store.holders.set(token.toLowerCase(), {
-        unreleased: 0n,
-        lastDrip: 0,
-        streamEnd: 0,
+        rate: 0n,
+        lastAccrual: 0,
+        end: 0,
+        perShare: 0n,
         distributed: 0n,
-        index: 0n,
         snaps: new Map(),
         accrued: new Map(),
         others: 0n,
@@ -251,18 +292,9 @@ function deliver(token: Address, target: Address, amount: bigint): void {
       return
     }
     case 'holders': {
+      // The plugin forwards straight to the token's distribute, which streams it to holders.
       const book = store.holders.get(id)
-      if (!book) return
-      const now = nowSeconds()
-      drip(token, book, now)
-      const kept = book.unreleased
-      const from = Math.max(book.streamEnd, now)
-      // The amount-weighted stream end the plugin sets (IHolderDistributionPlugin): floor((kept·from + amount·to) /
-      // (kept + amount)), never before now + 1. Dust leaves it where it is; a big delivery pushes it towards 24h.
-      const weighted = (kept * BigInt(from) + amount * BigInt(now + DRIP_PERIOD)) / (kept + amount)
-      book.streamEnd = Math.max(Number(weighted), now + 1)
-      book.unreleased = kept + amount
-      book.lastDrip = now
+      if (book) distribute(token, book, amount, nowSeconds())
       return
     }
     case 'combo': {
@@ -472,8 +504,8 @@ function seedMarket(): void {
   const gradHolders = store.holders.get(grad.toLowerCase())
   if (gradHolders) {
     gradHolders.others = 600_000_000n * E18
-    gradHolders.index = (40n * USDC * MAGNITUDE) / (620_000_000n * E18)
-    gradHolders.distributed = 40n * USDC
+    // An earlier distribution two hours ago, so a holder has already earned something when the page opens.
+    distribute(grad, gradHolders, 40n * USDC, NOW - 7_200)
   }
   collect(grad)
 
@@ -481,10 +513,16 @@ function seedMarket(): void {
   const gcmb = launchWith('combo', { name: 'Graduated Combo', symbol: 'GCMB', metadataURI: '', creatorFeeBps: 50 }, NOW - 50_000, combo)
   buyInternal(WHALE, gcmb, 1_000_000n * USDC, NOW - 40_000)
   buyInternal(alice, gcmb, 2_500n * USDC, NOW - 9_000)
-  collect(gcmb)
   store.seeded.set(gcmb.toLowerCase(), 500_000n * E18)
   const gcmbHolders = store.holders.get(gcmb.toLowerCase())
   if (gcmbHolders) gcmbHolders.others = 300_000_000n * E18
+  collect(gcmb)
+
+  // A paused stream: the only holder sold out after the fees were collected, so nobody holds a whole token.
+  const quiet = launchWith('holders', { name: 'Quiet', symbol: 'QUIET', metadataURI: '', creatorFeeBps: 400 }, NOW - 5_400)
+  buyInternal(bob, quiet, 600n * USDC, NOW - 5_000)
+  collect(quiet)
+  sellInternal(bob, quiet, fixtureBalance(bob, quiet), NOW - 4_000)
 
   const near = launchWith('split', { name: 'Almost there', symbol: 'NEAR', metadataURI: '', creatorFeeBps: 1_000 }, NOW - 14_400, splitThree)
   buyInternal(WHALE, near, 20_000n * USDC, NOW - 14_000)
@@ -560,12 +598,14 @@ function creatorFees(token: Address, owner: Address | undefined): CreatorFeeStat
       lastRunAt: BigInt(buyback.lastRunAt),
     },
     holders: holders && {
-      unreleased: holders.unreleased,
-      releasable: holderReleasable(holders, token),
-      streamEnd: BigInt(holders.streamEnd),
+      undistributed: undistributed(token, holders, nowSeconds()),
+      streamRate: holders.rate / MAGNITUDE,
+      streamEnd: BigInt(holders.end),
       totalDistributed: holders.distributed,
       eligibleSupply: eligibleSupply(token, holders),
-      you: owner ? { balance: fixtureBalance(owner, token), claimable: holderClaimable(holders, owner, token) } : undefined,
+      you: owner ? { balance: fixtureBalance(owner, token), claimable: holderClaimable(holders, owner, token, nowSeconds()) } : undefined,
+      // The fixture keeps a dividend book only for tokens whose fees go to Distribute to holders.
+      fromFees: true,
     },
     combo: combo ? combo.map((entry) => ({ ...entry })) : undefined,
   }
@@ -632,18 +672,11 @@ function install(): void {
       emit()
       return hash
     },
-    drip: (token) => {
+    claim: (token, owner) => {
+      // The token's claim: accrue, then pay the owner everything it has earned so far.
       const book = store.holders.get(token.toLowerCase())
-      if (!book) throw new Error('NotConfigured')
-      drip(token, book)
-      emit()
-      return nextHash('drip')
-    },
-    dripAndClaim: (token, owner) => {
-      const book = store.holders.get(token.toLowerCase())
-      if (!book) throw new Error('NotConfigured')
-      drip(token, book)
-      settleHolder(book, owner, token)
+      if (!book) return nextHash('claim')
+      settleHolder(book, owner, token, nowSeconds())
       const paid = book.accrued.get(owner.toLowerCase()) ?? 0n
       book.accrued.set(owner.toLowerCase(), 0n)
       setBalance(owner, usdcAddress(), fixtureBalance(owner, usdcAddress()) + paid)

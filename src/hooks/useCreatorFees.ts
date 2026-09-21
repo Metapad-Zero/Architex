@@ -4,14 +4,14 @@ import type { Address, Hash, PublicClient } from 'viem'
 import { useAccount, usePublicClient, useWriteContract } from 'wagmi'
 import { activeChain } from '../chain'
 import { listedPluginAt, pluginAddress, listedPlugin } from '../content/plugins/registry'
-import { buybackPluginAbi, comboPluginAbi, launchpadAbi, launchpadWithPluginErrorsAbi, launchTokenAbi, splitPluginAbi } from '../lib/abi'
+import { buybackPluginAbi, comboPluginAbi, launchpadAbi, launchpadWithPluginErrorsAbi, splitPluginAbi } from '../lib/abi'
 import { deployment, isLaunchpadDeployed } from '../lib/deployment'
 import { isUserRejection, revertReason } from '../lib/errors'
 import { formatAmount, shortAddress } from '../lib/format'
 import type { LaunchRecord } from '../lib/launch'
 import { launchFixtureApi } from '../lib/launchFixtureApi'
-import { dripAndClaimCall, dripCall, holderStreamFrom, holderStreamReads } from '../lib/plugins/holders'
-import type { BuybackState, ComboEntryState, CreatorFeeState, HolderState, SplitState } from '../lib/plugins/state'
+import { claimCall, dividendReads, hasDividends, holderReads, type HolderDividends } from '../lib/plugins/holders'
+import type { BuybackState, ComboEntryState, CreatorFeeState, SplitState } from '../lib/plugins/state'
 import { pushRecent } from '../lib/recent'
 import type { SwapTxStatus } from './useSwap'
 
@@ -62,23 +62,23 @@ async function readBuyback(client: PublicClient, plugin: Address, token: Address
   return { held, totalSpent, totalBurned, offer: preview[0], lastRunAt }
 }
 
-async function readHolders(client: PublicClient, plugin: Address, token: Address, account: Address | undefined): Promise<HolderState> {
-  const reads = holderStreamReads(plugin, token)
-  const [unreleased, releasable, streamEnd, totalDistributed, eligibleSupply, you] = await Promise.all([
+/** The token's own dividend stream, and the connected wallet's claimable part of it (live up to the read). */
+async function readHolders(client: PublicClient, token: Address, account: Address | undefined): Promise<HolderDividends> {
+  const reads = dividendReads(token)
+  const mine = account ? holderReads(token, account) : undefined
+  const [undistributed, streamRate, streamEnd, totalDistributed, eligibleSupply, you] = await Promise.all([
     client.readContract(reads[0]),
     client.readContract(reads[1]),
     client.readContract(reads[2]),
     client.readContract(reads[3]),
-    client.readContract({ address: token, abi: launchTokenAbi, functionName: 'eligibleSupply' }),
-    account
-      ? Promise.all([
-          client.readContract({ address: token, abi: launchTokenAbi, functionName: 'balanceOf', args: [account] }),
-          client.readContract({ address: token, abi: launchTokenAbi, functionName: 'claimable', args: [account] }),
-        ])
-      : Promise.resolve(undefined),
+    client.readContract(reads[4]),
+    mine ? Promise.all([client.readContract(mine[0]), client.readContract(mine[1])]) : Promise.resolve(undefined),
   ])
   return {
-    ...holderStreamFrom([unreleased, releasable, streamEnd, totalDistributed]),
+    undistributed,
+    streamRate,
+    streamEnd,
+    totalDistributed,
     eligibleSupply,
     you: you ? { balance: you[0], claimable: you[1] } : undefined,
   }
@@ -108,15 +108,18 @@ async function readCreatorFees(client: PublicClient, launch: LaunchRecord, accou
     if (listed?.kind === kind) return true
     return Boolean(combo?.some((entry) => entry.isPlugin && same(entry.target, address)))
   }
-  const [split, buyback, holders] = await Promise.all([
+  const [split, buyback, dividends] = await Promise.all([
     serves('split') ? readSplit(client, pluginAddress(listedPlugin('split')), token) : Promise.resolve(undefined),
     serves('buyback') ? readBuyback(client, pluginAddress(listedPlugin('buyback')), token) : Promise.resolve(undefined),
-    serves('holders') ? readHolders(client, pluginAddress(listedPlugin('holders')), token, account) : Promise.resolve(undefined),
+    // Every launch token carries dividends, and anyone can distribute to one, so they are read for every token.
+    readHolders(client, token, account),
   ])
+  const fromFees = serves('holders')
+  const holders = fromFees || hasDividends(dividends) ? { ...dividends, fromFees } : undefined
   return { pending, split, buyback, holders, combo }
 }
 
-export type CreatorFeeAction = 'collect' | 'run' | 'claim' | 'drip' | `release:${string}`
+export type CreatorFeeAction = 'collect' | 'run' | 'claim' | `release:${string}`
 
 /** A launch token's creator fees: the state for the token page, and the actions anyone can take on them. */
 export function useCreatorFees(launch: LaunchRecord | undefined, onChanged?: () => void | Promise<void>) {
@@ -131,7 +134,8 @@ export function useCreatorFees(launch: LaunchRecord | undefined, onChanged?: () 
   const query = useQuery<CreatorFeeState, Error>({
     queryKey: ['creatorFees', activeChain.id, launch?.token, launch?.plugin, account],
     enabled: !fixtureOn && isLaunchpadDeployed && Boolean(launch) && Boolean(publicClient),
-    refetchInterval: 6_000,
+    // A holder's claimable grows every second; a poll every 10s keeps it current without animating it.
+    refetchInterval: 10_000,
     placeholderData: (previous) => previous,
     queryFn: () => {
       if (!publicClient || !launch) throw new Error('No RPC client for Arc')
@@ -230,28 +234,20 @@ export function useCreatorFees(launch: LaunchRecord | undefined, onChanged?: () 
     )
   }, [act, api, state?.buyback?.offer, symbol, token, writeContractAsync])
 
+  // The wallet claims its own dividends on the token. What it earns keeps growing until the claim lands, so the
+  // amount shown when pressed is "about".
   const claim = useCallback(
     (amount: bigint) => {
       if (!token || !account) return Promise.resolve()
       return act(
         'claim',
-        `Claimed about ${formatAmount(amount, 6)} USDC from ${symbol}`,
-        () => writeContractAsync({ chainId: activeChain.id, ...dripAndClaimCall(pluginAddress(listedPlugin('holders')), token) }),
-        () => api!.dripAndClaim(token, account),
+        `Claimed about ${formatAmount(amount, 6)} USDC of ${symbol} dividends`,
+        () => writeContractAsync({ chainId: activeChain.id, ...claimCall(token) }),
+        () => api!.claim(token, account),
       )
     },
     [account, act, api, symbol, token, writeContractAsync],
   )
-
-  const drip = useCallback(() => {
-    if (!token) return Promise.resolve()
-    return act(
-      'drip',
-      `Released ${formatAmount(state?.holders?.releasable ?? 0n, 6)} USDC to ${symbol} holders`,
-      () => writeContractAsync({ chainId: activeChain.id, ...dripCall(pluginAddress(listedPlugin('holders')), token) }),
-      () => api!.drip(token),
-    )
-  }, [act, api, state?.holders?.releasable, symbol, token, writeContractAsync])
 
   return {
     state,
@@ -264,6 +260,5 @@ export function useCreatorFees(launch: LaunchRecord | undefined, onChanged?: () 
     release,
     runBuyback,
     claim,
-    drip,
   }
 }

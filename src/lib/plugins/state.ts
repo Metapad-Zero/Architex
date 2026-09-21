@@ -1,5 +1,5 @@
 import type { Address } from 'viem'
-import type { HolderStream } from './holders'
+import type { HolderDividends } from './holders'
 
 /** One Split payee, for one token. */
 export interface SplitPayeeState {
@@ -36,15 +36,10 @@ export const BUYBACK_RUN_INTERVAL = 3_600n
 /** Buyback & burn's smallest offer, in USDC units: below it a run is refused and previewRun reports 0. */
 export const BUYBACK_MIN_RUN_USDC = 3n
 
-export interface HolderState extends HolderStream {
-  /** The token's eligible supply (0 below one whole token, when nothing can be distributed). */
-  eligibleSupply: bigint
-  /** The connected wallet's position; absent when no wallet is connected. */
-  you?: {
-    balance: bigint
-    /** What the token owes the wallet now. */
-    claimable: bigint
-  }
+/** A token's holder dividends, streamed inside the token (lib/plugins/holders.ts). */
+export interface HolderState extends HolderDividends {
+  /** Its creator fees go to Distribute to holders (directly or in a Combo), so collecting them adds to the stream. */
+  fromFees: boolean
 }
 
 export interface ComboEntryState {
@@ -60,6 +55,10 @@ export interface CreatorFeeState {
   pending: bigint
   split?: SplitState
   buyback?: BuybackState
+  /**
+   * Present when the token pays holder dividends: its fees go to Distribute to holders (directly or in a Combo), or
+   * someone has distributed to it directly. Dividends are built into every launch token.
+   */
   holders?: HolderState
   combo?: ComboEntryState[]
 }

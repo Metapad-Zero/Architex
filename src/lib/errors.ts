@@ -44,7 +44,6 @@ const REVERTS: Record<string, string> = {
   PairAlreadySet: 'The pool for this token is already set.',
   AlreadyGraduated: 'This token has already graduated.',
   PairLockedUntilGraduation: 'Transfers to the pool are locked until the curve graduates.',
-  NoEligibleSupply: 'Nobody holds this token yet, so there is no one to pay.',
   // Creator-fee plugins (contracts/interfaces/plugins).
   NotConfigured: 'That plugin does not serve this token.',
   AlreadyConfigured: 'That plugin is already set up for this token.',

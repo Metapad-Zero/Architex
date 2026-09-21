@@ -50,7 +50,7 @@ export const LISTED_PLUGINS: readonly ListedPlugin[] = [
     name: 'Distribute to holders',
     tagline: 'Paid to holders in USDC, over 24 hours.',
     description:
-      'Pays the fees to the token’s holders in USDC, in proportion to what they hold, dripped out over 24 hours so nobody can buy, collect and sell in one go. Holders claim on the token’s page.',
+      'Streams the fees to the token’s holders in USDC over about 24 hours: holders earn for every second they hold, in proportion to what they hold, so buying just before a payout earns nothing extra. Holders claim on the token’s page.',
     config: 'none',
     suiteKey: 'holderPlugin',
     contractPath: 'contracts/plugins/launch/HolderDistributionPlugin.sol',

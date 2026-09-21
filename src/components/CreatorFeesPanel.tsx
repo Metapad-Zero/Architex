@@ -9,7 +9,7 @@ import { useSwitchToArc } from '../hooks/useSwitchToArc'
 import { formatAmount, formatPct, shortAddress } from '../lib/format'
 import type { LaunchRecord } from '../lib/launch'
 import { destinationLabel, destinationName, feeDestination } from '../lib/plugins/destination'
-import { claimableAfterDrip } from '../lib/plugins/holders'
+import { dividendStatus } from '../lib/plugins/holders'
 import { BUYBACK_MIN_RUN_USDC, BUYBACK_RUN_INTERVAL, type BuybackState, type ComboEntryState, type HolderState, type SplitState } from '../lib/plugins/state'
 import { FeeGauge } from './FeeGauge'
 import { GhostButton } from './GhostButton'
@@ -175,57 +175,57 @@ function BuybackPanel({ buyback, symbol, graduated, alsoPaysHolders, busy, statu
   )
 }
 
-function HoldersPanel({ holders, symbol, busy, status, run, claim, drip, connected }: {
+function HoldersPanel({ holders, symbol, busy, status, run, claim, connected }: {
   holders: HolderState
   symbol: string
   busy: CreatorFeeAction | undefined
   status: ActionProps['status']
   run: Run
   claim: (amount: bigint) => Promise<void>
-  drip: () => Promise<void>
   connected: boolean
 }) {
-  const now = useNow()
-  const dueNow = holders.streamEnd > 0n && BigInt(Math.floor(now / 1_000)) >= holders.streamEnd
-  const dripping = holders.unreleased === 0n
-    ? 'Nothing waiting'
-    : dueNow
-      ? `${usdc(holders.unreleased)}, all due now`
-      : `${usdc(holders.unreleased)} until ${formatWhen(holders.streamEnd)}`
+  // Read, not ticked: live financial values never animate, so the figures refresh with each poll (every ~10s).
+  const stream = dividendStatus(holders)
   const you = holders.you
-  const yours = you ? claimableAfterDrip({ claimable: you.claimable, releasable: holders.releasable, balance: you.balance, eligibleSupply: holders.eligibleSupply }) : 0n
+  const yours = you?.claimable ?? 0n
   return (
-    <section className="fee-plugin" aria-label="Distribute to holders">
+    <section className="fee-plugin" aria-label="Holder dividends">
       <div className="fee-plugin-head">
-        <h3>Distribute to holders</h3>
-        <span>Paid in USDC, pro rata</span>
+        <h3>Holder dividends</h3>
+        <span>Paid in USDC, by the second</span>
       </div>
       <dl className="receipt-lines">
-        <div><dt>Releasing</dt><dd className={holders.unreleased === 0n ? 'text-g500' : ''}>{dripping}</dd></div>
-        <div><dt>Ready to drip now</dt><dd>{usdc(holders.releasable)}</dd></div>
-        <div><dt>Paid to holders</dt><dd>{usdc(holders.totalDistributed)}</dd></div>
         <div>
-          <dt>Your claimable</dt>
+          <dt>Your dividends</dt>
           <dd className={you ? '' : 'text-g500'}>{you ? usdc(yours) : 'Connect a wallet to see yours'}</dd>
         </div>
         {you && <div><dt>You hold</dt><dd>{formatAmount(you.balance, 18)} {symbol}</dd></div>}
+        {/* One fact per line, so each fits a phone's width. */}
+        <div>
+          <dt>Streaming</dt>
+          <dd className={stream.kind === 'none' ? 'text-g500' : ''}>{stream.kind === 'none' ? 'Nothing right now' : `${usdc(stream.left)} left`}</dd>
+        </div>
+        {stream.kind === 'streaming' && <div><dt>Ends</dt><dd>{formatWhen(stream.endsAt)}</dd></div>}
+        {stream.kind !== 'none' && (
+          <div>
+            <dt>Rate</dt>
+            <dd className={stream.kind === 'paused' ? 'text-g500' : ''}>
+              {stream.kind === 'paused' ? 'Paused — no holders yet' : `≈ ${usdc(stream.perHour)}/hour to all holders`}
+            </dd>
+          </div>
+        )}
+        {/* totalDistributed counts every USDC paid in for holders, streamed out yet or not. */}
+        <div><dt>Paid in so far</dt><dd>{usdc(holders.totalDistributed)}</dd></div>
       </dl>
-      <div className="mt-4 flex flex-wrap gap-3">
+      <div className="mt-4">
         <GhostButton disabled={(connected && yours === 0n) || Boolean(busy)} onClick={() => run(() => claim(yours))}>
           {busy === 'claim' ? 'Claiming…' : 'Claim'}
         </GhostButton>
-        <GhostButton disabled={holders.releasable === 0n || Boolean(busy)} onClick={() => run(drip)}>
-          {busy === 'drip' ? 'Dripping…' : 'Drip to holders'}
-        </GhostButton>
       </div>
       <ActionStatus action="claim" status={status} />
-      <ActionStatus action="drip" status={status} />
       <p className="fee-plugin-note">
-        Fees reach holders gradually, not all at once, so nobody can buy, collect and sell in one go. Anyone can drip what is due to every holder, and claiming drips it too. What drips goes to whoever holds at that moment.
+        You earn for every second you hold, in proportion to what you hold, so buying just before a payout earns nothing extra. Each payment to holders streams out over about a day{holders.fromFees ? '; collecting creator fees adds to the stream' : ''}. Tokens on the curve, in the launch pool or burned earn nothing.
       </p>
-      {holders.eligibleSupply === 0n && holders.unreleased > 0n && (
-        <p className="fee-plugin-note">Nobody holds a whole token yet, so nothing is released until someone does.</p>
-      )}
     </section>
   )
 }
@@ -358,7 +358,6 @@ export function CreatorFeesPanel({ launch, onChanged }: CreatorFeesPanelProps) {
           status={fees.status}
           run={run}
           claim={fees.claim}
-          drip={fees.drip}
           connected={Boolean(address)}
         />
       )}

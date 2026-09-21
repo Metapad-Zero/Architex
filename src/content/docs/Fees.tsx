@@ -61,16 +61,19 @@ export function DocsFees() {
       </p>
       <p>
         <span className="font-semibold text-ink">Distribute to holders</span> pays the fees to
-        the token's holders in USDC, in proportion to what they hold. Tokens still on the curve,
-        in the launch pool (including any liquidity added to it) or burned earn none. The fees
-        aren't handed out
-        the moment they arrive: they're released gradually, so nobody can buy, collect the fees
-        and sell again in one go. Fees that arrive to an empty stream are released evenly over 24
-        hours. When more arrive while some are still waiting, the end of the stream moves by
-        weight: a large delivery pushes it most of the way towards 24 hours from now, a small one
-        barely moves it. Holders claim on the token's page; Claim releases what's due to everyone
-        first, then pays you your share. What's released goes to whoever holds at that moment, so
-        someone who buys just before a release shares what built up since the last one.
+        the token's holders in USDC. It passes each collection straight to the token, which
+        streams it out over about 24 hours, and you earn for every second you hold, in proportion
+        to what you hold. So buying just before a payout earns nothing extra, and buying,
+        collecting and selling in one go earns nothing at all. When more arrives while a stream is
+        running, it joins the stream and the end moves by weight: a large amount pushes it most of
+        the way towards 24 hours from now, a small one barely moves it. Tokens still on the curve,
+        in the launch pool (including any liquidity added to it) or burned earn none. If nobody
+        holds a whole token, the stream pauses until someone does, so nothing piles up for the
+        next buyer. What you've earned waits on the token until you claim it on the token's page.
+      </p>
+      <p>
+        Dividends are built into every launch token, so anyone can pay a token's holders this way,
+        not only this plugin.
       </p>
       <p>
         <span className="font-semibold text-ink">Combo</span> splits the fees across up to five

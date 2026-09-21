@@ -33,6 +33,15 @@ export function DocsFaq() {
         </p>
       </div>
       <div className="space-y-2">
+        <h3 className="text-base font-semibold text-ink">How do holder dividends add up?</h3>
+        <p>
+          By the second. While a token's dividend stream runs, you earn for every second you hold
+          it, in proportion to what you hold, and it all waits on the token until you claim it.
+          Buying just before a payout earns nothing extra: you only earn from the moment you
+          hold. Tokens on the curve, in the launch pool or burned earn nothing.
+        </p>
+      </div>
+      <div className="space-y-2">
         <h3 className="text-base font-semibold text-ink">Why can't I edit my launch after publishing?</h3>
         <p>
           Because the trust model depends on it. See{' '}
@@ -88,10 +97,11 @@ export function DocsFaq() {
             </dd>
           </div>
           <div>
-            <dt className="font-semibold text-ink">Drip</dt>
+            <dt className="font-semibold text-ink">Dividend stream</dt>
             <dd className="text-g700">
-              How Distribute to holders pays out: gradually over a window of up to 24 hours,
-              rather than all at once when fees arrive.
+              How a launch token pays its holders: USDC paid to it streams out over about 24
+              hours, and you earn for every second you hold, in proportion to what you hold. Buying
+              just before a payout earns nothing extra.
             </dd>
           </div>
           <div>
