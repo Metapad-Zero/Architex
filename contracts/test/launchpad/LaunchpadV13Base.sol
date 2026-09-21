@@ -303,12 +303,12 @@ contract ReentrantPlugin is ERC165, IArchitexFeePlugin {
     }
 
     function _attempt(address token) internal {
-        try pad.buy(token, 1e6, 0, address(this)) {
+        try pad.buy(token, 1e6, 0, address(this), type(uint256).max) {
             anyReentrySucceeded = true;
         } catch (bytes memory e) {
             errors.push(bytes4(e));
         }
-        try pad.sell(token, 1, 0, address(this)) {
+        try pad.sell(token, 1, 0, address(this), type(uint256).max) {
             anyReentrySucceeded = true;
         } catch (bytes memory e) {
             errors.push(bytes4(e));
@@ -447,7 +447,7 @@ abstract contract LaunchpadV13Base is Test {
     /// @dev bob buys out the curve (graduating it).
     function _graduate(address token) internal {
         vm.prank(bob);
-        pad.buy(token, 1_000_000e6, 0, bob);
+        pad.buy(token, 1_000_000e6, 0, bob, type(uint256).max);
         assertTrue(pad.isGraduated(token), "graduated");
     }
 

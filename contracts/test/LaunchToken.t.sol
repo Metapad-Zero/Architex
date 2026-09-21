@@ -404,9 +404,9 @@ contract LaunchTokenThroughLaunchpadTest is LaunchpadV13Base {
         address t = _create(1000, address(plugin));
         ILaunchToken token = ILaunchToken(t);
         vm.prank(alice);
-        pad.buy(t, 2_000e6, 0, alice);
+        pad.buy(t, 2_000e6, 0, alice, type(uint256).max);
         vm.prank(carol);
-        pad.buy(t, 2_000e6, 0, carol);
+        pad.buy(t, 2_000e6, 0, carol, type(uint256).max);
         pad.collectCreatorFees(t); // distributes
         uint256 aliceEarned = token.claimable(alice);
         uint256 carolEarned = token.claimable(carol);
@@ -415,7 +415,7 @@ contract LaunchTokenThroughLaunchpadTest is LaunchpadV13Base {
         // Curve sell (pull into the launchpad) keeps what was earned
         uint256 half = IERC20(t).balanceOf(alice) / 2;
         vm.prank(alice);
-        pad.sell(t, half, 0, alice);
+        pad.sell(t, half, 0, alice, type(uint256).max);
         assertEq(token.claimable(alice), aliceEarned);
 
         // Graduate, then a pool sell (pull into the pair) keeps it too

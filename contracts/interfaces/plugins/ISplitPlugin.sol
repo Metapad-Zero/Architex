@@ -6,7 +6,8 @@ import {ILaunchFeePlugin} from "./ILaunchFeePlugin.sol";
 /// @title Split: a token's creator fees shared among fixed payees by fixed shares (V13-SPEC §2.2, [D16]).
 /// @notice onLaunch data: `abi.encode(address[] payees, uint256[] shares)`, canonically encoded (viem's
 ///         encodeAbiParameters produces this). 1 to 20 payees, each distinct, none of them the zero address,
-///         this plugin, the launchpad, USDC or the token; every share above zero.
+///         this plugin, the launchpad, USDC, the token, any launch pair, the launch router, the pair factory or any
+///         launch token; every share above zero.
 ///         Pull-based per token: `releasable(token, payee) = totalReceived(token) * share / totalShares(token)
 ///         - released(token, payee)`. Anyone may call release for any payee; the USDC always goes to the payee.
 ///         Rounding dust (at most one unit per payee per token) stays in the plugin.

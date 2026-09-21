@@ -63,7 +63,7 @@ contract SolvencyHandler is Test {
         address who = _actor(a);
         amount = bound(amount, 1, 6_000e6);
         vm.prank(who);
-        try pad.buy(t, amount, 0, who) {} catch {}
+        try pad.buy(t, amount, 0, who, type(uint256).max) {} catch {}
     }
 
     function curveSell(uint256 w, uint256 a, uint256 amount) external {
@@ -76,7 +76,7 @@ contract SolvencyHandler is Test {
         if (held == 0) return;
         amount = bound(amount, 1, held);
         vm.prank(who);
-        try pad.sell(t, amount, 0, who) {} catch {}
+        try pad.sell(t, amount, 0, who, type(uint256).max) {} catch {}
     }
 
     function graduate(uint256 w, uint256 a) external {
@@ -84,7 +84,7 @@ contract SolvencyHandler is Test {
         if (pad.isGraduated(t)) return;
         address who = _actor(a);
         vm.prank(who);
-        pad.buy(t, 1_000_000e6, 0, who);
+        pad.buy(t, 1_000_000e6, 0, who, type(uint256).max);
         ghostGraduations++;
     }
 
@@ -320,7 +320,7 @@ contract DividendHandler is Test {
         } else {
             amount = bound(amount, 1, 5_000e6);
             vm.prank(who);
-            try pad.buy(address(token), amount, 0, who) {} catch {}
+            try pad.buy(address(token), amount, 0, who, type(uint256).max) {} catch {}
         }
     }
 
@@ -334,7 +334,7 @@ contract DividendHandler is Test {
         if (pool) {
             try router.sell(address(token), amount, 0, who, block.timestamp) {} catch {}
         } else {
-            try pad.sell(address(token), amount, 0, who) {} catch {}
+            try pad.sell(address(token), amount, 0, who, type(uint256).max) {} catch {}
         }
     }
 
@@ -342,7 +342,7 @@ contract DividendHandler is Test {
         if (pad.isGraduated(address(token))) return;
         address who = _actor(a);
         vm.prank(who);
-        pad.buy(address(token), 1_000_000e6, 0, who);
+        pad.buy(address(token), 1_000_000e6, 0, who, type(uint256).max);
     }
 
     function transfer(uint256 a, uint256 b, uint256 amount) external {
