@@ -98,7 +98,7 @@ contract LaunchpadArcForkTest is Test {
         ILaunchPair pair = ILaunchPair(pad.curves(token).pair);
 
         vm.prank(bob);
-        (uint256 tokensOut,) = pad.buy(token, 30_000e6, 0, bob);
+        (uint256 tokensOut,) = pad.buy(token, 30_000e6, 0, bob, type(uint256).max);
         assertEq(tokensOut, CURVE_SUPPLY);
         assertTrue(pad.curves(token).graduated);
 
@@ -115,7 +115,7 @@ contract LaunchpadArcForkTest is Test {
     function test_fork_graduatedPoolTradesThroughTheLaunchRouter() public onlyFork {
         address token = _create();
         vm.prank(bob);
-        pad.buy(token, 30_000e6, 0, bob);
+        pad.buy(token, 30_000e6, 0, bob, type(uint256).max);
 
         (uint256 quoted,,) = router.quoteBuy(token, 100e6);
         vm.prank(alice);
@@ -135,7 +135,7 @@ contract LaunchpadArcForkTest is Test {
         address token = _create();
         address pair = pad.curves(token).pair;
         vm.prank(alice);
-        pad.buy(token, 500e6, 0, alice);
+        pad.buy(token, 500e6, 0, alice, type(uint256).max);
 
         vm.startPrank(alice);
         vm.expectRevert(ILaunchToken.PairLockedUntilGraduation.selector);
@@ -152,9 +152,9 @@ contract LaunchpadArcForkTest is Test {
         vm.prank(alice);
         address token = pad.createToken("Fork", "FORK", "", 0, alice, "", 0, 0, type(uint256).max);
         vm.startPrank(alice);
-        (uint256 tokens,) = pad.buy(token, 100e6, 0, alice);
+        (uint256 tokens,) = pad.buy(token, 100e6, 0, alice, type(uint256).max);
         assertEq(tokens, 12585726430898500955823408);
-        uint256 out = pad.sell(token, tokens, 0, alice);
+        uint256 out = pad.sell(token, tokens, 0, alice, type(uint256).max);
         vm.stopPrank();
         assertEq(out, 99002499);
     }

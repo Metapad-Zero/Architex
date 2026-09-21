@@ -678,10 +678,10 @@ contract LaunchTokenTest is Test {
 contract LaunchpadSniper {
     function snipe(ArchitexLaunchpad pad, IERC20 usdc, address token, uint256 usdcIn) external returns (uint256 claimed) {
         usdc.approve(address(pad), usdcIn);
-        (uint256 tokens,) = pad.buy(token, usdcIn, 0, address(this));
+        (uint256 tokens,) = pad.buy(token, usdcIn, 0, address(this), type(uint256).max);
         pad.collectCreatorFees(token);
         claimed = ILaunchToken(token).claim();
-        pad.sell(token, tokens, 0, address(this));
+        pad.sell(token, tokens, 0, address(this), type(uint256).max);
     }
 }
 
@@ -693,9 +693,9 @@ contract LaunchTokenThroughLaunchpadTest is LaunchpadV13Base {
         address t = _create(1000, address(plugin));
         ILaunchToken token = ILaunchToken(t);
         vm.prank(alice);
-        pad.buy(t, 2_000e6, 0, alice);
+        pad.buy(t, 2_000e6, 0, alice, type(uint256).max);
         vm.prank(carol);
-        pad.buy(t, 2_000e6, 0, carol);
+        pad.buy(t, 2_000e6, 0, carol, type(uint256).max);
         pad.collectCreatorFees(t); // distributes: streams over a day
         vm.warp(vm.getBlockTimestamp() + 1 days);
         uint256 aliceEarned = token.claimable(alice);
@@ -705,7 +705,7 @@ contract LaunchTokenThroughLaunchpadTest is LaunchpadV13Base {
         // Curve sell (pull into the launchpad) keeps what was earned
         uint256 half = IERC20(t).balanceOf(alice) / 2;
         vm.prank(alice);
-        pad.sell(t, half, 0, alice);
+        pad.sell(t, half, 0, alice, type(uint256).max);
         assertEq(token.claimable(alice), aliceEarned);
 
         // Graduate, then a pool sell (pull into the pair) keeps it too
@@ -738,7 +738,7 @@ contract LaunchTokenThroughLaunchpadTest is LaunchpadV13Base {
 
         vm.warp(t0 + 5 days);
         vm.prank(bob);
-        pad.buy(t, 100e6, 0, bob);
+        pad.buy(t, 100e6, 0, bob, type(uint256).max);
         assertEq(ILaunchToken(t).streamEnd(), t0 + 5 days + 1 days, "the stream waited");
         assertEq(ILaunchToken(t).claimable(bob), 0);
         vm.warp(t0 + 6 days);
@@ -751,7 +751,7 @@ contract LaunchTokenThroughLaunchpadTest is LaunchpadV13Base {
         DistributePlugin plugin = new DistributePlugin(IERC20(address(usdc)));
         address t = _create(1000, address(plugin));
         vm.prank(alice);
-        pad.buy(t, 5_000e6, 0, alice); // creator fees accrue at the launchpad
+        pad.buy(t, 5_000e6, 0, alice, type(uint256).max); // creator fees accrue at the launchpad
         assertGt(pad.pendingCreatorFees(t), 0);
         vm.warp(vm.getBlockTimestamp() + 3 days);
 

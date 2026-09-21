@@ -61,6 +61,8 @@ interface IArchitexLaunchpad is IArchitexLaunchpadLite {
     error CurveGraduated();
     error NotGraduated();
     error SlippageExceeded();
+    /// @notice A curve buy or sell mined after its deadline (block.timestamp > deadline), as the launch router rules.
+    error Expired();
     /// @notice A sell (or its quote) for more tokens than the curve has sold.
     error ExceedsSold();
     error InvalidName();
@@ -70,8 +72,12 @@ interface IArchitexLaunchpad is IArchitexLaunchpadLite {
     /// @notice The launch fee is above the most the creator agreed to pay (it was raised after they signed).
     error LaunchFeeAboveMax();
     error CreatorFeeTooHigh();
-    /// @notice The plugin is the zero address or the launchpad itself.
+    /// @notice The plugin could never pass fees on: the zero address, the launchpad, USDC, the launch router, the pair
+    ///         factory, the new token, any launch pair (anyone could skim fees sent there) or another launch token.
     error InvalidPlugin();
+    /// @notice pluginData was given for a plugin that does not declare IArchitexFeePlugin, so nothing would ever read
+    ///         it: the plugin address is likely mistyped. A plain address (a wallet, a Safe) takes empty pluginData.
+    error DataForNonPlugin();
     error NotInitialized();
     error AlreadyInitialized();
     /// @notice initialize() was given a pair factory or router that is not wired to this launchpad and its USDC.
@@ -87,8 +93,6 @@ interface IArchitexLaunchpad is IArchitexLaunchpadLite {
     function pendingFees() external view returns (uint256);
     /// @notice `token`'s creator fees accrued in the launchpad and not yet collected to its plugin.
     function pendingCreatorFees(address token) external view returns (uint256);
-    /// @notice The launch-pair factory, set once by initialize().
-    function pairFactory() external view returns (address);
 
     function TOTAL_SUPPLY() external view returns (uint256);
     function CURVE_SUPPLY() external view returns (uint256);
@@ -103,8 +107,9 @@ interface IArchitexLaunchpad is IArchitexLaunchpadLite {
     function initialize(address pairFactory_, address router_) external;
 
     /// @param creatorFeeBps creator fee on every buy and sell, 0..MAX_CREATOR_FEE_BPS, locked forever
-    /// @param plugin where creator fees go, any address but zero and the launchpad, locked forever
-    /// @param pluginData passed to the plugin's onLaunch (only when it declares IArchitexFeePlugin)
+    /// @param plugin where creator fees go, locked forever: any address that can pass them on, so not zero, the
+    ///        launchpad, USDC, the launch router or pair factory, the new token, any launch pair or another launch token
+    /// @param pluginData passed to the plugin's onLaunch; must be empty unless the plugin declares IArchitexFeePlugin
     /// @param initialBuyUsdc gross USDC the creator spends on the curve in the same transaction (0 for none)
     /// @param maxLaunchFee the most launch fee the creator will pay; reverts LaunchFeeAboveMax if the fee was raised above it
     function createToken(
@@ -119,8 +124,11 @@ interface IArchitexLaunchpad is IArchitexLaunchpadLite {
         uint256 maxLaunchFee
     ) external returns (address token);
 
+    /// @param deadline reverts Expired if block.timestamp > deadline (the launch router's rule)
     /// @return usdcOut USDC received after both fees
-    function sell(address token, uint256 tokensIn, uint256 minUsdcOut, address to) external returns (uint256 usdcOut);
+    function sell(address token, uint256 tokensIn, uint256 minUsdcOut, address to, uint256 deadline)
+        external
+        returns (uint256 usdcOut);
 
     /// @return tokensOut tokens received
     /// @return platformFee platform fee in USDC, included in usdcSpent

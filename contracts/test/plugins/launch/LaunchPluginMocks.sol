@@ -158,6 +158,9 @@ contract MockLaunchpad is IArchitexLaunchpadLite {
 
     address public immutable usdc;
     address public router;
+    address public pairFactory;
+    /// @notice Every pair a launch registered, as the real launchpad records the pairs createToken creates.
+    mapping(address pair => bool) public isLaunchPair;
     mapping(address token => Launch) private _launches;
 
     /// @notice Curve price: launch-token base units per USDC unit (1e14 = 100 tokens per USDC).
@@ -173,6 +176,7 @@ contract MockLaunchpad is IArchitexLaunchpadLite {
     uint256 public lastBuyUsdcIn;
     uint256 public lastBuyMinOut;
     address public lastBuyTo;
+    uint256 public lastBuyDeadline;
 
     constructor(address usdc_) {
         usdc = usdc_;
@@ -182,6 +186,10 @@ contract MockLaunchpad is IArchitexLaunchpadLite {
 
     function setRouter(address router_) external {
         router = router_;
+    }
+
+    function setPairFactory(address pairFactory_) external {
+        pairFactory = pairFactory_;
     }
 
     function setGraduated(address token, bool graduated) external {
@@ -194,6 +202,7 @@ contract MockLaunchpad is IArchitexLaunchpadLite {
 
     function setPair(address token, address pair) external {
         _launches[token].pair = pair;
+        if (pair != address(0)) isLaunchPair[pair] = true;
     }
 
     /// @notice USDC that buys out the rest of the curve; a buy offering at least this is the sell-out buy.
@@ -219,6 +228,7 @@ contract MockLaunchpad is IArchitexLaunchpadLite {
         require(_launches[token].plugin == address(0), "already launched");
         require(plugin != address(0), "zero plugin");
         _launches[token] = Launch(plugin, creator, pair, false, VIRTUAL_USDC_0, NO_SELL_OUT);
+        if (pair != address(0)) isLaunchPair[pair] = true;
     }
 
     function launch(address token, address creator, address plugin, address pair, bytes calldata data) external {
@@ -273,10 +283,11 @@ contract MockLaunchpad is IArchitexLaunchpadLite {
         return _launches[token].plugin == address(0) ? 0 : _launches[token].virtualUsdc;
     }
 
-    function buy(address token, uint256 usdcIn, uint256 minTokensOut, address to)
+    function buy(address token, uint256 usdcIn, uint256 minTokensOut, address to, uint256 deadline)
         external
         returns (uint256 tokensOut, uint256 usdcSpent)
     {
+        require(deadline >= block.timestamp, "expired");
         Launch storage l = _launches[token];
         require(l.plugin != address(0), "unknown token");
         require(!l.graduated, "graduated");
@@ -285,6 +296,7 @@ contract MockLaunchpad is IArchitexLaunchpadLite {
         lastBuyUsdcIn = usdcIn;
         lastBuyMinOut = minTokensOut;
         lastBuyTo = to;
+        lastBuyDeadline = deadline;
 
         bool sellOut = usdcIn >= l.sellOutCost;
         usdcSpent = sellOut ? l.sellOutCost : usdcIn;

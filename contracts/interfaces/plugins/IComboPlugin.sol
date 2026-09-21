@@ -6,7 +6,8 @@ import {ILaunchFeePlugin} from "./ILaunchFeePlugin.sol";
 /// @title Combo: a token's creator fees split across up to 5 destinations by basis points (V13-SPEC §2, [D6]).
 /// @notice onLaunch data: `abi.encode(address[] targets, uint16[] bps, bytes[] datas)`, canonically encoded
 ///         (viem's encodeAbiParameters produces this). 1 to 5 entries, each distinct, none of them the zero
-///         address, this plugin, the launchpad, USDC or the token; every bps above zero, summing to exactly 10,000.
+///         address, this plugin, the launchpad, USDC, the token, any launch pair, the launch router, the pair factory
+///         or any launch token; every bps above zero, summing to exactly 10,000.
 ///         A target that declares IArchitexFeePlugin through ERC-165 (checked once, at onLaunch, and remembered)
 ///         is configured with its `datas[i]` and paid through its onFees hook, which must pull exactly its slice.
 ///         Any other target (a wallet, a Safe) is paid by plain transfer and must have empty `datas[i]`.

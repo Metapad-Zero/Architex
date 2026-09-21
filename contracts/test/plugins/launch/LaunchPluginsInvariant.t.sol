@@ -256,8 +256,11 @@ contract BuybackHandler is PluginHandlerBase {
         }
     }
 
+    /// @dev Moves time too: runs are paced by time (RUN_INTERVAL), so blocks alone would leave almost no budget.
     function nextBlock(uint256 blocks) external {
-        vm.roll(block.number + bound(blocks, 1, 3));
+        uint256 n = bound(blocks, 1, 3);
+        vm.roll(vm.getBlockNumber() + n);
+        vm.warp(vm.getBlockTimestamp() + n * 20 minutes);
     }
 
     /// @dev Graduates a token (as a sell-out buy by someone else would), opening its pool with `reserveUsdc`.
