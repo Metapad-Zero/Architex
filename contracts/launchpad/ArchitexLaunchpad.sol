@@ -81,7 +81,7 @@ contract ArchitexLaunchpad is IArchitexLaunchpad, ReentrancyGuard {
 
     // ─── Wiring (set once by initialize) ─────────────────────────────────────
 
-    /// @inheritdoc IArchitexLaunchpad
+    /// @inheritdoc IArchitexLaunchpadLite
     address public pairFactory;
     /// @inheritdoc IArchitexLaunchpadLite
     address public router;
@@ -106,6 +106,9 @@ contract ArchitexLaunchpad is IArchitexLaunchpad, ReentrancyGuard {
 
     mapping(address => Curve) private _curves;
     address[] private _tokens;
+    /// @inheritdoc IArchitexLaunchpadLite
+    /// @dev Set in createToken, where every launch pair is created (the pair factory creates for the launchpad only).
+    mapping(address => bool) public isLaunchPair;
 
     // ─── Constructor ─────────────────────────────────────────────────────────
 
@@ -245,6 +248,8 @@ contract ArchitexLaunchpad is IArchitexLaunchpad, ReentrancyGuard {
     /// @notice Deploys a LaunchToken and its launch pair, registers the curve, lets the plugin configure itself
     ///         (onLaunch, only if it declares IArchitexFeePlugin), then runs the creator's optional first buy in the
     ///         same transaction (anti-snipe). The creator's first buy pays the creator fee like any other.
+    ///         Reverts InvalidPlugin for a plugin that could never pass fees on, and DataForNonPlugin for pluginData
+    ///         given to an address that does not declare IArchitexFeePlugin.
     function createToken(
         string calldata name,
         string calldata symbol,
@@ -264,7 +269,8 @@ contract ArchitexLaunchpad is IArchitexLaunchpad, ReentrancyGuard {
         if (bytes(symbol).length == 0 || bytes(symbol).length > 10) revert InvalidSymbol();
         if (bytes(metadataURI).length > 256) revert InvalidMetadata();
         if (creatorFeeBps > MAX_CREATOR_FEE_BPS) revert CreatorFeeTooHigh();
-        // Paying itself would leave the fees in the launchpad untracked.
+        // Paying itself would leave the fees in the launchpad untracked. The rest of the plugin checks need the new
+        // token's and pair's addresses (below). The dead address stays allowed: burning the fees is a choice.
         if (plugin == address(0) || plugin == address(this)) revert InvalidPlugin();
 
         // ── Accrue launch fee (pulled from the creator; accrued, not pushed) ──
@@ -279,13 +285,28 @@ contract ArchitexLaunchpad is IArchitexLaunchpad, ReentrancyGuard {
         LaunchToken lt = new LaunchToken(name, symbol, usdc, _router);
         token = address(lt);
         // Only the launchpad can create launch pairs, so nobody can squat or pre-seed this one.
-        address _pair = ILaunchPairFactory(pairFactory).createPair(token);
+        address _pairFactory = pairFactory;
+        address _pair = ILaunchPairFactory(_pairFactory).createPair(token);
+        isLaunchPair[_pair] = true;
         lt.initPair(_pair);
+
+        // Addresses that could never pass fees on (V13-SPEC §2.1). USDC, the launch router and the pair factory would
+        // strand them, and so would this token or any other launch token (the curve registry knows them all: every
+        // registered curve has a creator). A launch pair is worse: fees sent to one by plain transfer can be taken by
+        // anyone with skim(), before or after graduation. The registry covers this token's own pair (just recorded)
+        // and every other token's. The new token's and its pair's addresses are predictable.
+        if (
+            plugin == usdc || plugin == _router || plugin == _pairFactory || plugin == token || isLaunchPair[plugin]
+                || _curves[plugin].creator != address(0)
+        ) revert InvalidPlugin();
 
         // ── Register curve ───────────────────────────────────────────────────
         // Hooks or plain address is decided here, once, and stored: onFees is called for this token exactly when
         // onLaunch was.
         bool hooks = _hasHooks(plugin);
+        // Configuration for an address that turns out not to be a plugin would be silently dropped: a mistyped plugin
+        // address would launch fine and take every fee.
+        if (!hooks && pluginData.length != 0) revert DataForNonPlugin();
         _curves[token] = Curve({
             token: token,
             creator: msg.sender,
@@ -322,23 +343,26 @@ contract ArchitexLaunchpad is IArchitexLaunchpad, ReentrancyGuard {
 
     /// @inheritdoc IArchitexLaunchpadLite
     /// @notice Buy tokens from the curve. On the sell-out buy, pulls only usdcSpent (which is <= usdcIn — never
-    ///         pull-then-refund). Graduates atomically when the last token is sold.
-    function buy(address token, uint256 usdcIn, uint256 minTokensOut, address to)
+    ///         pull-then-refund). Graduates atomically when the last token is sold. Reverts Expired after `deadline`.
+    function buy(address token, uint256 usdcIn, uint256 minTokensOut, address to, uint256 deadline)
         external
         nonReentrant
         returns (uint256 tokensOut, uint256 usdcSpent)
     {
+        if (block.timestamp > deadline) revert Expired();
         return _buy(token, usdcIn, minTokensOut, to);
     }
 
     /// @inheritdoc IArchitexLaunchpad
     /// @notice Sell tokens into the curve. The token's `pull` moves them back without an ERC-20 approval, always from
-    ///         msg.sender. `to` is the USDC recipient; `trader` in the event is always msg.sender.
-    function sell(address token, uint256 tokensIn, uint256 minUsdcOut, address to)
+    ///         msg.sender. `to` is the USDC recipient; `trader` in the event is always msg.sender. Reverts Expired
+    ///         after `deadline`.
+    function sell(address token, uint256 tokensIn, uint256 minUsdcOut, address to, uint256 deadline)
         external
         nonReentrant
         returns (uint256 usdcOut)
     {
+        if (block.timestamp > deadline) revert Expired();
         Curve storage c = _curves[token];
         if (c.token == address(0)) revert UnknownToken();
         if (c.graduated) revert CurveGraduated();
@@ -372,7 +396,8 @@ contract ArchitexLaunchpad is IArchitexLaunchpad, ReentrancyGuard {
 
     // ─── Internal buy logic ──────────────────────────────────────────────────
 
-    /// @dev Shared by buy() and createToken(). The nonReentrant guard is held by the caller.
+    /// @dev Shared by buy() and createToken(). The nonReentrant guard is held by the caller. No deadline here:
+    ///      buy() checks its own, and createToken's first buy runs in the launch transaction itself.
     function _buy(address token, uint256 usdcIn, uint256 minTokensOut, address to)
         internal
         returns (uint256 tokensOut, uint256 usdcSpent)

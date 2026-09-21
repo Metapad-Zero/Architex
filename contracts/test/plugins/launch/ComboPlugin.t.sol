@@ -312,7 +312,7 @@ contract ComboPluginTest is LaunchPluginTestBase {
 
         assertEq(split.totalReceived(address(token)), 500_000_003);
         assertEq(buyback.usdcHeld(address(token)), 300_000_002);
-        assertEq(holder.usdcHeld(address(token)), 100_000_000); // no holders yet: held
+        assertEq(holder.usdcHeld(address(token)), 100_000_000); // streaming: nothing goes out in the delivering block
         assertEq(usdc.balanceOf(carol), 100_000_002);
         assertEq(
             split.totalReceived(address(token)) + buyback.usdcHeld(address(token)) + holder.usdcHeld(address(token))
@@ -329,10 +329,18 @@ contract ComboPluginTest is LaunchPluginTestBase {
     /// @dev Fees through the Combo then work in every sub-plugin exactly as if it were the token's own plugin.
     function test_endToEnd_everySubPluginWorksBehindTheCombo() public {
         MockLaunchToken token = _launchFullCombo();
-        token.mint(dave, 1e18); // a holder, so the holder slice distributes at once
+        token.mint(dave, 1e18); // a holder, so the holder slice drips out
         _collect(token, 1000e6);
 
+        // The holder slice streams over the drip period: nothing in the delivering block, all of it a day later.
+        assertEq(token.totalDistributed(), 0);
+        assertEq(holder.unreleased(address(token)), 100e6);
+        vm.warp(block.timestamp + holder.DRIP_PERIOD());
+        vm.prank(keeper);
+        assertEq(holder.drip(address(token)), 100e6);
         assertEq(token.totalDistributed(), 100e6);
+        assertEq(usdc.balanceOf(address(holder)), 0);
+
         split.release(address(token), alice);
         split.release(address(token), bob);
         assertEq(usdc.balanceOf(alice), 250e6);

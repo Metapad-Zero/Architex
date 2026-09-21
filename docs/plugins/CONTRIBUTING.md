@@ -4,9 +4,10 @@ A plugin decides what happens to a launch token's **creator fee** (0–10% of ev
 creator at launch and locked forever). The creator picks the plugin in the token builder, and that choice is
 locked forever too. The whole design is in `docs/launchpad/V13-SPEC.md` §2.
 
-Any address can be a token's plugin. A wallet or a Safe just receives USDC. The **marketplace** lists
-contracts that implement `IArchitexFeePlugin` (`contracts/interfaces/IArchitexFeePlugin.sol`), were reviewed by
-pull request, and can be picked and configured in the builder.
+Any address that can pass fees on can be a token's plugin (V13-SPEC §2.1 lists the few the launchpad refuses).
+A wallet or a Safe just receives USDC, and takes no plugin data. The **marketplace** lists contracts that
+implement `IArchitexFeePlugin` (`contracts/interfaces/IArchitexFeePlugin.sol`), were reviewed by pull request,
+and can be picked and configured in the builder.
 
 ## Why PR-based
 
@@ -28,10 +29,16 @@ a plugin isn't listed.
 4. **Account per token.** One deployment serves every token that picks it. Never treat your USDC balance as
    one token's balance.
 5. **Don't trade inside a hook.** Hooks run under the launchpad's reentrancy guard. Do anything that buys, sells
-   or adds liquidity in a separate, permissionless function, as Buyback & burn's `run` does.
+   or adds liquidity in a separate, permissionless function, as Buyback & burn's `run` does. If anyone can
+   trigger it, pace it by time, not by block: a trader can hold across blocks, and on Arc blocks come faster
+   than one a second (V13-SPEC §2.2).
 6. **Pay out by pull, not push.** One bad recipient must never block the others.
 7. **A broken plugin strands fees.** If `onFees` reverts, that token's fees stay with the launchpad forever
    (owner decision D10). Test like it.
+8. **Check where you send fees.** Every payee or entry must be able to pass fees on. `_checkRecipient` refuses
+   zero, your plugin, the launchpad, USDC, the token, any launch pair (`launchpad.isLaunchPair`; anyone can
+   skim a transfer out of one), the launch router, the pair factory and any launch token, reading only the
+   launchpad, never the recipient.
 
 The reference plugins in `contracts/plugins/launch/` share these rules through `LaunchFeePluginBase.sol`.
 Inherit from it.

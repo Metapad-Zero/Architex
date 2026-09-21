@@ -28,7 +28,8 @@ interface ILaunchFeePlugin is IArchitexFeePlugin {
     /// @notice The onLaunch data is not the canonical ABI encoding of the plugin's configuration types.
     error NonCanonicalData();
     error LengthMismatch();
-    /// @notice The address cannot receive fees: zero, this plugin, the launchpad, USDC, or the token itself.
+    /// @notice The address cannot receive fees: zero, this plugin, the launchpad, USDC, the token itself, any launch
+    ///         pair, the launch router, the pair factory, or any launch token.
     error InvalidRecipient(address recipient);
     /// @notice A contract this plugin paid through an allowance did not pull exactly `expected` USDC.
     error PullMismatch(address puller, uint256 expected, uint256 actual);

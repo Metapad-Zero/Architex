@@ -92,12 +92,17 @@ abstract contract LaunchFeePluginBase is ILaunchFeePlugin, ReentrancyGuard {
         USDC.safeTransferFrom(msg.sender, address(this), amount);
     }
 
-    /// @dev Rejects fee recipients where USDC would be stranded or would break this plugin's per-token accounting:
-    ///      the zero address, this plugin, the launchpad, USDC itself, and the token.
+    /// @dev Rejects fee recipients where USDC would be stranded, would break this plugin's per-token accounting, or
+    ///      could be taken by anyone: the zero address, this plugin, the launchpad, USDC itself, the token, any launch
+    ///      pair (a plain transfer into one can be skimmed by anyone; the token's own pair is registered before
+    ///      onLaunch runs), the launch router, the pair factory, and any launch token. Reads only the launchpad, never
+    ///      the recipient.
     function _checkRecipient(address token, address recipient) internal view {
         if (
             recipient == address(0) || recipient == address(this) || recipient == address(LAUNCHPAD)
-                || recipient == address(USDC) || recipient == token
+                || recipient == address(USDC) || recipient == token || LAUNCHPAD.isLaunchPair(recipient)
+                || recipient == LAUNCHPAD.router() || recipient == LAUNCHPAD.pairFactory()
+                || LAUNCHPAD.pluginOf(recipient) != address(0)
         ) revert InvalidRecipient(recipient);
     }
 
