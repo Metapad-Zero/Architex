@@ -323,7 +323,7 @@ contract ReentrantPlugin is ERC165, IArchitexFeePlugin {
         } catch (bytes memory e) {
             errors.push(bytes4(e));
         }
-        try pad.createToken("Re", "RE", "", 0, address(this), "", 0, 0) {
+        try pad.createToken("Re", "RE", "", 0, address(this), "", 0, 0, type(uint256).max) {
             anyReentrySucceeded = true;
         } catch (bytes memory e) {
             errors.push(bytes4(e));
@@ -436,7 +436,7 @@ abstract contract LaunchpadV13Base is Test {
     /// @dev alice launches; fees go to `plugin`.
     function _create(uint16 creatorFeeBps, address plugin) internal returns (address token) {
         vm.prank(alice);
-        token = pad.createToken("Vector", "VEC", "", creatorFeeBps, plugin, "", 0, 0);
+        token = pad.createToken("Vector", "VEC", "", creatorFeeBps, plugin, "", 0, 0, type(uint256).max);
     }
 
     /// @dev alice launches with no creator fee, paying the creator wallet.

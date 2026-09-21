@@ -253,7 +253,8 @@ contract ArchitexLaunchpad is IArchitexLaunchpad, ReentrancyGuard {
         address plugin,
         bytes calldata pluginData,
         uint256 initialBuyUsdc,
-        uint256 minTokensOut
+        uint256 minTokensOut,
+        uint256 maxLaunchFee
     ) external nonReentrant returns (address token) {
         address _router = router;
         if (_router == address(0)) revert NotInitialized();
@@ -268,6 +269,7 @@ contract ArchitexLaunchpad is IArchitexLaunchpad, ReentrancyGuard {
 
         // ── Accrue launch fee (pulled from the creator; accrued, not pushed) ──
         uint256 fee = launchFee;
+        if (fee > maxLaunchFee) revert LaunchFeeAboveMax();
         if (fee > 0) {
             pendingFees += fee;
             IERC20(usdc).safeTransferFrom(msg.sender, address(this), fee);

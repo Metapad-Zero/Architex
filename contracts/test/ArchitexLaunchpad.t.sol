@@ -64,13 +64,13 @@ contract ArchitexLaunchpadTest is LaunchpadV13Base {
 
     function _createToken() internal returns (address token) {
         vm.prank(alice);
-        token = pad.createToken("TestCoin", "TEST", "ipfs://abc", 0, alice, "", 0, 0);
+        token = pad.createToken("TestCoin", "TEST", "ipfs://abc", 0, alice, "", 0, 0, type(uint256).max);
     }
 
     /// @notice Buy enough USDC to graduate the curve. Returns the token.
     function _graduateToken() internal returns (address token) {
         vm.prank(alice);
-        token = pad.createToken("GradCoin", "GRAD", "ipfs://g", 0, alice, "", 0, 0);
+        token = pad.createToken("GradCoin", "GRAD", "ipfs://g", 0, alice, "", 0, 0, type(uint256).max);
         // A sell-out costs about 25,126 USDC; 30,000 in one shot graduates.
         vm.prank(alice);
         pad.buy(token, 30_000e6, 0, alice);
@@ -116,7 +116,7 @@ contract ArchitexLaunchpadTest is LaunchpadV13Base {
     function test_createToken_basic() public {
         uint256 feesBefore = pad.pendingFees();
         vm.prank(alice);
-        address token = pad.createToken("My Coin", "MCOIN", "ipfs://meta", 250, bob, "", 0, 0);
+        address token = pad.createToken("My Coin", "MCOIN", "ipfs://meta", 250, bob, "", 0, 0, type(uint256).max);
 
         // Launch fee accrued
         assertEq(pad.pendingFees(), feesBefore + LAUNCH_FEE);
@@ -160,13 +160,13 @@ contract ArchitexLaunchpadTest is LaunchpadV13Base {
 
     function test_createToken_initialBuy() public {
         vm.prank(alice);
-        address token = pad.createToken("Coin", "COIN", "ipfs://x", 0, alice, "", 10e6, 0);
+        address token = pad.createToken("Coin", "COIN", "ipfs://x", 0, alice, "", 10e6, 0, type(uint256).max);
         assertGt(IERC20(token).balanceOf(alice), 0);
     }
 
     function test_createToken_initialBuyZeroSkipsWithoutRevert() public {
         vm.prank(alice);
-        address token = pad.createToken("Coin", "COIN", "ipfs://x", 0, alice, "", 0, type(uint256).max);
+        address token = pad.createToken("Coin", "COIN", "ipfs://x", 0, alice, "", 0, type(uint256).max, type(uint256).max);
         assertEq(pad.curves(token).tokensSold, 0);
     }
 
@@ -186,32 +186,32 @@ contract ArchitexLaunchpadTest is LaunchpadV13Base {
     function test_createToken_invalidName_empty() public {
         vm.prank(alice);
         vm.expectRevert(IArchitexLaunchpad.InvalidName.selector);
-        pad.createToken("", "SYM", "ipfs://x", 0, alice, "", 0, 0);
+        pad.createToken("", "SYM", "ipfs://x", 0, alice, "", 0, 0, type(uint256).max);
     }
 
     function test_createToken_invalidName_tooLong() public {
         vm.prank(alice);
         vm.expectRevert(IArchitexLaunchpad.InvalidName.selector);
-        pad.createToken("123456789012345678901234567890123", "SYM", "ipfs://x", 0, alice, "", 0, 0); // 33 bytes
+        pad.createToken("123456789012345678901234567890123", "SYM", "ipfs://x", 0, alice, "", 0, 0, type(uint256).max); // 33 bytes
     }
 
     function test_createToken_invalidSymbol_empty() public {
         vm.prank(alice);
         vm.expectRevert(IArchitexLaunchpad.InvalidSymbol.selector);
-        pad.createToken("Name", "", "ipfs://x", 0, alice, "", 0, 0);
+        pad.createToken("Name", "", "ipfs://x", 0, alice, "", 0, 0, type(uint256).max);
     }
 
     function test_createToken_invalidSymbol_tooLong() public {
         vm.prank(alice);
         vm.expectRevert(IArchitexLaunchpad.InvalidSymbol.selector);
-        pad.createToken("Name", "12345678901", "ipfs://x", 0, alice, "", 0, 0); // 11 bytes
+        pad.createToken("Name", "12345678901", "ipfs://x", 0, alice, "", 0, 0, type(uint256).max); // 11 bytes
     }
 
     function test_createToken_invalidMetadata_tooLong() public {
         string memory longUri = new string(257);
         vm.prank(alice);
         vm.expectRevert(IArchitexLaunchpad.InvalidMetadata.selector);
-        pad.createToken("Name", "SYM", longUri, 0, alice, "", 0, 0);
+        pad.createToken("Name", "SYM", longUri, 0, alice, "", 0, 0, type(uint256).max);
     }
 
     function test_createToken_exactMaxLengths() public {
@@ -223,7 +223,7 @@ contract ArchitexLaunchpadTest is LaunchpadV13Base {
             uriBytes[i] = "a";
         }
         vm.prank(alice);
-        pad.createToken(name32, sym10, string(uriBytes), 0, alice, "", 0, 0); // should not revert
+        pad.createToken(name32, sym10, string(uriBytes), 0, alice, "", 0, 0, type(uint256).max); // should not revert
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -466,7 +466,7 @@ contract ArchitexLaunchpadTest is LaunchpadV13Base {
 
     function test_graduation_withDonatedUsdcAndSync() public {
         vm.prank(alice);
-        address token = pad.createToken("DonCoin", "DON", "ipfs://d", 0, alice, "", 0, 0);
+        address token = pad.createToken("DonCoin", "DON", "ipfs://d", 0, alice, "", 0, 0, type(uint256).max);
         address pairAddr = pad.curves(token).pair;
 
         // Attacker donates USDC and syncs the pair (reserves become (0, x))
@@ -487,7 +487,7 @@ contract ArchitexLaunchpadTest is LaunchpadV13Base {
 
     function test_exactFill_noDustNoOvercharge() public {
         vm.prank(alice);
-        address token = pad.createToken("ExactCoin", "EXACT", "ipfs://e", 0, alice, "", 0, 0);
+        address token = pad.createToken("ExactCoin", "EXACT", "ipfs://e", 0, alice, "", 0, 0, type(uint256).max);
 
         vm.prank(alice);
         pad.buy(token, 24_000e6, 0, alice);
@@ -526,7 +526,7 @@ contract ArchitexLaunchpadTest is LaunchpadV13Base {
         pad.buy(t1, 200e6, 0, bob);
 
         vm.prank(bob);
-        address t2 = pad.createToken("Coin2", "C2", "ipfs://2", 700, bob, "", 0, 0);
+        address t2 = pad.createToken("Coin2", "C2", "ipfs://2", 700, bob, "", 0, 0, type(uint256).max);
         vm.prank(alice);
         pad.buy(t2, 1_000e6, 0, alice);
 
@@ -535,7 +535,7 @@ contract ArchitexLaunchpadTest is LaunchpadV13Base {
 
     function test_solvency_afterBuysAndSells() public {
         vm.prank(alice);
-        address t1 = pad.createToken("Coin1", "C1", "", 300, alice, "", 0, 0);
+        address t1 = pad.createToken("Coin1", "C1", "", 300, alice, "", 0, 0, type(uint256).max);
         vm.prank(alice);
         pad.buy(t1, 500e6, 0, alice);
         uint256 halfTokens = IERC20(t1).balanceOf(alice) / 2;
@@ -553,7 +553,7 @@ contract ArchitexLaunchpadTest is LaunchpadV13Base {
         uint256 usdcIn = bound(uint256(rawUsdcIn), 1e4, 500e6); // 0.01–500 USDC
         uint16 creatorFeeBps = uint16(bound(uint256(rawCreatorFee), 0, 1000));
         vm.prank(alice);
-        address token = pad.createToken("Trip", "TRIP", "", creatorFeeBps, alice, "", 0, 0);
+        address token = pad.createToken("Trip", "TRIP", "", creatorFeeBps, alice, "", 0, 0, type(uint256).max);
 
         uint256 aliceBefore = usdc.balanceOf(alice);
         vm.prank(alice);
@@ -672,7 +672,7 @@ contract ArchitexLaunchpadTest is LaunchpadV13Base {
     function test_fee_launchFee() public {
         uint256 feesBefore = pad.pendingFees();
         vm.prank(alice);
-        pad.createToken("X", "X", "ipfs://x", 0, alice, "", 0, 0);
+        pad.createToken("X", "X", "ipfs://x", 0, alice, "", 0, 0, type(uint256).max);
         assertEq(pad.pendingFees(), feesBefore + LAUNCH_FEE);
     }
 
@@ -726,7 +726,7 @@ contract ArchitexLaunchpadTest is LaunchpadV13Base {
 
     function test_adminHasNoPowerOverCreatorFeesOrCurves() public {
         vm.prank(alice);
-        address token = pad.createToken("Mine", "MINE", "", 500, alice, "", 100e6, 0);
+        address token = pad.createToken("Mine", "MINE", "", 500, alice, "", 100e6, 0, type(uint256).max);
         uint256 owed = pad.pendingCreatorFees(token);
         assertGt(owed, 0);
         vm.prank(setter);
@@ -751,7 +751,7 @@ contract ArchitexLaunchpadTest is LaunchpadV13Base {
         usdc.mint(address(plugin), 1_000e6);
 
         vm.prank(alice);
-        address token = pad.createToken("Re", "RE", "", 100, address(plugin), "", 10e6, 0);
+        address token = pad.createToken("Re", "RE", "", 100, address(plugin), "", 10e6, 0, type(uint256).max);
         // onLaunch attempted buy, sell, collectCreatorFees, collectFees, createToken and a router buy
         assertEq(plugin.errorsLength(), 6);
         for (uint256 i = 0; i < 6; i++) {
@@ -773,7 +773,7 @@ contract ArchitexLaunchpadTest is LaunchpadV13Base {
     function test_reentrancy_createAndBuy() public {
         // createToken holds the guard and runs the first buy through the internal _buy
         vm.prank(alice);
-        address token = pad.createToken("Safe", "SAFE", "ipfs://s", 0, alice, "", 10e6, 0);
+        address token = pad.createToken("Safe", "SAFE", "ipfs://s", 0, alice, "", 10e6, 0, type(uint256).max);
         assertGt(IERC20(token).balanceOf(alice), 0);
     }
 
@@ -805,7 +805,7 @@ contract ArchitexLaunchpadTest is LaunchpadV13Base {
     function test_curvesPage_clamping() public {
         for (uint256 i = 0; i < 3; i++) {
             vm.prank(alice);
-            pad.createToken("T", "T", "ipfs://t", 0, alice, "", 0, 0);
+            pad.createToken("T", "T", "ipfs://t", 0, alice, "", 0, 0, type(uint256).max);
         }
         assertEq(pad.curvesPage(10, 5).length, 0);
         assertEq(pad.curvesPage(2, 5).length, 1);
@@ -814,7 +814,7 @@ contract ArchitexLaunchpadTest is LaunchpadV13Base {
 
     function test_quoteBuy_matchesBuy() public {
         vm.prank(alice);
-        address token = pad.createToken("Q", "Q", "", 321, alice, "", 0, 0);
+        address token = pad.createToken("Q", "Q", "", 321, alice, "", 0, 0, type(uint256).max);
         uint256 usdcIn = 100e6;
         (uint256 qTokens, uint256 qPlatform, uint256 qCreator, uint256 qSpent, bool qGrad) = pad.quoteBuy(token, usdcIn);
 
@@ -830,7 +830,7 @@ contract ArchitexLaunchpadTest is LaunchpadV13Base {
 
     function test_quoteSell_matchesSell() public {
         vm.prank(alice);
-        address token = pad.createToken("Q", "Q", "", 321, alice, "", 0, 0);
+        address token = pad.createToken("Q", "Q", "", 321, alice, "", 0, 0, type(uint256).max);
         vm.prank(alice);
         pad.buy(token, 100e6, 0, alice);
         uint256 bal = IERC20(token).balanceOf(alice);
@@ -858,7 +858,7 @@ contract LaunchpadInvariantTest is LaunchpadV13Base {
     function setUp() public override {
         super.setUp();
         vm.prank(alice);
-        token = pad.createToken("InvCoin", "INV", "ipfs://inv", 150, creatorWallet, "", 0, 0);
+        token = pad.createToken("InvCoin", "INV", "ipfs://inv", 150, creatorWallet, "", 0, 0, type(uint256).max);
 
         handler = new LaunchpadHandler(pad, usdc, token, alice);
 

@@ -115,8 +115,8 @@ contract LaunchpadAccountingInvariant is LaunchpadV13Base {
         (pad, pairFactory, router) = _deploySuite(address(usdc), 3e6);
         usdc.mint(address(this), 100e6);
         usdc.approve(address(pad), type(uint256).max);
-        address a = pad.createToken("First", "ONE", "", 0, creatorWallet, "", 0, 0);
-        address b = pad.createToken("Second", "TWO", "", 1000, creatorWallet, "", 0, 0);
+        address a = pad.createToken("First", "ONE", "", 0, creatorWallet, "", 0, 0, type(uint256).max);
+        address b = pad.createToken("Second", "TWO", "", 1000, creatorWallet, "", 0, 0, type(uint256).max);
         handler = new AccountingHandler(pad, usdc, a, b);
         targetContract(address(handler));
     }
@@ -301,7 +301,7 @@ contract ArchitexLaunchpadV11Test is LaunchpadV13Base {
     function test_graduatingOneCurveLeavesTheOtherSolvent() public {
         address a = _create();
         vm.prank(bob);
-        address b = pad.createToken("Second", "TWO", "", 400, bob, "", 0, 0);
+        address b = pad.createToken("Second", "TWO", "", 400, bob, "", 0, 0, type(uint256).max);
         vm.prank(bob);
         (uint256 bobTokens,) = pad.buy(b, 4_000e6, 0, bob);
         uint256 floatB = _realUsdc(b);
@@ -330,7 +330,7 @@ contract ArchitexLaunchpadV11Test is LaunchpadV13Base {
     function test_createTokenThatBuysOutTheWholeCurve() public {
         vm.prank(alice);
         uint256 gasBefore = gasleft();
-        address token = pad.createToken("AllIn", "ALL", "", 1000, alice, "", 30_000e6, CURVE_SUPPLY);
+        address token = pad.createToken("AllIn", "ALL", "", 1000, alice, "", 30_000e6, CURVE_SUPPLY, type(uint256).max);
         uint256 gasUsed = gasBefore - gasleft();
         emit log_named_uint("gas: createToken + createPair + sell-out + graduation", gasUsed);
         IArchitexLaunchpad.Curve memory c = pad.curves(token);
@@ -392,7 +392,7 @@ contract ArchitexLaunchpadV11Test is LaunchpadV13Base {
         usdc.setBlocked(feeTo, true);
 
         vm.prank(alice);
-        address token = pad.createToken("Frozen", "ICE", "", 0, alice, "", 50e6, 0);
+        address token = pad.createToken("Frozen", "ICE", "", 0, alice, "", 50e6, 0, type(uint256).max);
         vm.prank(alice);
         (uint256 tokens,) = pad.buy(token, 200e6, 0, alice);
         vm.prank(alice);
@@ -641,7 +641,7 @@ contract ArchitexLaunchpadV11Test is LaunchpadV13Base {
         LaunchPairFactory f2 = new LaunchPairFactory(address(pad2));
         LaunchRouter r2 = new LaunchRouter(address(pad2), address(f2), address(hooked));
         pad2.initialize(address(f2), address(r2));
-        address token = pad2.createToken("Hook", "HOOK", "", 0, alice, "", 0, 0);
+        address token = pad2.createToken("Hook", "HOOK", "", 0, alice, "", 0, 0, type(uint256).max);
         ReentrantSeller attacker = new ReentrantSeller(pad2);
         hooked.mint(address(attacker), 1_000e6);
         attacker.prime(token, IERC20(address(hooked)), 100e6);
@@ -654,7 +654,7 @@ contract ArchitexLaunchpadV11Test is LaunchpadV13Base {
         vm.prank(setter);
         pad.setLaunchFee(5e6);
         vm.prank(alice);
-        address token = pad.createToken("Paid", "PAID", "", 0, alice, "", 30_000e6, CURVE_SUPPLY);
+        address token = pad.createToken("Paid", "PAID", "", 0, alice, "", 30_000e6, CURVE_SUPPLY, type(uint256).max);
         assertTrue(pad.curves(token).graduated);
         assertEq(pad.pendingFees(), 5e6 + 125628141);
         assertEq(usdc.balanceOf(address(pad)), pad.pendingFees(), "after graduation only fees remain");
@@ -666,7 +666,7 @@ contract ArchitexLaunchpadV11Test is LaunchpadV13Base {
     function test_allLiquidityIsLockedAndGasIsBounded() public {
         vm.prank(alice);
         uint256 gasBefore = gasleft();
-        address token = pad.createToken("Gas", "GAS", "", 0, alice, "", 30_000e6, CURVE_SUPPLY);
+        address token = pad.createToken("Gas", "GAS", "", 0, alice, "", 30_000e6, CURVE_SUPPLY, type(uint256).max);
         uint256 gasUsed = gasBefore - gasleft();
         emit log_named_uint("gas: create + pair + sell-out + graduation", gasUsed);
         // Measured 2.92M (token + launch pair deployed, sell-out, graduation): well inside a 30M Arc block

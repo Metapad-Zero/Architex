@@ -199,12 +199,12 @@ contract ArchitexLaunchpadV13Test is LaunchpadV13Base {
     function test_creatorFee_aboveMaxReverts() public {
         vm.prank(alice);
         vm.expectRevert(IArchitexLaunchpad.CreatorFeeTooHigh.selector);
-        pad.createToken("Greedy", "GRDY", "", 1001, alice, "", 0, 0);
+        pad.createToken("Greedy", "GRDY", "", 1001, alice, "", 0, 0, type(uint256).max);
         vm.prank(alice);
         vm.expectRevert(IArchitexLaunchpad.CreatorFeeTooHigh.selector);
-        pad.createToken("Greedy", "GRDY", "", type(uint16).max, alice, "", 0, 0);
+        pad.createToken("Greedy", "GRDY", "", type(uint16).max, alice, "", 0, 0, type(uint256).max);
         vm.prank(alice);
-        pad.createToken("Fair", "FAIR", "", 1000, alice, "", 0, 0); // the edge is allowed
+        pad.createToken("Fair", "FAIR", "", 1000, alice, "", 0, 0, type(uint256).max); // the edge is allowed
     }
 
     function test_creatorFee_dustBuysAndSellsRevertCleanly() public {
@@ -233,7 +233,7 @@ contract ArchitexLaunchpadV13Test is LaunchpadV13Base {
 
     function test_creatorsOwnFirstBuyPaysTheCreatorFee() public {
         vm.prank(alice);
-        address token = pad.createToken("Mine", "MINE", "", 700, alice, "", 1_000e6, 0);
+        address token = pad.createToken("Mine", "MINE", "", 700, alice, "", 1_000e6, 0, type(uint256).max);
         assertEq(pad.pendingCreatorFees(token), _divCeil(1_000e6 * 700, BPS));
         assertEq(pad.pendingFees(), _divCeil(1_000e6 * 50, BPS));
     }
@@ -276,7 +276,7 @@ contract ArchitexLaunchpadV13Test is LaunchpadV13Base {
     function test_collect_contractWithoutErc165GetsAPlainTransferAndNoHooks() public {
         HooklessRecorder wallet = new HooklessRecorder();
         vm.prank(alice);
-        address token = pad.createToken("Safe", "SAFE", "", 300, address(wallet), "hello", 50e6, 0);
+        address token = pad.createToken("Safe", "SAFE", "", 300, address(wallet), "hello", 50e6, 0, type(uint256).max);
         uint256 owed = _accrue(token, 1_000e6);
         pad.collectCreatorFees(token);
         assertEq(usdc.balanceOf(address(wallet)), owed);
@@ -287,7 +287,7 @@ contract ArchitexLaunchpadV13Test is LaunchpadV13Base {
     function test_collect_lyingErc165IsTreatedAsAPlainAddress() public {
         LyingPlugin liar = new LyingPlugin();
         vm.prank(alice);
-        address token = pad.createToken("Liar", "LIE", "", 300, address(liar), "", 0, 0);
+        address token = pad.createToken("Liar", "LIE", "", 300, address(liar), "", 0, 0, type(uint256).max);
         uint256 owed = _accrue(token, 1_000e6);
         pad.collectCreatorFees(token);
         assertEq(usdc.balanceOf(address(liar)), owed);
@@ -297,7 +297,7 @@ contract ArchitexLaunchpadV13Test is LaunchpadV13Base {
     function test_collect_gasBurningErc165ProbeIsTreatedAsAPlainAddress() public {
         GasGuzzlerPlugin guzzler = new GasGuzzlerPlugin();
         vm.prank(alice);
-        address token = pad.createToken("Guzzle", "GUZ", "", 300, address(guzzler), "", 10e6, 0);
+        address token = pad.createToken("Guzzle", "GUZ", "", 300, address(guzzler), "", 10e6, 0, type(uint256).max);
         uint256 owed = _accrue(token, 1_000e6);
         pad.collectCreatorFees(token);
         assertEq(usdc.balanceOf(address(guzzler)), owed);
@@ -444,9 +444,9 @@ contract ArchitexLaunchpadV13Test is LaunchpadV13Base {
     function test_plugin_cannotBeZeroOrTheLaunchpad() public {
         vm.startPrank(alice);
         vm.expectRevert(IArchitexLaunchpad.InvalidPlugin.selector);
-        pad.createToken("Zero", "ZERO", "", 100, address(0), "", 0, 0);
+        pad.createToken("Zero", "ZERO", "", 100, address(0), "", 0, 0, type(uint256).max);
         vm.expectRevert(IArchitexLaunchpad.InvalidPlugin.selector);
-        pad.createToken("Self", "SELF", "", 100, address(pad), "", 0, 0);
+        pad.createToken("Self", "SELF", "", 100, address(pad), "", 0, 0, type(uint256).max);
         vm.stopPrank();
     }
 
@@ -471,7 +471,7 @@ contract ArchitexLaunchpadV13Test is LaunchpadV13Base {
     function test_onLaunch_runsAfterRegistrationAndBeforeTheFirstBuy() public {
         ExactPlugin plugin = new ExactPlugin(pad);
         vm.prank(alice);
-        address token = pad.createToken("Hooked", "HOOK", "", 300, address(plugin), hex"c0ffee", 500e6, 0);
+        address token = pad.createToken("Hooked", "HOOK", "", 300, address(plugin), hex"c0ffee", 500e6, 0, type(uint256).max);
         assertEq(plugin.launches(), 1);
         assertEq(plugin.lastToken(), token);
         assertEq(plugin.lastCreator(), alice);
@@ -488,7 +488,7 @@ contract ArchitexLaunchpadV13Test is LaunchpadV13Base {
         uint256 before = pad.tokensLength();
         vm.prank(alice);
         vm.expectRevert(bytes("onLaunch refuses"));
-        pad.createToken("No", "NO", "", 300, address(plugin), "", 0, 0);
+        pad.createToken("No", "NO", "", 300, address(plugin), "", 0, 0, type(uint256).max);
         assertEq(pad.tokensLength(), before);
     }
 
@@ -496,9 +496,9 @@ contract ArchitexLaunchpadV13Test is LaunchpadV13Base {
         HooklessRecorder hookless = new HooklessRecorder();
         LyingPlugin liar = new LyingPlugin();
         vm.startPrank(alice);
-        pad.createToken("A", "A", "", 100, address(hookless), "data", 10e6, 0);
-        pad.createToken("B", "B", "", 100, address(liar), "data", 10e6, 0);
-        pad.createToken("C", "C", "", 100, bob, "data", 10e6, 0); // an EOA
+        pad.createToken("A", "A", "", 100, address(hookless), "data", 10e6, 0, type(uint256).max);
+        pad.createToken("B", "B", "", 100, address(liar), "data", 10e6, 0, type(uint256).max);
+        pad.createToken("C", "C", "", 100, bob, "data", 10e6, 0, type(uint256).max); // an EOA
         vm.stopPrank();
         assertEq(hookless.hookCalls(), 0);
         assertEq(liar.hookCalls(), 0);
@@ -510,7 +510,7 @@ contract ArchitexLaunchpadV13Test is LaunchpadV13Base {
         vm.expectEmit(true, true, true, true, address(pad));
         emit TokenCreated(predicted, alice, creatorWallet, predictedPair, 420, "Evt", "EVT", "ipfs://e");
         vm.prank(alice);
-        pad.createToken("Evt", "EVT", "ipfs://e", 420, creatorWallet, "", 0, 0);
+        pad.createToken("Evt", "EVT", "ipfs://e", 420, creatorWallet, "", 0, 0, type(uint256).max);
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -525,7 +525,7 @@ contract ArchitexLaunchpadV13Test is LaunchpadV13Base {
         // createToken reverts until initialize has run
         vm.prank(alice);
         vm.expectRevert(IArchitexLaunchpad.NotInitialized.selector);
-        p.createToken("Early", "EARLY", "", 0, alice, "", 0, 0);
+        p.createToken("Early", "EARLY", "", 0, alice, "", 0, 0, type(uint256).max);
 
         vm.prank(mallory);
         vm.expectRevert(IArchitexLaunchpad.Forbidden.selector);
@@ -554,7 +554,7 @@ contract ArchitexLaunchpadV13Test is LaunchpadV13Base {
         // and now it launches
         vm.startPrank(alice);
         usdc.approve(address(p), type(uint256).max);
-        p.createToken("Now", "NOW", "", 0, alice, "", 1e6, 0);
+        p.createToken("Now", "NOW", "", 0, alice, "", 1e6, 0, type(uint256).max);
         vm.stopPrank();
     }
 
@@ -787,7 +787,7 @@ contract ArchitexLaunchpadV13Test is LaunchpadV13Base {
         assertEq(pad.pendingCreatorFees(unknown), 0);
 
         vm.prank(alice);
-        address token = pad.createToken("V", "V", "", 333, bob, "", 0, 0);
+        address token = pad.createToken("V", "V", "", 333, bob, "", 0, 0, type(uint256).max);
         assertEq(pad.pluginOf(token), bob);
         assertEq(pad.creatorOf(token), alice);
         assertEq(pad.creatorFeeBpsOf(token), 333);
@@ -845,7 +845,7 @@ contract ArchitexLaunchpadV13Test is LaunchpadV13Base {
         HeavyLaunchPlugin heavy = new HeavyLaunchPlugin(60); // 60 fresh storage slots: ~1.33M gas
         vm.prank(alice);
         uint256 gasBefore = gasleft();
-        address token = pad.createToken{gas: 5_000_000}("Heavy", "HVY", "", 1000, address(heavy), "", 30_000e6, 0);
+        address token = pad.createToken{gas: 5_000_000}("Heavy", "HVY", "", 1000, address(heavy), "", 30_000e6, 0, type(uint256).max);
         uint256 used = gasBefore - gasleft();
         emit log_named_uint("gas: create + 1.3M onLaunch + sell-out + graduation", used);
         assertTrue(pad.isGraduated(token));
@@ -921,5 +921,57 @@ contract ArchitexLaunchpadV13Test is LaunchpadV13Base {
         assertEq(t.claimFor(alice), a, "anyone can claim for a holder");
         assertEq(usdc.balanceOf(alice), 100_000_000e6 - 3_000e6 + a);
         _assertSolvent();
+    }
+}
+
+/// @notice The creator's cap on the launch fee: the admin can raise the fee, but not above what a pending launch agreed to.
+contract LaunchFeeGuardTest is LaunchpadV13Base {
+    function setUp() public override {
+        super.setUp();
+        vm.prank(setter);
+        pad.setLaunchFee(5e6);
+    }
+
+    function test_createToken_revertsWhenLaunchFeeRaisedAboveTheCreatorsMax() public {
+        vm.prank(alice);
+        vm.expectRevert(IArchitexLaunchpad.LaunchFeeAboveMax.selector);
+        pad.createToken("Coin", "COIN", "ipfs://x", 0, alice, "", 0, 0, 1e6);
+    }
+
+    function test_createToken_chargesExactlyTheCurrentFeeWhenWithinTheMax() public {
+        uint256 before = usdc.balanceOf(alice);
+        uint256 pendingBefore = pad.pendingFees();
+        vm.prank(alice);
+        pad.createToken("Coin", "COIN", "ipfs://x", 0, alice, "", 0, 0, 5e6);
+        assertEq(before - usdc.balanceOf(alice), 5e6);
+        assertEq(pad.pendingFees() - pendingBefore, 5e6);
+    }
+
+    function test_createToken_zeroMaxWorksOnlyWhileTheFeeIsZero() public {
+        vm.prank(setter);
+        pad.setLaunchFee(0);
+        vm.prank(alice);
+        pad.createToken("Coin", "COIN", "ipfs://x", 0, alice, "", 0, 0, 0);
+
+        vm.prank(setter);
+        pad.setLaunchFee(1);
+        vm.prank(alice);
+        vm.expectRevert(IArchitexLaunchpad.LaunchFeeAboveMax.selector);
+        pad.createToken("Coin2", "COIN2", "ipfs://y", 0, alice, "", 0, 0, 0);
+    }
+
+    function testFuzz_createToken_neverChargesAboveTheMax(uint96 fee, uint96 maxFee) public {
+        fee = uint96(bound(fee, 0, pad.MAX_LAUNCH_FEE()));
+        vm.prank(setter);
+        pad.setLaunchFee(fee);
+        uint256 before = usdc.balanceOf(alice);
+        vm.prank(alice);
+        if (fee > maxFee) {
+            vm.expectRevert(IArchitexLaunchpad.LaunchFeeAboveMax.selector);
+            pad.createToken("Coin", "COIN", "ipfs://x", 0, alice, "", 0, 0, maxFee);
+        } else {
+            pad.createToken("Coin", "COIN", "ipfs://x", 0, alice, "", 0, 0, maxFee);
+            assertLe(before - usdc.balanceOf(alice), maxFee);
+        }
     }
 }

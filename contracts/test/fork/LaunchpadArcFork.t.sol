@@ -80,7 +80,7 @@ contract LaunchpadArcForkTest is Test {
 
     function _create() internal returns (address token) {
         vm.prank(alice);
-        token = pad.createToken("Fork", "FORK", "", 200, alice, "", 0, 0);
+        token = pad.createToken("Fork", "FORK", "", 200, alice, "", 0, 0, type(uint256).max);
     }
 
     function test_fork_createTokenMakesItsLaunchPair() public onlyFork {
@@ -150,7 +150,7 @@ contract LaunchpadArcForkTest is Test {
 
     function test_fork_sellRoundTripOnTheCurve() public onlyFork {
         vm.prank(alice);
-        address token = pad.createToken("Fork", "FORK", "", 0, alice, "", 0, 0);
+        address token = pad.createToken("Fork", "FORK", "", 0, alice, "", 0, 0, type(uint256).max);
         vm.startPrank(alice);
         (uint256 tokens,) = pad.buy(token, 100e6, 0, alice);
         assertEq(tokens, 12585726430898500955823408);

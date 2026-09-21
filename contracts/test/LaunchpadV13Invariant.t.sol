@@ -197,11 +197,11 @@ contract LaunchpadV13SolvencyInvariant is LaunchpadV13Base {
         liar = new LyingPlugin();
 
         vm.startPrank(alice);
-        tokenList.push(pad.createToken("Zero", "ZERO", "", 0, creatorWallet, "", 0, 0));
-        tokenList.push(pad.createToken("Max", "MAX", "", 1000, address(exact), "", 0, 0));
-        tokenList.push(pad.createToken("Flaky", "FLKY", "", 333, address(flaky), "", 0, 0));
-        tokenList.push(pad.createToken("Share", "SHARE", "", 50, address(distributor), "", 0, 0));
-        tokenList.push(pad.createToken("Liar", "LIAR", "", 777, address(liar), "", 0, 0));
+        tokenList.push(pad.createToken("Zero", "ZERO", "", 0, creatorWallet, "", 0, 0, type(uint256).max));
+        tokenList.push(pad.createToken("Max", "MAX", "", 1000, address(exact), "", 0, 0, type(uint256).max));
+        tokenList.push(pad.createToken("Flaky", "FLKY", "", 333, address(flaky), "", 0, 0, type(uint256).max));
+        tokenList.push(pad.createToken("Share", "SHARE", "", 50, address(distributor), "", 0, 0, type(uint256).max));
+        tokenList.push(pad.createToken("Liar", "LIAR", "", 777, address(liar), "", 0, 0, type(uint256).max));
         vm.stopPrank();
         // One token starts graduated so pool trades run from the first call
         _graduate(tokenList[1]);
@@ -410,7 +410,7 @@ contract LaunchTokenDividendInvariant is LaunchpadV13Base {
         super.setUp();
         DistributePlugin plugin = new DistributePlugin(IERC20(address(usdc)));
         vm.prank(alice);
-        token = ILaunchToken(pad.createToken("Dividend", "DIV", "", 500, address(plugin), "", 0, 0));
+        token = ILaunchToken(pad.createToken("Dividend", "DIV", "", 500, address(plugin), "", 0, 0, type(uint256).max));
         actors.push(makeAddr("holder1"));
         actors.push(makeAddr("holder2"));
         actors.push(makeAddr("holder3"));

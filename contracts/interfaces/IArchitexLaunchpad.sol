@@ -67,6 +67,8 @@ interface IArchitexLaunchpad is IArchitexLaunchpadLite {
     error InvalidSymbol();
     error InvalidMetadata();
     error LaunchFeeTooHigh();
+    /// @notice The launch fee is above the most the creator agreed to pay (it was raised after they signed).
+    error LaunchFeeAboveMax();
     error CreatorFeeTooHigh();
     /// @notice The plugin is the zero address or the launchpad itself.
     error InvalidPlugin();
@@ -104,6 +106,7 @@ interface IArchitexLaunchpad is IArchitexLaunchpadLite {
     /// @param plugin where creator fees go, any address but zero and the launchpad, locked forever
     /// @param pluginData passed to the plugin's onLaunch (only when it declares IArchitexFeePlugin)
     /// @param initialBuyUsdc gross USDC the creator spends on the curve in the same transaction (0 for none)
+    /// @param maxLaunchFee the most launch fee the creator will pay; reverts LaunchFeeAboveMax if the fee was raised above it
     function createToken(
         string calldata name,
         string calldata symbol,
@@ -112,7 +115,8 @@ interface IArchitexLaunchpad is IArchitexLaunchpadLite {
         address plugin,
         bytes calldata pluginData,
         uint256 initialBuyUsdc,
-        uint256 minTokensOut
+        uint256 minTokensOut,
+        uint256 maxLaunchFee
     ) external returns (address token);
 
     /// @return usdcOut USDC received after both fees
