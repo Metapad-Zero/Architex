@@ -43,9 +43,9 @@ contract GraduationE2ETest is E2EBase {
         // The curve is closed for good.
         vm.startPrank(bob);
         vm.expectRevert(IArchitexLaunchpad.CurveGraduated.selector);
-        pad.buy(token, 1e6, 0, bob);
+        pad.buy(token, 1e6, 0, bob, _now());
         vm.expectRevert(IArchitexLaunchpad.CurveGraduated.selector);
-        pad.sell(token, 1e18, 0, bob);
+        pad.sell(token, 1e18, 0, bob, _now());
         vm.stopPrank();
         // A direct swap is refused: only the router trades the pool (V13-SPEC §6.5).
         vm.prank(bob);
@@ -100,8 +100,7 @@ contract GraduationE2ETest is E2EBase {
 
     function test_graduation_holders() public {
         address token = _graduationScenario(Kind.Holder, 250);
-        _dripEvery(token, PERIOD + KEEPER_INTERVAL); // a keeper drips hourly
-        assertEq(holder.unreleased(token), 0, "a day after the last delivery, everything is out");
+        _finishStream(token); // past the stream's end, everything delivered is claimable
         _claim(token, bob);
         _claim(token, erin);
         _assertSystem();
@@ -112,8 +111,7 @@ contract GraduationE2ETest is E2EBase {
         _nextBlock();
         _run(token);
         _collect(token);
-        _warp(PERIOD);
-        _drip(token);
+        _finishStream(token);
         _releaseAll(token);
         _assertSystem();
     }

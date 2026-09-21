@@ -23,10 +23,9 @@ contract FailureIsolationE2ETest is E2EBase {
             _buy(bob, good[i], 1_500e6);
             _collect(good[i]);
         }
-        _nextBlock();
+        _warp(RUN_INTERVAL);
         _run(good[1]);
-        _warp(PERIOD);
-        _drip(good[2]);
+        _claim(good[2], bob); // the Holders token's stream pays out
         _releaseAll(good[0]);
     }
 
@@ -122,31 +121,31 @@ contract FailureIsolationE2ETest is E2EBase {
         _assertSystem();
     }
 
-    /// @dev If USDC blocklists one token's contract (its dividend pool), the Holder plugin cannot distribute for that
-    ///      token: its drips revert, and so does any collection that has an old due to release first. Its fees wait at
-    ///      the launchpad and in the plugin; another token on the same Holder plugin is unaffected; trading goes on.
-    function test_isolation_blocklistedTokenStrandsOnlyItsOwnStream() public {
+    /// @dev If USDC blocklists one token's contract (its dividend pool), the Holders plugin cannot pass that token's
+    ///      fees into its distribute: that token's collections revert and its fees wait at the launchpad [D10], and its
+    ///      holders cannot claim. Another token on the same Holders plugin is unaffected, and trading goes on.
+    function test_isolation_blocklistedTokenStrandsOnlyItsOwnFees() public {
         address a = _launch(Kind.Holder, 1000, 2_000e6);
         address b = _launch(Kind.Holder, 1000, 2_000e6);
         _collect(a);
         _collect(b);
+        _warp(6 hours);
         usdc.setBlocked(a, true);
 
-        _warp(12 hours);
-        assertGt(holder.releasable(a), 0);
-        vm.prank(keeper);
-        vm.expectRevert(bytes("blocklisted"));
-        holder.drip(a);
         _curveBuy(bob, a, 3_000e6); // trading the blocked token still works
-        _assertStranded(a, bytes("blocklisted")); // its collection must release the old due first, and cannot
+        _assertStranded(a, bytes("blocklisted"));
+        assertGt(ILaunchToken(a).claimable(alice), 0, "earned, but cannot be paid out");
+        vm.prank(alice);
+        vm.expectRevert(bytes("blocklisted"));
+        ILaunchToken(a).claim();
 
-        _drip(b);
         _curveBuy(bob, b, 3_000e6);
         _collect(b);
-        assertEq(usdc.balanceOf(address(holder)), holder.unreleased(a) + holder.unreleased(b));
+        _claim(b, alice);
+        assertEq(usdc.balanceOf(address(holder)), 0, "the plugin holds nothing either way");
 
         usdc.setBlocked(a, false);
-        _drip(a);
+        _claim(a, alice);
         _collect(a);
         _assertSystem();
     }

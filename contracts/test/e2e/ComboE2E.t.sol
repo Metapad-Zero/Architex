@@ -61,7 +61,9 @@ contract ComboE2ETest is E2EBase {
         assertEq(combo.previewSplit(token, owed), expect, "previewSplit is the documented rounding");
         _collect(token); // checks each entry got exactly its slice
         assertEq(buyback.usdcHeld(token), expect[0]);
-        assertEq(holder.unreleased(token), expect[1]);
+        assertEq(holder.totalDistributed(token), expect[1]);
+        assertEq(ILaunchToken(token).totalDistributed(), expect[1], "the holder slice went into the token's stream");
+        assertEq(usdc.balanceOf(address(holder)), 0);
 
         // Buyback: runs, burns; its trade's creator fee comes back through the Combo, split again.
         _run(token);
@@ -69,9 +71,8 @@ contract ComboE2ETest is E2EBase {
         assertGt(back, 0);
         _collect(token);
 
-        // Holders: dripped hourly, a day later everything delivered to the holder slice is out.
-        _dripEvery(token, PERIOD + KEEPER_INTERVAL);
-        assertEq(holder.unreleased(token), 0);
+        // Holders: past the stream's end everything delivered to the holder slice is claimable.
+        _finishStream(token);
         _claim(token, bob);
 
         // Graduate, trade in the pool, and run the whole thing again.
@@ -82,8 +83,7 @@ contract ComboE2ETest is E2EBase {
         _nextBlock();
         _run(token);
         _collect(token);
-        _warp(PERIOD);
-        _drip(token);
+        _finishStream(token);
         _assertSystem();
     }
 
@@ -104,13 +104,12 @@ contract ComboE2ETest is E2EBase {
         uint256[] memory expect = _expectedSlices(owed, bps);
         _collect(token);
         assertEq(split.totalReceived(token), expect[0]);
-        assertEq(holder.unreleased(token), expect[1]);
+        assertEq(ILaunchToken(token).totalDistributed(), expect[1]);
 
         _releaseAll(token);
         assertEq(split.released(token, carol), expect[0] * 2 / 3);
         assertEq(split.released(token, dave), expect[0] / 3);
-        _warp(PERIOD);
-        _drip(token);
+        _finishStream(token);
         _claim(token, bob);
         _graduateVia(frank, token);
         _collect(token);
@@ -253,9 +252,9 @@ contract ComboE2ETest is E2EBase {
         if (!pad.isGraduated(token)) _graduateVia(carol, token);
         _collect(token);
         _nextBlock();
-        if (buyback.usdcHeld(token) > 2) _run(token);
-        _warp(PERIOD);
-        _drip(token);
+        (uint256 offer,) = buyback.previewRun(token);
+        if (offer != 0) _run(token);
+        _finishStream(token);
         _releaseAll(token);
         _assertSystem();
     }

@@ -110,20 +110,20 @@ contract GasE2ETest is E2EBase {
         t[5] = _launch(Kind.Combo, 1000, 0);
         t[6] = _launchWith(alice, 1000, address(combo), _heaviestComboData(), 0);
 
-        // Curve buy and sell (a first-time buyer, then a partial sell).
+        // Curve buy and sell with no dividend stream (a first-time buyer, then a partial sell).
         _cool(t[4]);
         vm.prank(bob);
         uint256 g = gasleft();
-        pad.buy(t[4], 5_000e6, 0, bob);
-        _report("curve buy", g - gasleft(), 132);
+        pad.buy(t[4], 5_000e6, 0, bob, _now());
+        _report("curve buy (no stream)", g - gasleft(), 164);
         uint256 half = IERC20(t[4]).balanceOf(bob) / 2;
         _cool(t[4]);
         vm.prank(bob);
         g = gasleft();
-        pad.sell(t[4], half, 0, bob);
-        _report("curve sell", g - gasleft(), 132);
+        pad.sell(t[4], half, 0, bob, _now());
+        _report("curve sell (no stream)", g - gasleft(), 164);
 
-        // Collection into each plugin (first delivery), then a second Holders delivery that also releases.
+        // Collection into each plugin. For Holders the first delivery starts the token's stream.
         for (uint256 i; i < t.length; ++i) {
             if (i != 4) _curveBuy(carol, t[i], 5_000e6);
         }
@@ -131,37 +131,48 @@ contract GasE2ETest is E2EBase {
         _gasCollect("collect -> Safe-like wallet (transfer)", t[1]);
         _gasCollect("collect -> Split.onFees", t[2]);
         _gasCollect("collect -> Buyback.onFees", t[3]);
-        _gasCollect("collect -> Holders.onFees (first delivery)", t[4]);
+        _gasCollect("collect -> Holders.onFees (starts the stream)", t[4]);
         _gasCollect("collect -> Combo.onFees (4 entries)", t[5]);
         _gasCollect("collect -> Combo.onFees (5 entries, 20-payee Split)", t[6]);
-        _warp(6 hours);
-        _curveBuy(carol, t[4], 1_000e6);
-        _gasCollect("collect -> Holders.onFees (mid-stream: releases, distributes)", t[4]);
 
-        // Keeper and holder actions.
-        _cool(t[3]);
-        vm.prank(keeper);
-        g = gasleft();
-        buyback.run(t[3]);
-        _report("Buyback.run (curve)", g - gasleft(), 36);
-
+        // With the stream running: trades, transfers and claims pay for the accrual.
         _warp(6 hours);
         _cool(t[4]);
-        vm.prank(keeper);
+        vm.prank(carol);
         g = gasleft();
-        holder.drip(t[4]);
-        _report("Holders.drip", g - gasleft(), 36);
-        _warp(6 hours);
+        pad.buy(t[4], 1_000e6, 0, carol, _now());
+        _report("curve buy (stream running)", g - gasleft(), 164);
         _cool(t[4]);
         vm.prank(bob);
         g = gasleft();
-        holder.dripAndClaim(t[4]);
-        _report("Holders.dripAndClaim", g - gasleft(), 36);
+        pad.sell(t[4], half / 2, 0, bob, _now());
+        _report("curve sell (stream running)", g - gasleft(), 164);
+        _warp(1 hours);
+        _cool(t[4]);
+        vm.prank(bob);
+        g = gasleft();
+        IERC20(t[4]).transfer(dave, 1_000e18);
+        _report("LaunchToken.transfer (stream running)", g - gasleft(), 68);
+        _addHolder(t[4], dave);
+        _gasCollect("collect -> Holders.onFees (into a running stream)", t[4]);
+        _warp(1 hours);
         _cool(t[4]);
         vm.prank(carol);
         g = gasleft();
         ILaunchToken(t[4]).claim();
-        _report("LaunchToken.claim", g - gasleft(), 4);
+        _report("LaunchToken.claim (stream running)", g - gasleft(), 4);
+        _cool(t[4]);
+        vm.prank(mallory);
+        g = gasleft();
+        ILaunchToken(t[4]).claimFor(bob);
+        _report("LaunchToken.claimFor", g - gasleft(), 36);
+
+        // Keeper actions.
+        _cool(t[3]);
+        vm.prank(keeper);
+        g = gasleft();
+        buyback.run(t[3]);
+        _report("Buyback.run (curve, first run)", g - gasleft(), 36);
 
         _cool(t[2]);
         g = gasleft();
@@ -172,8 +183,8 @@ contract GasE2ETest is E2EBase {
         _cool(t[3]);
         vm.prank(dave);
         g = gasleft();
-        pad.buy(t[3], 1_000_000e6, 0, dave);
-        _report("graduating buy (exact fill + seed + LP mint)", g - gasleft(), 132);
+        pad.buy(t[3], 1_000_000e6, 0, dave, _now());
+        _report("graduating buy (exact fill + seed + LP mint)", g - gasleft(), 164);
         assertTrue(pad.isGraduated(t[3]));
 
         // Router buy and sell in the pool.
@@ -190,12 +201,27 @@ contract GasE2ETest is E2EBase {
         _report("router sell", g - gasleft(), 164);
 
         _collect(t[3]);
-        _nextBlock();
+        _warp(RUN_INTERVAL);
         _cool(t[3]);
         vm.prank(keeper);
         g = gasleft();
         buyback.run(t[3]);
         _report("Buyback.run (pool, through the router)", g - gasleft(), 36);
+
+        // The Holders token graduates with its stream running; pool trades pay for the accrual too.
+        _curveBuy(frank, t[4], 1_000_000e6);
+        _warp(1 hours);
+        _cool(t[4]);
+        vm.prank(erin);
+        g = gasleft();
+        router.buy(t[4], 2_000e6, 0, erin, _now());
+        _report("router buy (stream running)", g - gasleft(), 164);
+        uint256 quarter = IERC20(t[4]).balanceOf(frank) / 4;
+        _cool(t[4]);
+        vm.prank(frank);
+        g = gasleft();
+        router.sell(t[4], quarter, 0, frank, _now());
+        _report("router sell (stream running)", g - gasleft(), 164);
 
         // The heaviest curve sell-out: a run that crosses graduation.
         address x = _launch(Kind.Buyback, 500, 0);

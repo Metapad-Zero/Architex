@@ -96,9 +96,12 @@ contract FeeRoutingE2ETest is E2EBase {
     function test_feeRouting_holders() public {
         address token = _lifecycle(Kind.Holder, 600);
         _expectHooks(token, true);
-        // All in the same block: every unit is still streaming, nothing distributed yet.
-        assertEq(holder.unreleased(token), ghostDelivered[token]);
-        assertEq(ILaunchToken(token).totalDistributed(), 0);
+        // Every unit went straight into the token's stream; all in one block, so none of it has been earned yet.
+        assertEq(ILaunchToken(token).totalDistributed(), ghostDelivered[token]);
+        assertEq(holder.usdcHeld(token), 0);
+        assertEq(usdc.balanceOf(address(holder)), 0);
+        assertEq(_claimableSum(token), 0, "nothing earned in the delivering block");
+        assertApproxEqAbs(ILaunchToken(token).undistributed(), ghostDelivered[token], 1, "all of it still to stream");
     }
 
     function test_feeRouting_combo() public {
@@ -150,6 +153,31 @@ contract FeeRoutingE2ETest is E2EBase {
         assertEq(split.totalReceived(a), 0);
         _collect(a);
         assertEq(split.totalReceived(a), aOwed);
+        _assertSystem();
+    }
+
+    // ─── Curve deadlines (V13-SPEC §5 [review]) ────────────────────────────────
+
+    /// @dev A curve buy or sell mined after its deadline reverts Expired and changes nothing; at the deadline it runs.
+    ///      (Every curve trade in these tests passes the tightest deadline, the block's own time.)
+    function test_curveDeadlines_aDelayedTradeExpiresAndChangesNothing() public {
+        address token = _launch(Kind.Split, 500, 1_000e6);
+        uint256 signedAt = _now();
+        _warp(10 minutes); // mined late
+        uint256 pending = pad.pendingFees();
+        uint256 creatorPending = pad.pendingCreatorFees(token);
+        uint256 vUsdc = pad.virtualUsdcOf(token);
+        vm.startPrank(alice);
+        vm.expectRevert(IArchitexLaunchpad.Expired.selector);
+        pad.buy(token, 1_000e6, 0, alice, signedAt);
+        vm.expectRevert(IArchitexLaunchpad.Expired.selector);
+        pad.sell(token, 1_000e18, 0, alice, signedAt);
+        vm.stopPrank();
+        assertEq(pad.pendingFees(), pending);
+        assertEq(pad.pendingCreatorFees(token), creatorPending);
+        assertEq(pad.virtualUsdcOf(token), vUsdc);
+        _curveBuy(bob, token, 500e6); // deadline == now: fine
+        _curveSell(bob, token, IERC20(token).balanceOf(bob));
         _assertSystem();
     }
 

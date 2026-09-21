@@ -38,7 +38,8 @@ contract SplitE2ETest is E2EBase {
         split.onLaunch(token, mallory, abi.encode(_addrs(mallory), _uints(1)));
     }
 
-    /// @dev Payees that would strand fees revert the whole launch (V13-SPEC §2.2 [built]).
+    /// @dev Payees that would strand fees revert the whole launch (V13-SPEC §2.2 [built]); the launch pairs, router,
+    ///      pair factory and launch tokens are in DestinationsE2E.
     function test_split_invalidPayeesRevertTheLaunch() public {
         uint256 n = pad.tokensLength();
         address predicted = _predictToken();

@@ -21,6 +21,8 @@ import {ComboPlugin} from "../../plugins/launch/ComboPlugin.sol";
 // exactly the pending creator fees left the launchpad and were credited to the token by its plugin (per Combo entry,
 // exactly its slice). _assertSystem() checks whole-system USDC conservation and every contract's own accounting.
 //
+// Curve trades pass the tightest deadline (the current block's time; V13-SPEC §5 [review]).
+//
 // Time and block number are read with vm.getBlockTimestamp()/vm.getBlockNumber(): under via-IR the optimizer may
 // re-read TIMESTAMP/NUMBER where the source cached them, which is wrong after a vm.warp/vm.roll in the same test.
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -53,44 +55,39 @@ contract E2ESafeLikeWallet {
     }
 }
 
-/// @dev A bot that does everything in one transaction: buy, collect the token's creator fees to its plugin, drip and
-///      claim, sell everything it bought.
+/// @dev A bot that does everything in one transaction: buy, collect the token's creator fees (into its dividend
+///      stream, for a Holders token), claim its dividends, sell everything it bought.
 contract E2ESniper {
-    function curveAttack(ArchitexLaunchpad pad, HolderDistributionPlugin holder, address token, uint256 usdcIn)
+    function curveAttack(ArchitexLaunchpad pad, address token, uint256 usdcIn)
         external
-        returns (uint256 bought, uint256 collected, uint256 released, uint256 claimed)
+        returns (uint256 bought, uint256 collected, uint256 claimed)
     {
         IERC20(pad.usdc()).approve(address(pad), usdcIn);
-        (bought,) = pad.buy(token, usdcIn, 0, address(this));
+        (bought,) = pad.buy(token, usdcIn, 0, address(this), block.timestamp);
         collected = pad.collectCreatorFees(token);
-        (released, claimed) = holder.dripAndClaim(token);
-        pad.sell(token, bought, 0, address(this));
+        claimed = ILaunchToken(token).claim();
+        pad.sell(token, bought, 0, address(this), block.timestamp);
     }
 
-    function poolAttack(
-        ArchitexLaunchpad pad,
-        LaunchRouter router,
-        HolderDistributionPlugin holder,
-        address token,
-        uint256 usdcIn
-    ) external returns (uint256 bought, uint256 collected, uint256 released, uint256 claimed) {
+    function poolAttack(ArchitexLaunchpad pad, LaunchRouter router, address token, uint256 usdcIn)
+        external
+        returns (uint256 bought, uint256 collected, uint256 claimed)
+    {
         IERC20(pad.usdc()).approve(address(router), usdcIn);
-        bought = router.buy(token, usdcIn, 0, address(this), type(uint256).max);
+        bought = router.buy(token, usdcIn, 0, address(this), block.timestamp);
         collected = pad.collectCreatorFees(token);
-        (released, claimed) = holder.dripAndClaim(token);
-        router.sell(token, bought, 0, address(this), type(uint256).max);
+        claimed = ILaunchToken(token).claim();
+        router.sell(token, bought, 0, address(this), block.timestamp);
     }
 }
 
 abstract contract E2EBase is LaunchpadV13Base {
     uint256 internal constant LAUNCH_FEE = 1e6; // V13-SPEC §1: 1 USDC
-    uint256 internal constant PERIOD = 24 hours; // HolderDistributionPlugin.DRIP_PERIOD
+    uint256 internal constant PERIOD = 24 hours; // LaunchToken.DRIP_PERIOD
     uint256 internal constant CAP_BPS = 25; // BuybackBurnPlugin.CAP_BPS
+    uint256 internal constant RUN_INTERVAL = 1 hours; // BuybackBurnPlugin.RUN_INTERVAL
+    uint256 internal constant MIN_RUN_USDC = 3; // BuybackBurnPlugin.MIN_RUN_USDC
     uint256 internal constant FUNDS = 100_000_000e6; // what LaunchpadV13Base._fund mints
-    /// @dev How often the site or a keeper drips a Holders stream. The latest Holders plugin covers at most
-    ///      MAX_CATCH_UP (1 hour) of stream time per release and pauses an idle stream; dripping at least this often
-    ///      keeps it at full speed (with the earlier version any drip releases the linear amount anyway).
-    uint256 internal constant KEEPER_INTERVAL = 1 hours;
 
     enum Kind {
         Eoa,
@@ -237,8 +234,8 @@ abstract contract E2EBase is LaunchpadV13Base {
 
     function _pluginFor(Kind kind) internal view returns (address plugin, bytes memory data) {
         if (kind == Kind.Eoa) return (creatorWallet, "");
-        if (kind == Kind.Plain) return (address(plainWallet), hex"c0ffee"); // no hooks: the data is never delivered
-        if (kind == Kind.SafeLike) return (address(safeWallet), hex"c0ffee");
+        if (kind == Kind.Plain) return (address(plainWallet), ""); // no hooks, so no data (DataForNonPlugin)
+        if (kind == Kind.SafeLike) return (address(safeWallet), "");
         if (kind == Kind.Split) return (address(split), _splitData());
         if (kind == Kind.Buyback) return (address(buyback), "");
         if (kind == Kind.Holder) return (address(holder), "");
@@ -468,7 +465,7 @@ abstract contract E2EBase is LaunchpadV13Base {
         _expectCurveTrade(token, who, true, e);
         if (e.graduates) _expectGraduated(token, seed);
         vm.prank(who);
-        (tokensOut, spent) = pad.buy(token, usdcIn, e.tokens, who);
+        (tokensOut, spent) = pad.buy(token, usdcIn, e.tokens, who, _now());
 
         assertEq(tokensOut, e.tokens, "curve buy tokens out");
         assertEq(spent, e.gross, "curve buy usdcSpent");
@@ -493,7 +490,7 @@ abstract contract E2EBase is LaunchpadV13Base {
         Snap memory s = _snap(who, token);
         _expectCurveTrade(token, who, false, e);
         vm.prank(who);
-        usdcOut = pad.sell(token, tokensIn, e.out, who);
+        usdcOut = pad.sell(token, tokensIn, e.out, who, _now());
         _verifyCurveSell(who, token, usdcOut, e, s);
     }
 
@@ -635,7 +632,7 @@ abstract contract E2EBase is LaunchpadV13Base {
     function _creditedBy(address target, address token) internal view returns (uint256) {
         if (target == address(split)) return split.totalReceived(token);
         if (target == address(buyback)) return buyback.usdcHeld(token) + buyback.totalUsdcSpent(token);
-        if (target == address(holder)) return holder.unreleased(token) + holder.totalDistributed(token);
+        if (target == address(holder)) return holder.totalDistributed(token);
         if (isCombo[target]) {
             (address[] memory targets,,) = IComboPlugin(target).allocationOf(token);
             uint256 sum = usdc.balanceOf(target);
@@ -745,7 +742,8 @@ abstract contract E2EBase is LaunchpadV13Base {
     /// @dev State of a buyback before a run.
     struct RunSnap {
         uint256 held;
-        uint256 cap;
+        uint256 cap; // 0.25% of the USDC-side reserve
+        uint256 budget; // the cap prorated by the time since the last run (a full cap for the first run)
         uint256 supply;
         uint256 dead;
         uint256 usdc;
@@ -755,17 +753,30 @@ abstract contract E2EBase is LaunchpadV13Base {
         bool graduated;
     }
 
-    /// @dev What a run should do, from the spec formulas: offer min(held, cap), buy on the curve or in the pool.
+    /// @dev The run budget from V13-SPEC §2.2 (pacing): cap * min(now - lastRunAt, 1 h) / 1 h, rounded down; a full cap
+    ///      for a token's first run.
+    function _budgetOf(address token) internal view returns (uint256 cap, uint256 budget) {
+        uint256 reserve;
+        if (pad.isGraduated(token)) (, reserve) = _reserves(token);
+        else reserve = pad.virtualUsdcOf(token);
+        cap = reserve * CAP_BPS / BPS;
+        budget = cap;
+        uint256 last = buyback.lastRunAt(token);
+        if (last != 0) {
+            uint256 elapsed = _now() - last;
+            if (elapsed < RUN_INTERVAL) budget = cap * elapsed / RUN_INTERVAL;
+        }
+    }
+
+    /// @dev What a run should do, from the spec formulas: offer min(held, budget), buy on the curve or in the pool.
     function _runExpectation(address token) internal view returns (Exp memory e, RunSnap memory r) {
         r.graduated = pad.isGraduated(token);
         r.held = buyback.usdcHeld(token);
-        uint256 reserve;
-        if (r.graduated) (, reserve) = _reserves(token);
-        else reserve = pad.virtualUsdcOf(token);
-        r.cap = reserve * CAP_BPS / BPS;
-        uint256 offer = r.held < r.cap ? r.held : r.cap;
+        (r.cap, r.budget) = _budgetOf(token);
+        uint256 offer = r.held < r.budget ? r.held : r.budget;
+        assertGe(offer, MIN_RUN_USDC, "a run needs at least MIN_RUN_USDC on offer");
         (uint256 pOffer, bool pGrad) = buyback.previewRun(token);
-        assertEq(pOffer, offer, "previewRun = min(held, cap)");
+        assertEq(pOffer, offer, "previewRun = min(held, budget)");
         assertEq(pGrad, r.graduated);
         if (r.graduated) {
             (e.tokens, e.platform, e.creator, e.net) = _expPoolBuy(token, offer);
@@ -804,7 +815,8 @@ abstract contract E2EBase is LaunchpadV13Base {
 
         assertEq(spent, e.gross, "run spent");
         assertEq(burned, e.tokens, "run burned exactly what it bought");
-        assertLe(spent, r.cap, "a run spends at most 0.25% of the USDC-side reserve");
+        assertLe(spent, r.budget, "a run spends at most its budget");
+        assertLe(r.budget, r.cap, "never more than 0.25% of the USDC-side reserve");
         assertEq(IERC20(token).totalSupply(), r.supply - burned, "a true burn: total supply falls");
         assertEq(IERC20(token).balanceOf(address(buyback)), 0, "the plugin keeps no tokens");
         assertEq(IERC20(token).balanceOf(DEAD), r.dead, "not parked at the burn address");
@@ -815,33 +827,41 @@ abstract contract E2EBase is LaunchpadV13Base {
         assertEq(usdc.allowance(address(buyback), address(pad)), 0, "no allowance left to the launchpad");
         assertEq(usdc.allowance(address(buyback), address(router)), 0, "no allowance left to the router");
         assertEq(buyback.nextRunBlock(token), vm.getBlockNumber() + 1, "once per block");
+        assertEq(buyback.lastRunAt(token), _now(), "the pacing clock restarts");
         _assertAccrued(s, token, e, "the buyback's own trade");
         if (e.graduates) _assertGraduated(token, r.seed);
     }
 
-    /// @dev holder.drip(token) by a keeper: releases exactly releasable(), which goes into the token's dividends.
-    function _drip(address token) internal returns (uint256 released) {
-        uint256 expected = holder.releasable(token);
-        uint256 unreleasedBefore = holder.unreleased(token);
-        uint256 distributedBefore = holder.totalDistributed(token);
-        uint256 tokenDistributedBefore = ILaunchToken(token).totalDistributed();
-        vm.prank(keeper);
-        released = holder.drip(token);
-        assertEq(released, expected, "drip releases what releasable() said");
-        assertLe(released, unreleasedBefore, "never more than unreleased");
-        assertEq(holder.unreleased(token), unreleasedBefore - released);
-        assertEq(holder.totalDistributed(token) - distributedBefore, released);
-        assertEq(ILaunchToken(token).totalDistributed() - tokenDistributedBefore, released, "into the dividends");
-        assertEq(holder.releasable(token), 0, "nothing more in the same block");
-        assertEq(usdc.allowance(address(holder), token), 0);
+    // ─── The token's dividend stream (V13-SPEC §3) ────────────────────────────
+
+    /// @dev Σ claimable over the token's tracked holders.
+    function _claimableSum(address token) internal view returns (uint256 sum) {
+        address[] storage hs = holdersOf[token];
+        for (uint256 j; j < hs.length; ++j) {
+            sum += ILaunchToken(token).claimable(hs[j]);
+        }
     }
 
-    /// @dev A keeper dripping every KEEPER_INTERVAL for `duration` (each drip checked by _drip).
-    function _dripEvery(address token, uint256 duration) internal returns (uint256 released) {
-        for (uint256 t; t < duration; t += KEEPER_INTERVAL) {
-            _warp(KEEPER_INTERVAL);
-            released += _drip(token);
+    /// @dev Σ claimed over the token's tracked holders.
+    function _claimedSum(address token) internal view returns (uint256 sum) {
+        address[] storage hs = holdersOf[token];
+        for (uint256 j; j < hs.length; ++j) {
+            sum += ILaunchToken(token).claimed(hs[j]);
         }
+    }
+
+    /// @dev Moves past the end of the token's stream: it owes nothing more, and everything distributed is claimed or
+    ///      claimable, to rounding dust (at most a unit per holder, plus one). Needs eligible supply (a paused stream
+    ///      never ends).
+    function _finishStream(address token) internal {
+        ILaunchToken lt = ILaunchToken(token);
+        assertGt(lt.eligibleSupply(), 0, "somebody holds");
+        uint256 end = lt.streamEnd();
+        if (end >= _now()) _warp(end - _now() + 1);
+        assertEq(lt.undistributed(), 0, "the stream is paid out");
+        uint256 paid = _claimableSum(token) + _claimedSum(token);
+        assertLe(paid, lt.totalDistributed(), "never over-credited");
+        assertLe(lt.totalDistributed() - paid, holdersOf[token].length + 1, "everything reached holders, to dust");
     }
 
     function _claim(address token, address who) internal returns (uint256 amount) {
@@ -889,7 +909,6 @@ abstract contract E2EBase is LaunchpadV13Base {
 
         uint256 splitHeld;
         uint256 buybackHeld;
-        uint256 holderHeld;
         for (uint256 i; i < launched.length; ++i) {
             address t = launched[i];
             (uint256 rt, uint256 ru) = _reserves(t);
@@ -901,7 +920,7 @@ abstract contract E2EBase is LaunchpadV13Base {
             }
             if (buyback.isConfigured(t)) buybackHeld += buyback.usdcHeld(t);
             if (holder.isConfigured(t)) {
-                holderHeld += holder.unreleased(t);
+                assertEq(holder.usdcHeld(t), 0, "the Holders plugin forwards everything");
                 assertEq(holder.totalDistributed(t), ILaunchToken(t).totalDistributed(), "only the plugin distributes");
             }
             _assertDividendPool(t);
@@ -921,7 +940,7 @@ abstract contract E2EBase is LaunchpadV13Base {
         }
         assertEq(usdc.balanceOf(address(split)), splitHeld, "Split USDC == its per-token balances");
         assertEq(usdc.balanceOf(address(buyback)), buybackHeld, "Buyback USDC == its per-token balances");
-        assertEq(usdc.balanceOf(address(holder)), holderHeld, "Holder plugin USDC == its per-token unreleased");
+        assertEq(usdc.balanceOf(address(holder)), 0, "the Holders plugin holds nothing between calls");
         _assertUsdcConserved();
     }
 
@@ -929,8 +948,9 @@ abstract contract E2EBase is LaunchpadV13Base {
         return a == address(split) || a == address(buyback) || a == address(holder);
     }
 
-    /// @dev The token's USDC is exactly its unclaimed dividends; holders' claimable never exceeds it and falls short by
-    ///      at most one unit per holder; the four excluded accounts never earn.
+    /// @dev The token's dividend stream (V13-SPEC §3): its USDC is exactly what was distributed and not claimed, and
+    ///      distributed == Σ claimed + Σ claimable + undistributed + dust, the dust (all rounding is down) at most a
+    ///      unit per holder plus one for undistributed()'s own rounding. The four excluded accounts never earn.
     function _assertDividendPool(address t) internal view {
         ILaunchToken lt = ILaunchToken(t);
         uint256 claimedSum;
@@ -941,9 +961,11 @@ abstract contract E2EBase is LaunchpadV13Base {
             claimableSum += lt.claimable(hs[j]);
         }
         uint256 pool = usdc.balanceOf(t);
+        uint256 owed = lt.undistributed();
         assertEq(pool, lt.totalDistributed() - claimedSum, "token USDC == distributed - claimed");
-        assertLe(claimableSum, pool, "claims never exceed the pool");
-        assertLe(pool - claimableSum, hs.length + 1, "rounding dust: at most a unit per holder");
+        assertLe(claimableSum + owed, pool, "claimable + still streaming never exceed the pool");
+        assertLe(pool - claimableSum - owed, hs.length + 2, "rounding dust: at most a unit per holder");
+        if (lt.streamEnd() <= _now() && lt.eligibleSupply() != 0) assertEq(owed, 0, "an ended stream owes nothing");
         assertEq(lt.claimable(address(pad)), 0, "the curve inventory never earns");
         assertEq(lt.claimable(pad.pairOf(t)), 0, "the launch pair never earns");
         assertEq(lt.claimable(DEAD), 0, "the burn address never earns");

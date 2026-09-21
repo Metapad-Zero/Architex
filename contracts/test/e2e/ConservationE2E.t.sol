@@ -22,8 +22,8 @@ contract ConservationE2ETest is E2EBase {
         return actors[i % actors.length];
     }
 
-    /// @dev Everything a keeper would do for one token: collect (unless its plugin is the broken one), run its
-    ///      buyback, drip its holder stream, release its split.
+    /// @dev Everything a keeper would do for one token: collect (unless its plugin is the broken one; for a Holders
+    ///      token that feeds the token's dividend stream), run its buyback, release its split.
     function _service(address token) internal {
         if (pad.pluginOf(token) == address(broken)) {
             if (pad.pendingCreatorFees(token) != 0) {
@@ -35,9 +35,8 @@ contract ConservationE2ETest is E2EBase {
         _collect(token);
         if (buyback.isConfigured(token)) {
             (uint256 offer,) = buyback.previewRun(token);
-            if (offer > 2) _run(token);
+            if (offer != 0) _run(token);
         }
-        if (holder.isConfigured(token)) _drip(token);
         if (split.isConfigured(token)) _releaseAll(token);
     }
 
@@ -69,10 +68,11 @@ contract ConservationE2ETest is E2EBase {
                     _service(t[i]);
                 }
                 if (round == 1) {
-                    // a few holders claim, on the token or through the plugin
+                    // a few holders claim on the token, one through claimFor by someone else
                     _claim(t[5], alice);
-                    vm.prank(bob);
-                    holder.dripAndClaim(t[7]);
+                    uint256 owed = ILaunchToken(t[7]).claimable(bob);
+                    vm.prank(mallory);
+                    assertEq(ILaunchToken(t[7]).claimFor(bob), owed);
                 }
                 _warp(8 hours);
             }
@@ -92,7 +92,7 @@ contract ConservationE2ETest is E2EBase {
             _assertSystem();
         }
 
-        // A last round of pool trades and service, a day later so every stream matures.
+        // A last round of pool trades and service, then past every stream's end.
         for (uint256 i; i < t.length; ++i) {
             if (pad.isGraduated(t[i])) _poolBuy(carol, t[i], 2_345e6);
         }
@@ -100,9 +100,8 @@ contract ConservationE2ETest is E2EBase {
         for (uint256 i; i < t.length; ++i) {
             _service(t[i]);
         }
-        _warp(PERIOD);
         for (uint256 i; i < t.length; ++i) {
-            if (holder.isConfigured(t[i])) _drip(t[i]);
+            if (holder.isConfigured(t[i])) _finishStream(t[i]);
         }
         _collectFees();
         _assertSystem();
@@ -142,10 +141,9 @@ contract ConservationE2ETest is E2EBase {
             } else if (op == 6) {
                 if (ILaunchToken(token).claimable(who) != 0) _claim(token, who);
             } else if (op == 7) {
-                if (holder.isConfigured(token)) {
-                    vm.prank(who);
-                    holder.dripAndClaim(token);
-                }
+                uint256 owed = ILaunchToken(token).claimable(who);
+                vm.prank(mallory);
+                assertEq(ILaunchToken(token).claimFor(who), owed, "claimFor pays the holder its claimable");
             } else if (op == 8) {
                 _collectFees();
             } else {

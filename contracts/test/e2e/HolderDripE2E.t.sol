@@ -3,17 +3,25 @@ pragma solidity ^0.8.28;
 
 import "./E2EBase.sol";
 
-/// @notice Theme 5: Distribute to holders, dripped over 24 hours, with the real LaunchToken dividends (V13-SPEC §2.2,
-///         §3, [D15], [D21]). Only properties of the stream window are asserted, never exact end times or partial
-///         amounts (the window math on a new delivery is still being tuned): nothing of a delivery is released in the
-///         transaction that delivers it; everything delivered is releasable a DRIP_PERIOD after the last delivery;
-///         releases never exceed deliveries; delivered == distributed + unreleased; holders' claims sum to what was
-///         distributed, to rounding dust; excluded addresses never earn. "Everything is out by the end" is asserted
-///         with a keeper dripping hourly (KEEPER_INTERVAL): the latest plugin pauses a stream nobody drips (a release
-///         covers at most MAX_CATCH_UP of stream time), so these tests hold for both the committed drip (c508af3) and
-///         that version.
+/// @notice Theme 5: Distribute to holders with the real LaunchToken dividend stream (V13-SPEC §2.2, §3, [D15], [D21]).
+///         The Holders plugin forwards each collection into the token's distribute, which pays it out continuously
+///         over DRIP_PERIOD; each eligible account earns second by second in proportion to what it holds.
+///
+///         The main check is an independent model of the ideal stream: over every interval between balance changes,
+///         a holder earns amount * dt * balance / (DRIP_PERIOD * eligibleSupply), and nothing while eligible supply is
+///         under one token (the stream pauses and its end moves out). The token's claimable + claimed must equal the
+///         model to a unit. _assertSystem() adds conservation: distributed == Σ claimed + Σ claimable + undistributed
+///         + dust, the dust at most a unit per holder.
 contract HolderDripE2ETest is E2EBase {
     E2ESniper internal sniper;
+
+    // ─── The ideal-stream model (one delivery into an empty stream) ───────────
+    address internal mToken;
+    uint256 internal mAmount; // what was delivered
+    uint256 internal mLast; // the model's clock
+    uint256 internal mLeft; // stream seconds still to run; counts down only while somebody holds
+    address[] internal mHolders;
+    mapping(address => uint256) internal mIdeal; // earned, scaled by 1e18
 
     function setUp() public override {
         super.setUp();
@@ -22,199 +30,185 @@ contract HolderDripE2ETest is E2EBase {
         usdc.mint(address(sniper), 10_000_000e6);
     }
 
-    /// @dev A checked collection to the Holder plugin: only what the running stream owed by now is released (to the
-    ///      holders of this moment), nothing of the new fees; the window ends after now and within a period.
+    // ─── Model ────────────────────────────────────────────────────────────────
+
+    function _modelStart(address token, uint256 amount, address[] memory holders) internal {
+        mToken = token;
+        mAmount = amount;
+        mLast = _now();
+        mLeft = PERIOD;
+        for (uint256 i; i < holders.length; ++i) {
+            mHolders.push(holders[i]);
+            mIdeal[holders[i]] = 0;
+        }
+        for (uint256 i; i < holders.length; ++i) {
+            // Nothing earned from this stream yet: whatever a holder could claim before was from earlier ones.
+            assertEq(ILaunchToken(token).claimable(holders[i]) + ILaunchToken(token).claimed(holders[i]), 0);
+        }
+    }
+
+    /// @dev Brings the model up to now with the balances and eligible supply that held since its last step. Call it
+    ///      before every balance change (every trade, transfer or burn) and before every check.
+    function _modelAccrue() internal {
+        uint256 t = _now();
+        if (t <= mLast) return;
+        uint256 dt = t - mLast;
+        mLast = t;
+        uint256 e = ILaunchToken(mToken).eligibleSupply();
+        if (e == 0 || mLeft == 0) return; // paused (the stream waits) or run out
+        if (dt > mLeft) dt = mLeft;
+        mLeft -= dt;
+        for (uint256 i; i < mHolders.length; ++i) {
+            uint256 bal = IERC20(mToken).balanceOf(mHolders[i]);
+            mIdeal[mHolders[i]] += (mAmount * dt * bal * 1e18) / (PERIOD * e);
+        }
+    }
+
+    /// @dev Every modelled holder has earned exactly its time-weighted share, to a unit.
+    function _assertModel() internal {
+        _modelAccrue();
+        ILaunchToken lt = ILaunchToken(mToken);
+        uint256 total;
+        for (uint256 i; i < mHolders.length; ++i) {
+            address h = mHolders[i];
+            uint256 earned = lt.claimable(h) + lt.claimed(h);
+            assertApproxEqAbs(earned, mIdeal[h] / 1e18, 1, "time-weighted share, exact to rounding");
+            total += earned;
+        }
+        assertLe(total, mAmount, "never more than was delivered");
+    }
+
+    // ─── Delivery ─────────────────────────────────────────────────────────────
+
+    /// @dev A checked collection to the Holders plugin: everything goes straight into the token's stream, the plugin
+    ///      keeps nothing, and nobody earns any of it in the delivering block.
     function _deliver(address token) internal returns (uint256 amount) {
-        uint256 oldDue = holder.releasable(token);
-        uint256 unreleasedBefore = holder.unreleased(token);
-        uint256 distributedBefore = holder.totalDistributed(token);
-        amount = _collect(token);
-        if (amount == 0) return 0;
-        assertEq(holder.totalDistributed(token) - distributedBefore, oldDue, "a delivery releases only the old stream's due");
-        assertEq(holder.unreleased(token), unreleasedBefore - oldDue + amount);
-        assertEq(holder.releasable(token), 0, "nothing of a delivery is released in the delivering transaction");
-        assertEq(holder.lastDrip(token), _now());
-        assertGt(holder.streamEnd(token), _now(), "the window ends after now");
-        assertLe(holder.streamEnd(token), _now() + PERIOD, "and within one period");
-    }
-
-    function _assertStreamConserved(address token) internal view {
-        assertEq(
-            holder.unreleased(token) + holder.totalDistributed(token),
-            ghostDelivered[token] + ghostDonated[token],
-            "delivered == distributed + unreleased"
-        );
-        assertGe(usdc.balanceOf(address(holder)), holder.unreleased(token));
-    }
-
-    /// @dev What `who` should be able to claim from one distribution of `amount` at eligible supply `eligible`.
-    function _share(uint256 amount, uint256 bal, uint256 eligible) internal pure returns (uint256) {
-        return amount * bal / eligible;
-    }
-
-    // ─── Holders earn pro-rata once delivered and dripped ─────────────────────
-
-    function test_holders_earnProRata_onceDeliveredAndDripped() public {
-        address token = _launch(Kind.Holder, 1000, 3_000e6); // alice, the creator, holds from her first buy
-        _curveBuy(bob, token, 5_000e6);
-        _curveBuy(carol, token, 1_000e6);
-        _curveBuy(dave, token, 2_000e6);
-        _curveSell(dave, token, IERC20(token).balanceOf(dave)); // dave leaves before anything is distributed
-
-        uint256 amount = _deliver(token);
-        assertEq(ILaunchToken(token).totalDistributed(), 0, "delivered, not distributed");
-        _assertStreamConserved(token);
-
-        // Dripped hourly: part-way through, part of it is out, never more than delivered...
-        _dripEvery(token, 6 hours);
-        uint256 partOut = holder.totalDistributed(token);
-        assertGt(partOut, 0);
-        assertLt(partOut, amount);
-        // ...and a period after the delivery, everything.
-        _dripEvery(token, PERIOD - 6 hours);
-        assertEq(holder.unreleased(token), 0, "everything out a period after the delivery");
-        uint256 eligible = ILaunchToken(token).eligibleSupply();
-        assertEq(eligible, IERC20(token).balanceOf(alice) + IERC20(token).balanceOf(bob) + IERC20(token).balanceOf(carol));
-
         ILaunchToken lt = ILaunchToken(token);
-        assertApproxEqAbs(lt.claimable(alice), _share(amount, IERC20(token).balanceOf(alice), eligible), 1, "alice pro-rata");
-        assertApproxEqAbs(lt.claimable(bob), _share(amount, IERC20(token).balanceOf(bob), eligible), 1, "bob pro-rata");
-        assertApproxEqAbs(lt.claimable(carol), _share(amount, IERC20(token).balanceOf(carol), eligible), 1, "carol pro-rata");
-        assertEq(lt.claimable(dave), 0, "sold before the distribution: nothing");
-        assertLe(lt.claimable(alice) + lt.claimable(bob) + lt.claimable(carol), amount);
+        uint256 distributedBefore = lt.totalDistributed();
+        uint256 claimableBefore = _claimableSum(token);
+        uint256 owedBefore = lt.undistributed();
+        amount = _collect(token);
+        assertEq(lt.totalDistributed() - distributedBefore, amount, "all of it into the token's distribute");
+        assertEq(holder.totalDistributed(token), lt.totalDistributed());
+        assertEq(usdc.balanceOf(address(holder)), 0, "the plugin keeps nothing");
+        assertEq(_claimableSum(token), claimableBefore, "nothing of a delivery is earned in the delivering block");
+        if (amount == 0) return 0;
+        assertEq(lt.lastAccrual(), _now());
+        assertGt(lt.streamEnd(), _now(), "the stream runs on");
+        assertLe(lt.streamEnd(), _now() + PERIOD, "for at most a period");
+        assertApproxEqAbs(lt.undistributed(), owedBefore + amount, 2, "what it owes grew by the delivery");
+    }
 
-        _claim(token, alice);
-        vm.prank(mallory);
-        uint256 paid = lt.claimFor(bob); // anyone can claim for a holder; the holder is paid
-        assertGt(paid, 0);
+    // ─── Time-weighted shares ─────────────────────────────────────────────────
+
+    /// @dev Holders join and leave at different times, by curve buys and sells, a transfer and a mid-stream claim;
+    ///      the stream runs past its end. Each earns exactly its time-weighted share.
+    function test_holders_timeWeightedShares_exactToRounding() public {
+        address token = _launch(Kind.Holder, 1000, 0);
+        _curveBuy(bob, token, 4_000e6);
+        _curveBuy(carol, token, 1_500e6);
+        uint256 amount = _deliver(token);
+        assertGt(amount, 500e6);
+        _modelStart(token, amount, _addrs(bob, carol, dave, erin, frank));
+
+        _warp(5 hours);
+        _modelAccrue();
+        _curveBuy(dave, token, 3_000e6); // dave joins
+
+        _warp(3 hours);
+        _modelAccrue();
+        _curveSell(bob, token, IERC20(token).balanceOf(bob) / 2); // bob halves
+
+        _warp(2 hours);
+        _modelAccrue();
+        uint256 carolBal = IERC20(token).balanceOf(carol);
         vm.prank(carol);
-        (uint256 released, uint256 claimed) = holder.dripAndClaim(token);
-        assertEq(released, 0);
-        assertGt(claimed, 0);
+        IERC20(token).transfer(erin, carolBal); // carol leaves, erin joins, by transfer
+        _addHolder(token, erin);
+
+        _warp(4 hours);
+        _assertModel();
+        _claim(token, dave); // a mid-stream claim changes nothing about what is earned
+
+        _warp(6 hours);
+        _modelAccrue();
+        _curveSell(dave, token, IERC20(token).balanceOf(dave)); // dave leaves
+
+        _warp(1 hours);
+        _modelAccrue();
+        _curveBuy(frank, token, 2_000e6); // frank joins for the last hours
+
+        _warp(5 hours); // 26 h: past the end
+        _assertModel();
+        assertEq(ILaunchToken(token).undistributed(), 0);
+        _finishStream(token);
         _assertSystem();
     }
 
-    // ─── Excluded addresses never earn ────────────────────────────────────────
+    /// @dev A holder who sells keeps what they earned and earns nothing afterwards; one who buys late earns only from
+    ///      then on.
+    function test_holders_sellerKeepsWhatTheyEarned_lateBuyerEarnsFromThenOn() public {
+        address token = _launch(Kind.Holder, 1000, 2_000e6);
+        _curveBuy(dave, token, 4_000e6);
+        uint256 amount = _deliver(token);
+        _modelStart(token, amount, _addrs(alice, dave, erin));
+        _warp(10 hours);
+        _modelAccrue();
+        uint256 earned = ILaunchToken(token).claimable(dave);
+        assertGt(earned, 0);
+        _curveSell(dave, token, IERC20(token).balanceOf(dave));
+        _curveBuy(erin, token, 4_000e6);
+        assertEq(ILaunchToken(token).claimable(erin), 0, "no backlog for a new buyer");
+        _warp(20 hours);
+        _assertModel();
+        assertEq(ILaunchToken(token).claimable(dave), earned, "kept, and nothing more");
+        assertEq(_claim(token, dave), earned);
+        _assertSystem();
+    }
 
-    function test_holders_excludedAddressesNeverEarn_acrossGraduation() public {
-        address token = _launch(Kind.Holder, 500, 1_000e6);
-        _curveBuy(bob, token, 8_000e6);
-        vm.prank(bob);
-        IERC20(token).transfer(DEAD, 1_000_000e18); // tokens sent to the burn address stop earning
+    // ─── Pause and resume ─────────────────────────────────────────────────────
+
+    /// @dev Everyone sells: eligible supply drops to 0 and the stream pauses; nothing accrues and nothing is lost.
+    ///      The next buyer restarts it, with the end moved out by exactly the paused time, and earns from then on
+    ///      only; no backlog built up for them.
+    function test_holders_pauseWhenEveryoneSells_resumeWithTheEndShifted() public {
+        address token = _launch(Kind.Holder, 1000, 0);
+        _curveBuy(bob, token, 5_000e6);
+        uint256 amount = _deliver(token);
+        uint256 end0 = ILaunchToken(token).streamEnd();
+        assertEq(end0, _now() + PERIOD, "a first stream runs exactly DRIP_PERIOD");
+        _modelStart(token, amount, _addrs(bob, carol));
+
+        _warp(6 hours);
+        _modelAccrue();
+        _curveSell(bob, token, IERC20(token).balanceOf(bob)); // everyone sold
         ILaunchToken lt = ILaunchToken(token);
-        assertEq(lt.eligibleSupply(), _eligible(token));
+        assertEq(lt.eligibleSupply(), 0);
+        uint256 bobEarned = lt.claimable(bob);
+        uint256 owed = lt.undistributed();
+        assertApproxEqAbs(bobEarned, amount / 4, 1, "a quarter of the stream in 6 hours");
+        uint256 pausedAt = _now();
 
-        _deliver(token);
-        _warp(PERIOD);
-        _drip(token);
-        // The curve inventory (most of the supply right now), the pair, the burn address and address(0) earn nothing.
-        assertGt(IERC20(token).balanceOf(address(pad)), 0);
-        assertEq(lt.claimable(address(pad)), 0);
-        assertEq(lt.claimable(pad.pairOf(token)), 0);
-        assertEq(lt.claimable(DEAD), 0);
-        assertEq(lt.claimable(address(0)), 0);
-        assertApproxEqAbs(lt.claimable(alice) + lt.claimable(bob), holder.totalDistributed(token), 2, "all to real holders");
+        _warp(30 hours); // paused
+        _modelAccrue();
+        assertEq(lt.claimable(bob), bobEarned, "nothing accrues while paused");
+        assertEq(lt.undistributed(), owed, "and nothing is lost");
 
-        // After graduation the pair holds POOL_SUPPLY and more; it still earns nothing.
-        _graduateVia(carol, token);
-        _poolSell(carol, token, IERC20(token).balanceOf(carol) / 2);
-        _deliver(token);
-        _warp(PERIOD);
-        _drip(token);
-        assertGt(IERC20(token).balanceOf(pad.pairOf(token)), POOL_SUPPLY);
-        assertEq(lt.claimable(pad.pairOf(token)), 0);
-        assertEq(lt.claimable(address(pad)), 0);
-        assertEq(lt.claimable(DEAD), 0);
-        assertTrue(lt.isExcluded(address(pad)) && lt.isExcluded(pad.pairOf(token)) && lt.isExcluded(DEAD));
-        assertFalse(lt.isExcluded(address(router)) || lt.isExcluded(address(holder)));
+        _curveBuy(carol, token, 1_000e6); // the stream resumes
+        assertEq(lt.streamEnd(), end0 + (_now() - pausedAt), "the end moved out by exactly the paused time");
+        assertEq(lt.claimable(carol), 0, "no backlog for whoever buys next");
+        assertEq(lt.undistributed(), owed);
+
+        _warp(1);
+        assertApproxEqAbs(lt.claimable(carol), amount / PERIOD, 1, "one second of stream");
+        _warp(lt.streamEnd() - _now() + 1);
+        _assertModel(); // carol got the rest, bob his quarter
+        assertApproxEqAbs(lt.claimable(carol), amount - bobEarned, 2);
+        _finishStream(token);
         _assertSystem();
     }
 
     // ─── The one-transaction bot ──────────────────────────────────────────────
-
-    /// @dev A pile of creator fees waits at the launchpad and no stream is running. A bot buys a large position,
-    ///      collects the pile to the plugin, drips and claims, and sells, all in one transaction: it gets nothing of
-    ///      the pile (or of its own trades' fees) and loses its round-trip fees. The holders who stay get it all.
-    function test_holders_sniperInOneTransaction_getsNothing_onCurve() public {
-        address token = _launch(Kind.Holder, 1000, 2_000e6);
-        _curveBuy(bob, token, 6_000e6);
-        _curveSell(bob, token, IERC20(token).balanceOf(bob) / 4);
-        uint256 pile = pad.pendingCreatorFees(token);
-        assertGt(pile, 700e6);
-        uint256 usdcBefore = usdc.balanceOf(address(sniper));
-
-        (uint256 bought, uint256 collected, uint256 released, uint256 claimed) =
-            sniper.curveAttack(pad, holder, token, 10_000e6);
-        _addHolder(token, address(sniper));
-        _syncGhostsAfterSniper(token, collected);
-
-        assertEq(released, 0, "nothing was streaming: nothing to release");
-        assertEq(claimed, 0, "the bot got none of the fees delivered in its transaction");
-        assertGt(collected, pile, "the pile plus the bot's own buy fee was delivered");
-        assertEq(IERC20(token).balanceOf(address(sniper)), 0, "and it sold everything");
-        assertGt(bought, 0);
-        assertLt(usdc.balanceOf(address(sniper)), usdcBefore, "a pure loss: two rounds of fees");
-        assertEq(holder.unreleased(token), collected, "the whole delivery streams");
-
-        _dripEvery(token, PERIOD + KEEPER_INTERVAL);
-        ILaunchToken lt = ILaunchToken(token);
-        assertEq(lt.claimable(address(sniper)), 0, "no later share either: it no longer holds");
-        assertApproxEqAbs(lt.claimable(alice) + lt.claimable(bob), collected, 2, "the holders who stayed get it all");
-        _collect(token); // the bot's sell fee
-        _assertSystem();
-    }
-
-    /// @dev The same bot in the launch pool, through the router.
-    function test_holders_sniperInOneTransaction_getsNothing_inPool() public {
-        address token = _launch(Kind.Holder, 800, 1_000e6);
-        _curveBuy(bob, token, 5_000e6);
-        _graduateVia(carol, token);
-        _poolBuy(dave, token, 20_000e6);
-        uint256 pile = pad.pendingCreatorFees(token);
-        uint256 usdcBefore = usdc.balanceOf(address(sniper));
-
-        (, uint256 collected, uint256 released, uint256 claimed) =
-            sniper.poolAttack(pad, router, holder, token, 50_000e6);
-        _addHolder(token, address(sniper));
-        _syncGhostsAfterSniper(token, collected);
-
-        assertEq(released, 0);
-        assertEq(claimed, 0, "none of the fees delivered in its transaction");
-        assertGt(collected, pile);
-        assertLt(usdc.balanceOf(address(sniper)), usdcBefore);
-        _warp(PERIOD);
-        _drip(token);
-        assertEq(ILaunchToken(token).claimable(address(sniper)), 0);
-        _collect(token);
-        _assertSystem();
-    }
-
-    /// @dev With a stream running, the collection in the bot's transaction first releases what the old stream owes
-    ///      since its last drip, to whoever holds at that moment, the bot included (documented). Here one minute of
-    ///      the old stream: the bot's claim is at most its pro-rata share of that, and none of the new pile.
-    function test_holders_sniperWithARunningStream_sharesOnlyWhatMaturedBefore() public {
-        address token = _launch(Kind.Holder, 1000, 2_000e6);
-        _curveBuy(bob, token, 6_000e6);
-        _deliver(token);
-        _warp(12 hours);
-        _drip(token); // a keeper drips
-        _warp(1 minutes);
-        _curveBuy(carol, token, 5_000e6);
-        _curveSell(carol, token, IERC20(token).balanceOf(carol) / 2);
-        uint256 pile = pad.pendingCreatorFees(token);
-        uint256 oldDue = holder.releasable(token);
-        assertGt(oldDue, 0);
-        uint256 eligibleBefore = ILaunchToken(token).eligibleSupply();
-
-        (uint256 bought, uint256 collected,, uint256 claimed) = sniper.curveAttack(pad, holder, token, 3_000e6);
-        _addHolder(token, address(sniper));
-        _syncGhostsAfterSniper(token, collected);
-
-        assertLe(claimed, oldDue * bought / (eligibleBefore + bought) + 1, "at most its share of what had matured");
-        assertLt(claimed * 1000, pile, "and nothing like the pile");
-        assertGt(collected, pile);
-        _assertSystem();
-    }
 
     /// @dev Keeps the fee ghosts in step with what the bot's transaction did through the real contracts: its buy's fees
     ///      were accrued then collected inside the attack, its sell's fees are pending.
@@ -222,147 +216,241 @@ contract HolderDripE2ETest is E2EBase {
         ghostDelivered[token] += collected;
         ghostCreatorAccrued[token] = ghostDelivered[token] + pad.pendingCreatorFees(token);
         ghostPlatformAccrued = ghostPlatformCollected + pad.pendingFees();
+        _addHolder(token, address(sniper));
     }
 
-    /// @dev DOCUMENTED LIMIT (IHolderDistributionPlugin NatSpec): a release goes to whoever holds at that moment, so a
-    ///      bot that buys, triggers a release, claims and sells in one transaction shares what that one release
-    ///      covers. Asserted as: the bot's claim is exactly its pro-rata share of releasable() just before it, and none
-    ///      of the fees delivered in its transaction. How much that is after a day nobody dripped depends on the
-    ///      version: all of the matured stream with the committed drip (c508af3), at most MAX_CATCH_UP (an hour) of
-    ///      stream time with the latest; the log shows which.
-    function test_holders_justInTimeBuyerSharesOnlyWhatOneReleaseCovers() public {
+    /// @dev The smallest USDC buy that gets at least one whole token.
+    function _usdcForOneToken(address token) internal view returns (uint256 usdcIn) {
+        usdcIn = 3;
+        while (true) {
+            uint256 out;
+            if (pad.isGraduated(token)) {
+                (out,,) = router.quoteBuy(token, usdcIn);
+            } else {
+                (out,,,,) = pad.quoteBuy(token, usdcIn);
+            }
+            if (out >= 1e18) return usdcIn;
+            usdcIn += usdcIn / 4 + 1;
+        }
+    }
+
+    function _snipe(address token, uint256 usdcIn) internal returns (uint256 collected, uint256 claimed) {
+        uint256 before = usdc.balanceOf(address(sniper));
+        uint256 bought;
+        if (pad.isGraduated(token)) (bought, collected, claimed) = sniper.poolAttack(pad, router, token, usdcIn);
+        else (bought, collected, claimed) = sniper.curveAttack(pad, token, usdcIn);
+        _syncGhostsAfterSniper(token, collected);
+        assertGe(bought, 1e18, "held at least a whole token for the transaction");
+        assertEq(claimed, 0, "a buy, collect, claim and sell in one transaction earns exactly 0");
+        assertEq(IERC20(token).balanceOf(address(sniper)), 0, "and it sold everything");
+        assertEq(ILaunchToken(token).claimable(address(sniper)), 0);
+        assertLt(usdc.balanceOf(address(sniper)), before, "a pure loss: two rounds of fees");
+    }
+
+    function test_holders_sniper_earnsZero_onCurve() public {
         address token = _launch(Kind.Holder, 1000, 2_000e6);
         _curveBuy(bob, token, 6_000e6);
+        _deliver(token);
+        _warp(10 hours);
+        _curveSell(bob, token, IERC20(token).balanceOf(bob) / 4);
+        uint256 pile = pad.pendingCreatorFees(token);
+        (uint256 collected,) = _snipe(token, 10_000e6);
+        assertGt(collected, pile, "the pile plus the bot's own buy fee went into the stream");
+        _warp(1 hours);
+        assertEq(ILaunchToken(token).claimable(address(sniper)), 0, "nothing later either: it holds nothing");
+        _finishStream(token);
+        _assertSystem();
+    }
+
+    function test_holders_sniper_earnsZero_inPool() public {
+        address token = _launch(Kind.Holder, 800, 1_000e6);
+        _curveBuy(bob, token, 5_000e6);
+        _deliver(token);
+        _graduateVia(carol, token);
+        _poolBuy(dave, token, 20_000e6);
+        _warp(30 hours); // the first stream fully matured, nobody claimed
+        _snipe(token, 50_000e6);
+        _finishStream(token);
+        _assertSystem();
+    }
+
+    /// @dev "Everyone sold, a day passes, buy 1 token": the stream is paused with most of it still owed. A bot buys
+    ///      one whole token, collects, claims and sells in one transaction: exactly 0. Nothing built up while paused.
+    function test_holders_sniper_everyoneSoldADayPassesBuyOneToken() public {
+        address token = _launch(Kind.Holder, 1000, 0);
+        _curveBuy(bob, token, 5_000e6);
+        _curveBuy(carol, token, 2_000e6);
+        _deliver(token);
+        _warp(3 hours);
+        _curveSell(bob, token, IERC20(token).balanceOf(bob));
+        _curveSell(carol, token, IERC20(token).balanceOf(carol));
+        assertEq(ILaunchToken(token).eligibleSupply(), 0, "everyone sold");
+        uint256 owed = ILaunchToken(token).undistributed();
+        _warp(1 days);
+        assertEq(ILaunchToken(token).undistributed(), owed, "paused: all still owed");
+        _snipe(token, _usdcForOneToken(token));
+        assertEq(ILaunchToken(token).eligibleSupply(), 0, "and it sold again");
+        _assertSystem();
+    }
+
+    /// @dev Any idle gap, any matured amount, any creator fee, a running, matured or paused stream, on the curve or in
+    ///      the pool: the one-transaction bot earns exactly 0.
+    /// forge-config: default.fuzz.runs = 128
+    function testFuzz_holders_oneTransactionSnipeEarnsExactlyZero(
+        uint16 bpsRaw,
+        uint64 volumeRaw,
+        uint32 gapRaw,
+        uint64 sizeRaw,
+        uint8 mode,
+        bool inPool
+    ) public {
+        uint16 bps = uint16(bound(bpsRaw, 50, 1000));
+        address token = _launch(Kind.Holder, bps, 0);
+        _curveBuy(bob, token, bound(volumeRaw, 10e6, 9_000e6));
+        _curveBuy(carol, token, 1_000e6);
+        if (inPool) _graduateVia(dave, token);
+        if (mode % 3 != 0) _deliver(token); // a stream is running
+        _warp(bound(gapRaw, 0, 3 days)); // matures, partly or fully
+        if (mode % 3 == 2) {
+            // everyone sells: paused
+            _sell(bob, token, IERC20(token).balanceOf(bob));
+            _sell(carol, token, IERC20(token).balanceOf(carol));
+            if (inPool) _sell(dave, token, IERC20(token).balanceOf(dave));
+            _warp(1 days);
+        }
+        uint256 size = mode % 3 == 2 ? _usdcForOneToken(token) : bound(sizeRaw, 1e6, pad.isGraduated(token) ? 60_000e6 : 5_000e6);
+        _snipe(token, size);
+        _assertSystem();
+    }
+
+    // ─── Graduation with a running stream ─────────────────────────────────────
+
+    /// @dev The stream runs through graduation: the pool seeding moves POOL_SUPPLY between two excluded accounts (the
+    ///      curve inventory and the pair), so eligible supply is untouched; the pool and the curve inventory never
+    ///      earn; every holder still earns exactly its time-weighted share, across the curve and the pool.
+    function test_holders_graduationWithARunningStream() public {
+        address token = _launch(Kind.Holder, 800, 1_000e6);
+        _curveBuy(bob, token, 6_000e6);
         uint256 amount = _deliver(token);
-        _warp(PERIOD + 1 hours); // nobody drips for a day
-        uint256 due = holder.releasable(token);
-        assertLe(due, amount);
+        _modelStart(token, amount, _addrs(alice, bob, carol, dave, erin));
+
+        _warp(4 hours);
+        _modelAccrue();
+        _curveBuy(carol, token, 2_000e6);
+        _warp(3 hours);
+        _modelAccrue();
         uint256 eligibleBefore = ILaunchToken(token).eligibleSupply();
-        (uint256 bought, uint256 collected, uint256 released, uint256 claimed) =
-            sniper.curveAttack(pad, holder, token, 5_000e6);
-        _addHolder(token, address(sniper));
-        _syncGhostsAfterSniper(token, collected);
-        assertEq(released, 0, "the collection inside the attack already made the one release");
-        assertApproxEqAbs(claimed, due * bought / (eligibleBefore + bought), 1, "exactly its share of that release");
-        assertGt(claimed, 0);
-        console2.log("share of an idle day's stream one release hands out (bps):", due * BPS / amount);
+        (uint256 lastTokens,) = _graduateVia(dave, token);
+        assertEq(ILaunchToken(token).eligibleSupply(), eligibleBefore + lastTokens, "only the buyer's tokens became eligible");
+        assertEq(IERC20(token).balanceOf(pad.pairOf(token)), POOL_SUPPLY);
+
+        _warp(2 hours);
+        _modelAccrue();
+        _poolBuy(erin, token, 5_000e6);
+        _warp(5 hours);
+        _modelAccrue();
+        _poolSell(bob, token, IERC20(token).balanceOf(bob) / 2);
+        _warp(12 hours); // past the end
+        _assertModel();
+
+        ILaunchToken lt = ILaunchToken(token);
+        assertGt(IERC20(token).balanceOf(pad.pairOf(token)), POOL_SUPPLY);
+        assertEq(lt.claimable(pad.pairOf(token)), 0, "the pool never earns");
+        assertEq(lt.claimable(address(pad)), 0, "the curve inventory never earns");
+        assertEq(lt.claimable(DEAD), 0);
+        _finishStream(token);
         _assertSystem();
     }
 
-    // ─── Deliveries over time ─────────────────────────────────────────────────
+    // ─── Excluded accounts, burns, the forwarder ──────────────────────────────
 
-    /// @dev Deliveries at different times, a keeper dripping hourly through the gaps. At every step: releases never
-    ///      exceed deliveries and delivered == distributed + unreleased. After the last delivery the end lies within a
-    ///      period, regular drips never move it, and everything is out by it.
-    function test_holders_deliveriesOverTime_allOutByTheEnd() public {
-        address token = _launch(Kind.Holder, 600, 1_000e6);
-        uint64[5] memory gaps = [uint64(0), 3 hours, 7 hours, 30 minutes, 20 hours];
-        uint256 lastDelivery;
-        for (uint256 i; i < gaps.length; ++i) {
-            _dripEvery(token, gaps[i]);
-            _buy(i % 2 == 0 ? bob : carol, token, 1_500e6 + i * 111e6);
-            if (i == 2) _curveSell(bob, token, IERC20(token).balanceOf(bob) / 3);
-            _deliver(token);
-            lastDelivery = _now();
-            _assertStreamConserved(token);
-            assertLe(holder.totalDistributed(token), ghostDelivered[token], "releases never exceed deliveries");
-        }
-        uint256 end = holder.streamEnd(token);
-        assertLe(end, lastDelivery + PERIOD, "ends within a period of the last delivery");
-        while (_now() + KEEPER_INTERVAL < end) {
-            _warp(KEEPER_INTERVAL);
-            _drip(token);
-            assertEq(holder.streamEnd(token), end, "regular drips never move the end");
-            assertGt(holder.unreleased(token), 0, "not all out before the end");
-            _assertStreamConserved(token);
-        }
-        vm.warp(end);
-        vm.roll(vm.getBlockNumber() + 1);
-        assertEq(holder.releasable(token), holder.unreleased(token), "all due at streamEnd");
-        _drip(token);
-        assertEq(holder.unreleased(token), 0);
-        assertEq(holder.totalDistributed(token), ghostDelivered[token]);
+    /// @dev Tokens sent to the burn address and tokens burned stop earning; the curve inventory, the pair, the burn
+    ///      address and address(0) never earn; the rest still goes to the holders, exactly by time and balance.
+    function test_holders_excludedAddressesAndBurnsNeverEarn() public {
+        address token = _launch(Kind.Holder, 500, 1_000e6);
+        _curveBuy(bob, token, 8_000e6);
+        uint256 amount = _deliver(token);
+        _modelStart(token, amount, _addrs(alice, bob));
+        _warp(6 hours);
+        _modelAccrue();
+        vm.prank(bob);
+        IERC20(token).transfer(DEAD, 10_000_000e18);
+        _warp(6 hours);
+        _modelAccrue();
+        uint256 burnt = IERC20(token).balanceOf(alice) / 2;
+        vm.prank(alice);
+        ILaunchToken(token).burn(burnt);
+        assertEq(ILaunchToken(token).eligibleSupply(), _eligible(token));
+        _warp(13 hours);
+        _assertModel();
+        ILaunchToken lt = ILaunchToken(token);
+        assertEq(lt.claimable(address(pad)) + lt.claimable(pad.pairOf(token)) + lt.claimable(DEAD) + lt.claimable(address(0)), 0);
+        assertTrue(lt.isExcluded(address(pad)) && lt.isExcluded(pad.pairOf(token)) && lt.isExcluded(DEAD));
+        assertFalse(lt.isExcluded(address(router)) || lt.isExcluded(address(holder)));
+        _finishStream(token);
         _assertSystem();
     }
 
-    /// @dev A holder who sells keeps what they earned while holding and earns nothing afterwards.
-    function test_holders_sellerKeepsWhatTheyEarned() public {
-        address token = _launch(Kind.Holder, 1000, 2_000e6);
-        _curveBuy(dave, token, 4_000e6);
-        _deliver(token);
-        _warp(PERIOD);
-        _drip(token);
-        uint256 earned = ILaunchToken(token).claimable(dave);
-        assertGt(earned, 0);
-        _curveSell(dave, token, IERC20(token).balanceOf(dave));
-        _curveBuy(bob, token, 3_000e6);
-        _deliver(token);
-        _warp(PERIOD);
-        _drip(token);
-        assertEq(ILaunchToken(token).claimable(dave), earned, "kept, and nothing more");
-        assertEq(_claim(token, dave), earned);
-        _assertSystem();
-    }
-
-    /// @dev Without eligible supply nothing is released; what matured goes out once there are holders (documented).
-    function test_holders_noEligibleSupply_holdsUntilThereAreHolders() public {
+    /// @dev The plugin forwards every collection in the same call and holds nothing; a delivery while nobody holds
+    ///      does not revert (onFees never reverts holder-side): the stream waits, paused, for the first holder.
+    function test_holders_pluginIsAForwarder_evenWithNoHolders() public {
         address token = _launch(Kind.Holder, 1000, 0);
         _curveBuy(bob, token, 3_000e6);
         _curveSell(bob, token, IERC20(token).balanceOf(bob));
-        assertEq(ILaunchToken(token).eligibleSupply(), 0, "everything is back in the curve inventory");
-        uint256 amount = _deliver(token);
-        _warp(PERIOD);
-        assertEq(holder.releasable(token), 0);
-        assertEq(_drip(token), 0);
-        assertEq(holder.unreleased(token), amount, "held, not lost");
+        assertEq(ILaunchToken(token).eligibleSupply(), 0);
+        uint256 owed = pad.pendingCreatorFees(token);
+        uint256 amount = _deliver(token); // checks the whole amount went into the token's distribute
+        assertEq(amount, owed);
+        assertEq(holder.totalDistributed(token), owed);
+        assertEq(holder.usdcHeld(token), 0);
+        _warp(3 days);
+        assertApproxEqAbs(ILaunchToken(token).undistributed(), amount, 1, "waiting, not lost");
         _curveBuy(carol, token, 1_000e6);
-        _dripEvery(token, PERIOD + KEEPER_INTERVAL);
-        assertEq(holder.unreleased(token), 0, "out once there are holders and someone drips");
-        _collect(token);
+        assertEq(ILaunchToken(token).claimable(carol), 0);
+        _finishStream(token);
+        assertApproxEqAbs(ILaunchToken(token).claimable(carol), amount, 1, "the first holder gets it, over time");
         _assertSystem();
     }
 
-    // ─── Fuzz ─────────────────────────────────────────────────────────────────
+    // ─── Conservation, fuzzed ─────────────────────────────────────────────────
 
-    /// @dev Random trades, deliveries, drips, claims and gaps (up to 9 hours, so an idle stream may pause), on both
-    ///      sides of graduation. The stream properties hold at every step; after a last delivery and a period of hourly
-    ///      drips, everything has gone to holders.
+    /// @dev Random trades, deliveries (several, into a running stream), transfers, burns, claims and gaps, across
+    ///      graduation. After every step: distributed == Σ claimed + Σ claimable + undistributed + dust (in
+    ///      _assertSystem). At the end, past the stream's end, everything distributed reached holders.
     /// forge-config: default.fuzz.runs = 64
-    function testFuzz_holders_dripConservation(uint256 seed, uint16 bpsRaw) public {
-        uint16 bps = uint16(bound(bpsRaw, 100, 1000));
-        address token = _launch(Kind.Holder, bps, 1_000e6);
+    function testFuzz_holders_streamConservation(uint256 seed, uint16 bpsRaw) public {
+        address token = _launch(Kind.Holder, uint16(bound(bpsRaw, 100, 1000)), 1_000e6);
         address[4] memory traders = [bob, carol, dave, erin];
-        for (uint256 i; i < 16; ++i) {
+        for (uint256 i; i < 18; ++i) {
             uint256 r = uint256(keccak256(abi.encode(seed, i)));
             address who = traders[r % 4];
-            uint256 action = (r >> 8) % 6;
-            if (action == 0 || action == 1) {
+            uint256 action = (r >> 8) % 8;
+            uint256 bal = IERC20(token).balanceOf(who);
+            if (action <= 1) {
                 _buy(who, token, bound(r >> 16, 10e6, 6_000e6));
             } else if (action == 2) {
-                uint256 bal = IERC20(token).balanceOf(who);
                 if (bal > 1e21) _sell(who, token, bal / 2);
             } else if (action == 3) {
                 _deliver(token);
             } else if (action == 4) {
-                _drip(token);
-            } else {
+                if (ILaunchToken(token).claimable(who) != 0) _claim(token, who);
+            } else if (action == 5 && bal > 1e21) {
+                address to = traders[(r >> 16) % 4];
                 vm.prank(who);
-                holder.dripAndClaim(token);
+                IERC20(token).transfer(to, bal / 3);
+                _addHolder(token, to);
+            } else if (action == 6 && bal > 1e21) {
+                vm.prank(who);
+                ILaunchToken(token).burn(bal / 5);
+            } else if (action == 7 && !pad.isGraduated(token)) {
+                _graduateVia(who, token);
             }
-            assertLe(holder.totalDistributed(token), ghostDelivered[token], "never more out than in");
-            _assertStreamConserved(token);
-            _warp(bound(r >> 128, 0, 9 hours));
+            _assertSystem();
+            _warp(bound(r >> 128, 0, 10 hours));
         }
         _deliver(token);
-        if (holder.unreleased(token) != 0) {
-            assertLe(holder.streamEnd(token), holder.lastDrip(token) + PERIOD, "the end is within a period of lastDrip");
-        }
-        // Dripped hourly from here, everything is out within a period (the end is never more than a period past the
-        // last release or delivery).
-        _dripEvery(token, PERIOD + KEEPER_INTERVAL);
-        if (ILaunchToken(token).eligibleSupply() != 0) {
-            assertEq(holder.unreleased(token), 0, "all out a period later, dripped hourly");
-        }
+        if (ILaunchToken(token).eligibleSupply() == 0) _buy(frank, token, 1_000e6);
+        _finishStream(token);
         _assertSystem();
     }
 }
