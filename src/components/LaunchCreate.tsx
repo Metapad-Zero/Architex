@@ -1,17 +1,24 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from 'react'
 import type { Address } from 'viem'
 import { useAccount } from 'wagmi'
+import { activeChain } from '../chain'
 import { useConnectSheet } from '../hooks/useConnectSheet'
 import { useCreateToken } from '../hooks/useCreateToken'
+import { useFeePluginProbe } from '../hooks/useFeePluginProbe'
 import { useLaunch } from '../hooks/useLaunch'
 import { useSettings } from '../hooks/useSettings'
 import { parseOptionalAmount, sanitizeAmount } from '../lib/amountInput'
-import { formatAmount } from '../lib/format'
+import { deployment, launchSuite } from '../lib/deployment'
+import { formatAmount, formatPct } from '../lib/format'
 import { metadataStatus } from '../lib/ipfs'
 import { NAME_MAX_BYTES, SYMBOL_MAX_BYTES, utf8ByteLength } from '../lib/launch'
+import { MAX_CREATOR_FEE_BPS, parsePercentBps, planFeePlugin, type FeePlan } from '../lib/plugins/plan'
 import { prepareImage, type PreparedImage } from '../lib/prepareImage'
 import { saveTokenDetails } from '../lib/saveDetails'
 import { METADATA_LIMITS, hasMetadata, metadataErrors, type MetadataInput } from '../lib/tokenMetadata'
+import { CreatorFeeField } from './CreatorFeeField'
+import { FeeDestinationPicker, planAddresses, planSummary } from './FeeDestinationPicker'
+import { FeeGauge } from './FeeGauge'
 import { GhostButton } from './GhostButton'
 import { PrimaryButton } from './PrimaryButton'
 import { TxStatus } from './TxStatus'
@@ -72,19 +79,39 @@ export function LaunchCreate({ onCreated }: LaunchCreateProps) {
 
   const firstBuyInput = useMemo(() => parseOptionalAmount(firstBuy, usdc.decimals), [firstBuy, usdc.decimals])
   const initialBuyUsdc = firstBuyInput.amount ?? 0n
-  const firstBuyError = firstBuyInput.error
 
-  const valid = !nameError && !symbolError && !firstBuyError && Object.keys(detailErrors).length === 0 && !imageProblem
+  // Creator fee: starts at 0% [D4]. Where it goes: the creator's own wallet until they choose otherwise.
+  const [feeText, setFeeText] = useState('0')
+  const fee = parsePercentBps(feeText, MAX_CREATOR_FEE_BPS, 0)
+  const creatorFeeBps = fee.bps ?? 0
+  const [plan, setPlan] = useState<FeePlan>({ kind: 'wallet', address: '' })
+  const probed = useFeePluginProbe(useMemo(() => planAddresses(plan), [plan]))
+  const planned = useMemo(
+    () =>
+      planFeePlugin(plan, {
+        creator: address,
+        usdc: activeChain.usdc,
+        suite: launchSuite,
+        architexContracts: [deployment.factory, deployment.router, deployment.lens],
+        pluginAddresses: probed,
+      }),
+    [address, plan, probed],
+  )
+
+  const valid =
+    !nameError && !symbolError && !firstBuyInput.error && !fee.error && Object.keys(detailErrors).length === 0 && !imageProblem && Boolean(planned.plan)
 
   const create = useCreateToken({
     name: name.trim(),
     symbol: symbol.trim(),
     metadataURI: '',
+    creatorFeeBps,
+    pluginPlan: planned.plan,
     valid,
     initialBuyUsdc,
     slippageBps: settings.slippageBps,
     usdcBalance,
-    usdcAllowance,
+    usdcAllowance: usdcAllowance.launchpad,
     usdcDecimals: usdc.decimals,
     onApproved: refetch,
     onCreated: (token) => {
@@ -92,6 +119,7 @@ export function LaunchCreate({ onCreated }: LaunchCreateProps) {
       onCreated(token)
     },
   })
+  const firstBuyError = firstBuyInput.error ?? (create.firstBuyInvalid ? 'That buy is too small: the fees would take all of it.' : undefined)
 
   const submit = async (event: FormEvent) => {
     event.preventDefault()
@@ -144,6 +172,8 @@ export function LaunchCreate({ onCreated }: LaunchCreateProps) {
   }
 
   const receive = create.firstBuy ? `${formatAmount(create.firstBuy.tokensOut, 18)} ${symbol.trim() || 'TOKEN'}` : GHOST
+  // Both fees on the creator's own first buy [D3], together: the platform's 0.5% and the creator fee.
+  const buyFees = create.firstBuy ? `${formatAmount(create.firstBuy.platformFee + create.firstBuy.creatorFee, usdc.decimals)} USDC` : GHOST
   const total = create.feeKnown && !firstBuyError ? `${formatAmount(create.totalUsdc, usdc.decimals)} USDC` : GHOST
 
   return (
@@ -151,7 +181,7 @@ export function LaunchCreate({ onCreated }: LaunchCreateProps) {
       <div className="mb-10 max-w-xl">
         <h1 className="text-xl font-semibold tracking-[-0.02em]">Create a token</h1>
         <p className="mt-2 text-sm text-g500">
-          Name and symbol are on-chain forever. The optional first buy happens in the same transaction, so nobody can buy before you.
+          Name, symbol, creator fee and where the fees go are on-chain forever. The optional first buy happens in the same transaction, so nobody can buy before you.
         </p>
       </div>
 
@@ -193,6 +223,17 @@ export function LaunchCreate({ onCreated }: LaunchCreateProps) {
             </div>
             {submitted && symbolError && <p id="launch-symbol-error" className="mt-2 text-sm text-loss" role="alert">{symbolError}</p>}
           </div>
+
+          <CreatorFeeField text={feeText} onText={setFeeText} showError={submitted} />
+
+          <FeeDestinationPicker
+            plan={plan}
+            onPlan={setPlan}
+            errors={planned.errors}
+            showErrors={submitted}
+            account={address}
+            probed={probed}
+          />
 
           {detailsEnabled && (
             <fieldset className="launch-details">
@@ -282,7 +323,7 @@ export function LaunchCreate({ onCreated }: LaunchCreateProps) {
             </div>
             {submitted && firstBuyError && <p id="launch-first-buy-error" className="mt-2 text-sm text-loss" role="alert">{firstBuyError}</p>}
             <p className="mt-2 text-xs leading-5 text-g500">
-              Optional. This buy happens in the same transaction as the create, so nobody can buy before you.
+              Optional. This buy happens in the same transaction as the create, so nobody can buy before you. It pays both fees like any other buy.
             </p>
             {address && (
               <p className="mt-1 text-sm text-g500">Balance {formatAmount(usdcBalance, usdc.decimals)}</p>
@@ -292,7 +333,20 @@ export function LaunchCreate({ onCreated }: LaunchCreateProps) {
 
         <dl className="receipt-lines mt-8">
           <div><dt>Launch fee</dt><dd>{create.feeKnown ? `${create.formatFee} USDC` : GHOST}</dd></div>
+          <div>
+            <dt>Creator fee</dt>
+            <dd className={fee.error ? 'text-g500' : ''}>
+              {fee.error ? GHOST : (
+                <span className="inline-flex items-center gap-2">
+                  <FeeGauge bps={creatorFeeBps} showValue={false} decorative />
+                  {formatPct(creatorFeeBps)} of every trade
+                </span>
+              )}
+            </dd>
+          </div>
+          <div><dt>Fees go to</dt><dd>{planSummary(plan, address)}</dd></div>
           <div><dt>You receive</dt><dd className={create.firstBuy ? '' : 'text-g500'}>{receive}</dd></div>
+          <div><dt>Fees on your buy</dt><dd className={create.firstBuy ? '' : 'text-g500'}>{buyFees}</dd></div>
           <div><dt>Total</dt><dd>{total}</dd></div>
         </dl>
 

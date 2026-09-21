@@ -6,13 +6,12 @@ import { launchpadAbi, lensAbi } from '../lib/abi'
 import { deployment, isDeployed, isLaunchpadDeployed } from '../lib/deployment'
 import { pairKey, type AmmPair } from '../lib/amm'
 import { lensClient } from '../lib/lensClient'
-import { LENS_PAGE, poolHold, readAllPages, type PoolHold } from '../lib/pairList'
+import { LENS_PAGE, readAllPages, withoutLaunchPools, type LaunchLookup } from '../lib/pairList'
+import { isCanonicalToken } from '../lib/tokens'
 
 export interface PairInfo extends AmmPair {
   blockTimestampLast: number
 }
-
-const isUsdc = (address: string) => address.toLowerCase() === activeChain.usdc.toLowerCase()
 
 const pairsPage = (start: bigint) =>
   ({ address: deployment.lens, abi: lensAbi, functionName: 'pairs', args: [start, LENS_PAGE] }) as const
@@ -25,7 +24,6 @@ export function usePairs() {
     refetchInterval: 4_000,
     queryFn: () => {
       if (!publicClient) throw new Error('No RPC client for Arc')
-      // Every launch adds a factory pair, so the list outgrows one page.
       return readAllPages(
         () => Promise.all([
           publicClient.readContract({ address: deployment.lens, abi: lensAbi, functionName: 'pairsLength' }),
@@ -50,39 +48,34 @@ export function usePairs() {
     [query.data],
   )
 
-  // Every launch reserves its USDC pool when the token is created, and that pool stays locked until the
-  // curve sells out: nobody can add liquidity to it or trade through it. Such a pool is not a pool yet,
-  // so it is kept out of the list and its token out of the pickers. Only never-funded USDC pools are asked about.
-  const unfunded = useMemo(
-    () => (isLaunchpadDeployed ? all.filter((pair) => pair.totalSupply === 0n && (isUsdc(pair.token0) || isUsdc(pair.token1))) : []),
+  // Launch tokens trade in their own launch pools, never through a core pool (see withoutLaunchPools). Only tokens
+  // that are not in the deployment list are asked about, once each; the answer never changes, so it is not polled
+  // once every token has one.
+  const candidates = useMemo(
+    () =>
+      isLaunchpadDeployed
+        ? [...new Set(all.flatMap((pair) => [pair.token0, pair.token1]).filter((token) => !isCanonicalToken(token)).map((token) => token.toLowerCase()))]
+        : [],
     [all],
   )
-  const curves = useReadContracts({
-    contracts: unfunded.map((pair) => ({
+  const lookups = useReadContracts({
+    contracts: candidates.map((token) => ({
       address: deployment.launchpad,
       abi: launchpadAbi,
-      functionName: 'curves' as const,
-      args: [isUsdc(pair.token0) ? pair.token1 : pair.token0] as const,
+      functionName: 'pluginOf' as const,
+      args: [token as `0x${string}`] as const,
     })),
     query: {
-      enabled: unfunded.length > 0,
-      staleTime: 30_000,
-      refetchInterval: (current) => (!current.state.data || current.state.data.some((lookup) => poolHold(lookup) === 'unknown') ? 4_000 : false),
+      enabled: candidates.length > 0,
+      staleTime: Number.POSITIVE_INFINITY,
+      refetchInterval: (current) => (!current.state.data || current.state.data.some((lookup) => lookup.status !== 'success') ? 4_000 : false),
     },
   })
 
-  const { pairs, heldBack } = useMemo(() => {
-    const held = new Map<string, PoolHold>()
-    if (unfunded.length === 0) return { pairs: all, heldBack: held }
-    const hidden = new Set<string>()
-    unfunded.forEach((pair, index) => {
-      const hold = poolHold(curves.data?.[index])
-      if (!hold) return
-      hidden.add(pair.pair.toLowerCase())
-      held.set((isUsdc(pair.token0) ? pair.token1 : pair.token0).toLowerCase(), hold)
-    })
-    return { pairs: all.filter((pair) => !hidden.has(pair.pair.toLowerCase())), heldBack: held }
-  }, [all, curves.data, unfunded])
+  const pairs = useMemo(
+    () => withoutLaunchPools(all, candidates, lookups.data as readonly LaunchLookup[] | undefined),
+    [all, candidates, lookups.data],
+  )
 
   const pairMap = useMemo(
     () => new Map(pairs.map((pair) => [pairKey(pair.token0, pair.token1), pair])),
@@ -92,7 +85,6 @@ export function usePairs() {
   return {
     pairs,
     pairMap,
-    heldBack,
     isLoading: isDeployed && query.isLoading,
     error: query.error,
     refetch: query.refetch,

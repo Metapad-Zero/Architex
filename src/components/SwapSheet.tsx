@@ -4,7 +4,7 @@ import { useAccount } from 'wagmi'
 import { useConnectSheet } from '../hooks/useConnectSheet'
 import { activeChain } from '../chain'
 import { quote as ratioQuote, reservesFor, type QuoteMode } from '../lib/amm'
-import { isDeployed } from '../lib/deployment'
+import { isDeployed, isLaunchViewAvailable } from '../lib/deployment'
 import { formatAmount, formatUsd, parseAmount } from '../lib/format'
 import { useRecent } from '../lib/recent'
 import { findTokenByRef, formatSwapUrl, parseSwapUrl, readLastPair, tokenRef, writeLastPair } from '../lib/swapUrl'
@@ -22,11 +22,26 @@ import { PrimaryButton } from './PrimaryButton'
 import { ReceiptLines } from './ReceiptLines'
 import { RecentLedger } from './RecentLedger'
 import { SettingsPopover } from './SettingsPopover'
+import type { PickerExtra } from './TokenSelect'
 import { TxStatus } from './TxStatus'
 import { useSwitchToArc } from '../hooks/useSwitchToArc'
 
 // Below the sheet and not needed to swap: kept out of the first chunk.
 const SwapPriceChart = lazy(() => import('./SwapPriceChart'))
+// Launch tokens in the picker: loaded the first time a picker opens, and only where the launchpad is live.
+const LaunchPickerGroup = lazy(() => import('./LaunchPickerGroup'))
+
+/** Graduated launch tokens under the picker's tokens, each opening its own trade sheet on `side` [D12]. */
+function launchTokensIn(side: 'buy' | 'sell'): PickerExtra | undefined {
+  if (!isLaunchViewAvailable) return undefined
+  return ({ query }) => (
+    <Suspense fallback={null}>
+      <LaunchPickerGroup query={query} side={side} />
+    </Suspense>
+  )
+}
+const PAY_SIDE_LAUNCHES = launchTokensIn('sell')
+const RECEIVE_SIDE_LAUNCHES = launchTokensIn('buy')
 
 function findToken(tokens: readonly Token[], address: Address | undefined): Token | undefined {
   return tokens.find((token) => token.address.toLowerCase() === address?.toLowerCase())
@@ -60,7 +75,7 @@ export function SwapSheet() {
     ?? tokens.find((token) => token.address !== tokenIn?.address)
   const enteredAmount = mode === 'exactIn' ? amountIn : amountOut
 
-  // A token named in the URL (e.g. "Trade on Swap" from a launch) may not be in the list yet — the pairs are still
+  // A token named in the URL (a shared link, say) may not be in the list yet — the pairs are still
   // loading, or the read failed. Until the user picks, don't overwrite it with the fallback pair.
   const unresolvedRef =
     (initialState.in !== undefined && !findTokenByRef(tokens, initialState.in))
@@ -215,6 +230,7 @@ export function SwapSheet() {
           usdValue={payUsd}
           onSubmit={() => { if (!swap.isDisabled && !swap.isLoading) void handlePrimary() }}
           hotkey="pay-token"
+          pickerExtra={PAY_SIDE_LAUNCHES}
         />
 
         <div className="flip-rule">
@@ -239,6 +255,7 @@ export function SwapSheet() {
           usdValue={receiveUsd}
           checkBalance={false}
           onSubmit={() => { if (!swap.isDisabled && !swap.isLoading) void handlePrimary() }}
+          pickerExtra={RECEIVE_SIDE_LAUNCHES}
         />
 
         <ReceiptLines quote={quote} mode={mode} tokenIn={tokenIn} tokenOut={tokenOut} tokens={tokens} />

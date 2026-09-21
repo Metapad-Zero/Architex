@@ -1,5 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
-import type { CSSProperties, KeyboardEvent } from 'react'
+import type { CSSProperties, KeyboardEvent, ReactNode } from 'react'
 import type { Token } from '../lib/tokens'
 import { isCanonicalToken } from '../lib/tokens'
 import { TokenMark } from './TokenMark'
@@ -7,6 +7,12 @@ import { formatAmount, shortAddress } from '../lib/format'
 import { hidePopover, showPopover } from '../lib/popover'
 import { ChevronIcon, SearchIcon } from './Icons'
 import { GhostButton } from './GhostButton'
+
+/**
+ * Rows a page adds under the picker's tokens; rendered (and so mounted) only while the picker is open. They are
+ * links to other pages, so they need no way to close the picker: leaving the page takes it away.
+ */
+export type PickerExtra = (props: { query: string }) => ReactNode
 
 interface TokenSelectProps {
   token: Token | undefined
@@ -16,9 +22,10 @@ interface TokenSelectProps {
   disabled?: boolean
   label?: string
   hotkey?: string
+  extra?: PickerExtra
 }
 
-export function TokenSelect({ token, tokens, balances, onSelect, disabled = false, label = 'Select token', hotkey }: TokenSelectProps) {
+export function TokenSelect({ token, tokens, balances, onSelect, disabled = false, label = 'Select token', hotkey, extra }: TokenSelectProps) {
   const rawId = useId()
   const popoverId = `token-${rawId.replace(/:/g, '')}`
   const triggerRef = useRef<HTMLButtonElement>(null)
@@ -140,7 +147,8 @@ export function TokenSelect({ token, tokens, balances, onSelect, disabled = fals
             placeholder="Search symbol, name, or address"
           />
         </div>
-        <div className="token-list" role="listbox" aria-label="Tokens">
+        <div className="token-list">
+          <div role="listbox" aria-label="Tokens">
           {filtered.map((item, index) => {
             const selected = item.address.toLowerCase() === token?.address.toLowerCase()
             return (
@@ -171,7 +179,9 @@ export function TokenSelect({ token, tokens, balances, onSelect, disabled = fals
               </button>
             )
           })}
-          {filtered.length === 0 && <p className="px-4 py-8 text-center text-sm text-g500">No matching tokens.</p>}
+          </div>
+          {filtered.length === 0 && <p className="px-4 py-8 text-center text-sm text-g500">{extra ? 'No pool tokens match.' : 'No matching tokens.'}</p>}
+          {isOpen && extra?.({ query })}
         </div>
       </div>
     </>

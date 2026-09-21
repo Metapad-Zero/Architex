@@ -321,10 +321,14 @@ input[type='checkbox'], input[type='radio'], input[type='range'] { accent-color:
   .launches-table th, .launches-table td { @apply px-3 py-4 align-middle first:pl-0 last:pr-0; }
   .launches-table thead th { @apply font-normal; }
   .launches-table th:nth-child(n + 2), .launches-table td:nth-child(n + 2) { @apply text-right; }
-  .launches-table th:nth-child(2) { @apply w-40; }
-  .launches-table th:nth-child(3) { @apply w-64; }
-  .launches-table th:nth-child(4) { @apply w-32; }
-  .launches-table td:nth-child(4) { @apply whitespace-nowrap text-g500; }
+  .launches-table th:nth-child(2) { @apply w-36; }
+  .launches-table th:nth-child(3) { @apply w-44; }
+  .launches-table th:nth-child(4) { @apply w-64; }
+  .launches-table th:nth-child(5) { @apply w-28; }
+  .launches-table td:nth-child(5) { @apply whitespace-nowrap text-g500; }
+  /* A launch's creator fee in a list: the small gauge and figure, where the fees go under it. */
+  .launch-fee { @apply inline-flex min-w-0 max-w-full flex-col items-end gap-0.5; }
+  .launch-fee-to { @apply block max-w-full truncate text-2xs text-g500; }
   .launch-row { @apply border-b border-g300; }
   .launch-sold { @apply flex items-center justify-end gap-3 whitespace-nowrap; }
   .launch-sold > span { @apply min-w-[7.5rem] text-right; }
@@ -349,6 +353,86 @@ input[type='checkbox'], input[type='radio'], input[type='range'] { accent-color:
   .launch-detail > * { @apply min-w-0; }
   .token-static { @apply inline-flex min-h-11 shrink-0 items-center gap-2 text-base font-semibold; }
   .launch-create { @apply relative max-w-xl border-t border-ink pt-8; }
+
+  /* A creator fee on its needle gauge (FeeGauge): data in the page's inks, never a signal colour. A Warm Gray 300
+     track, the fee so far as a 2px ink arc, an ink needle; the large dial adds ink ticks at 0, 5 and 10%. */
+  .fee-gauge { @apply inline-flex items-center gap-2 whitespace-nowrap align-middle; }
+  .fee-gauge svg { @apply block shrink-0 overflow-visible; }
+  .fee-gauge-track { fill: none; stroke: var(--g300); stroke-width: 1.5; }
+  .fee-gauge-arc { fill: none; stroke: var(--ink); stroke-width: 2; }
+  .fee-gauge-tick { stroke: var(--g500); stroke-width: 1; }
+  .fee-gauge-tick-major { stroke: var(--ink); stroke-width: 1; }
+  .fee-gauge-needle line { stroke: var(--ink); stroke-width: 1.5; stroke-linecap: square; }
+  .fee-gauge-hub { fill: var(--ink); }
+  /* Only the builder's gauge moves, following its input; reduced motion collapses this with every transition. */
+  .fee-gauge[data-live] .fee-gauge-needle { transition: transform 200ms cubic-bezier(0.2, 0, 0, 1); }
+  .fee-gauge[data-live] .fee-gauge-arc { transition: stroke-dasharray 200ms cubic-bezier(0.2, 0, 0, 1); }
+  .fee-gauge-lg { @apply flex-col items-stretch gap-0; }
+  .fee-gauge-lg .fee-gauge-track { stroke-width: 1; }
+  .fee-gauge-lg .fee-gauge-needle line { stroke-width: 2; }
+  .fee-gauge-scale { @apply mt-0.5 flex justify-between text-2xs text-g500; }
+  .fee-gauge-lg .fee-gauge-value { @apply mt-1 text-center text-lg font-semibold tracking-[-0.01em]; }
+
+  /* The builder's creator fee: the dial beside its controls from 640px, above them on a phone. */
+  .creator-fee-body { @apply mt-2 grid gap-4 sm:grid-cols-[auto_minmax(0,1fr)] sm:items-start sm:gap-6; }
+  .creator-fee .fee-gauge-lg { @apply justify-self-start; }
+
+  /* The plugin marketplace: large choice cells (the choice-button grammar), then the chosen one's settings in
+     the Warm Gray 100 inline-form block. */
+  .fee-destination { @apply m-0 min-w-0 border-0 p-0; }
+  .fee-options { @apply mt-3 grid gap-2 sm:grid-cols-2; }
+  .fee-option { @apply flex min-h-16 cursor-pointer flex-col justify-center rounded border border-ink bg-paper px-3 py-2 transition-colors duration-200 ease-out hover:bg-g100; }
+  .fee-option-name { @apply text-sm font-semibold; }
+  .fee-option-tagline { @apply text-2xs text-g500; }
+  .fee-option[data-selected='true'] { @apply bg-ink text-paper hover:bg-ink; }
+  .fee-option[data-selected='true'] .fee-option-tagline { @apply text-paper; }
+  .fee-option:has(input:focus-visible) { outline: 2px solid var(--ink); outline-offset: 2px; }
+  .fee-option[data-disabled] { @apply cursor-not-allowed border-g300 bg-g100 text-g500 hover:bg-g100; }
+  .fee-config { @apply mt-3 min-w-0 bg-g100 p-4 sm:p-6; }
+
+  /* Split payees and Combo destinations: ruled rows of compact fields; a row's problems sit under it. */
+  .payee-head { @apply hidden text-sm text-g500 sm:grid sm:gap-2 sm:pb-1; grid-template-columns: minmax(0, 1fr) 10rem 4.5rem; }
+  .payee-row { @apply grid items-start gap-2 py-2; grid-template-columns: minmax(0, 1fr) auto; }
+  .payee-address, .payee-errors { grid-column: 1 / -1; }
+  .payee-errors:empty { display: none; }
+  .payee-errors > p { @apply mt-0; }
+  .payee-share > span { @apply min-w-[4.75rem] text-right; }
+  .row-remove {
+    @apply min-h-11 px-2 text-sm font-semibold text-g700 underline underline-offset-[3px] hover:text-ink disabled:cursor-not-allowed disabled:text-g300 disabled:no-underline;
+  }
+  .combo-total { @apply flex min-h-10 items-center justify-between gap-4 border-b border-ink text-sm; }
+  .combo-entries { @apply m-0 list-none p-0; }
+  .combo-entry { @apply border-b border-g300 py-4; }
+  .combo-entry-head { @apply grid items-center gap-2; grid-template-columns: minmax(0, 1fr) auto; }
+  .combo-entry-head > .combo-kind { grid-column: 1 / -1; }
+  .combo-entry-body { @apply mt-3; }
+  .field-with-suffix select { @apply h-full min-w-0 flex-1 cursor-pointer border-0 bg-transparent px-3 text-base outline-none; }
+
+  /* The token page's creator fees: the dial beside what waits and where it goes, then each plugin's own view as
+     a ruled sub-section. Every action here is a ghost: the page's one yellow button is the trade. */
+  .creator-fees-summary { @apply grid gap-6 pb-2 sm:grid-cols-[auto_minmax(0,1fr)] sm:gap-10; }
+  .creator-fees-summary .fee-gauge-lg { @apply justify-self-start; }
+  .fee-plugin { @apply mt-10 border-t border-ink; }
+  .fee-plugin-head { @apply flex min-h-12 items-center justify-between gap-4; }
+  .fee-plugin-head h3 { @apply text-base font-semibold; }
+  .fee-plugin-head > span { @apply text-sm text-g500; }
+  .fee-plugin-note { @apply mt-3 max-w-2xl text-xs leading-5 text-g500; }
+  .payee-ledger-row { @apply flex min-h-14 flex-wrap items-center gap-x-4 gap-y-1 border-b border-g300 py-2 text-sm; }
+  /* Where a trade happens and where its creator fee goes, one quiet line over the buy / sell choice. */
+  .trade-venue { @apply truncate pt-7 text-sm; }
+  /* Launch tokens under the Swap picker's tokens: they open their own page, so they are links, set off by a rule. */
+  .launch-picker { @apply mt-1 border-t border-g300 pt-2; }
+  .launch-picker-head { @apply px-3 pb-2 text-2xs leading-5 text-g500; }
+  .launch-picker .token-row { @apply text-ink no-underline; }
+  .launch-picker-all { @apply flex min-h-11 items-center px-3 text-sm font-semibold underline underline-offset-[3px] hover:bg-g100; }
+}
+
+@media (min-width: 640px) {
+  .payee-row { grid-template-columns: minmax(0, 1fr) 10rem 4.5rem; }
+  .payee-address { grid-column: auto; }
+  /* From 640px a Combo destination's kind, share and Remove share one row; on a phone the kind takes its own. */
+  .combo-entry-head { grid-template-columns: minmax(0, 1fr) 7rem auto; }
+  .combo-entry-head > .combo-kind { grid-column: auto; }
 }
 
 @keyframes rule-sweep {
@@ -414,8 +498,11 @@ input[type='checkbox'], input[type='radio'], input[type='range'] { accent-color:
   .launch-row .pool-toggle { min-width: 0; max-width: 100%; }
   .launch-sold > span { min-width: 0; text-align: left; }
   .launch-row td:nth-child(2) { justify-content: flex-end; text-align: right; }
-  .launch-row td:nth-child(3) { grid-column: 1; min-height: 0; padding-bottom: 4px; }
-  .launch-row td:nth-child(4) { grid-column: 2; min-height: 0; justify-content: flex-end; padding-bottom: 8px; color: var(--g500); }
+  /* Phone: token and cap, then the meter over the age on the left and the creator fee on the right. */
+  .launch-row td:nth-child(3) { grid-column: 2; grid-row: 2 / span 2; min-height: 0; justify-content: flex-end; align-items: flex-start; padding-left: 12px; }
+  .launch-row td:nth-child(4) { grid-column: 1; grid-row: 2; min-height: 0; padding-bottom: 4px; }
+  .launch-row td:nth-child(5) { grid-column: 1; grid-row: 3; min-height: 0; padding-bottom: 8px; color: var(--g500); }
+  .launch-fee-to { max-width: 9rem; }
   .launch-sold { justify-content: flex-start; }
 }
 

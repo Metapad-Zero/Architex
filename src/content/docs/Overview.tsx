@@ -9,6 +9,11 @@ export function DocsOverview() {
         bought in that it's ready for a normal market.
       </p>
       <p>
+        Each launch also carries a creator fee, from 0% to 10% of every buy and sell, and a
+        destination for it: the creator's wallet, or a plugin that splits it, buys the token back
+        and burns it, or pays it to holders. Both are chosen at launch and locked for good.
+      </p>
+      <p>
         That's the whole idea. Everything past this page is detail — how the price actually
         moves, what a creator commits to permanently, what changes the moment a token graduates
         into Architex's regular AMM, and what you're accepting by putting real USDC into
