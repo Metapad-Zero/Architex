@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { formatBridgeUrl, parseBridgeUrl } from '../bridgeUrl'
-import { totalUsdcFees } from '../bridgeKit'
+import { sourceContext, totalUsdcFees } from '../bridgeKit'
 import { activeChain } from '../../chain'
 import { BRIDGE_CHAINS, destChain, domainLabel, fetchSplUsdcBalance, irisMessagesUrl, isMessenger, sourceChain, switchEvmChain } from '../cctp'
 
@@ -107,5 +107,18 @@ describe('reading a Solana USDC balance', () => {
     } finally {
       globalThis.fetch = realFetch
     }
+  })
+})
+
+describe('bridge source context', () => {
+  const who = '0x0000000000000000000000000000000000000001'
+
+  test('leaves the address out for a wallet-backed adapter, which the kit rejects it for', () => {
+    expect('address' in sourceContext({ capabilities: { addressContext: 'user-controlled' } }, BRIDGE_CHAINS.ethereum, who)).toBe(false)
+    expect('address' in sourceContext({}, BRIDGE_CHAINS.ethereum, who)).toBe(false)
+  })
+
+  test('keeps the address for a developer-controlled adapter, which the kit requires it for', () => {
+    expect(sourceContext({ capabilities: { addressContext: 'developer-controlled' } }, BRIDGE_CHAINS.ethereum, who).address).toBe(who)
   })
 })

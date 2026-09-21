@@ -54,9 +54,11 @@ export function destinationContext(adapter: unknown, chain: BridgeChain, recipie
   return base
 }
 
+/** Wallet-backed ("user-controlled") adapters resolve the address from the wallet and reject an explicit one; only developer-controlled adapters take it. */
 export function sourceContext(adapter: unknown, chain: BridgeChain, address?: string) {
   const base: Record<string, unknown> = { adapter, chain: chain.kit }
-  if (address) base.address = address
+  const developerControlled = (adapter as { capabilities?: { addressContext?: string } } | undefined)?.capabilities?.addressContext === 'developer-controlled'
+  if (address && developerControlled) base.address = address
   return base
 }
 
