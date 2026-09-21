@@ -1,6 +1,6 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react'
 import type { Address } from 'viem'
-import { useAccount, useSwitchChain } from 'wagmi'
+import { useAccount } from 'wagmi'
 import { useConnectSheet } from '../hooks/useConnectSheet'
 import { activeChain } from '../chain'
 import { quote as ratioQuote, reservesFor, type QuoteMode } from '../lib/amm'
@@ -24,6 +24,7 @@ import { ReceiptLines } from './ReceiptLines'
 import { RecentLedger } from './RecentLedger'
 import { SettingsPopover } from './SettingsPopover'
 import { TxStatus } from './TxStatus'
+import { useSwitchToArc } from '../hooks/useSwitchToArc'
 
 // Below the sheet and not needed to swap: kept out of the first chunk.
 const SwapPriceChart = lazy(() => import('./SwapPriceChart'))
@@ -43,7 +44,7 @@ function findTokenByRef(tokens: readonly Token[], ref: string | undefined): Toke
 export function SwapSheet() {
   const { address: account } = useAccount()
   const { open } = useConnectSheet()
-  const { switchChainAsync } = useSwitchChain()
+  const switchToArc = useSwitchToArc()
   const { pairs, refetch: refetchPairs } = usePairs()
   const { tokens } = useTokens(pairs)
   const { balances, refetch: refetchBalances } = useBalances(account, tokens)
@@ -179,7 +180,7 @@ export function SwapSheet() {
       return
     }
     if (swap.buttonState === 'wrongChain') {
-      await switchChainAsync({ chainId: activeChain.id })
+      await switchToArc()
       return
     }
     await swap.execute()

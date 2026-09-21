@@ -1,5 +1,4 @@
 import { useMemo, useState } from 'react'
-import { useSwitchChain } from 'wagmi'
 import { activeChain } from '../chain'
 import { useConnectSheet } from '../hooks/useConnectSheet'
 import { useLaunchTrade, type LaunchSide } from '../hooks/useLaunchTrade'
@@ -13,6 +12,7 @@ import { GhostButton } from './GhostButton'
 import { PrimaryButton } from './PrimaryButton'
 import { SettingsPopover } from './SettingsPopover'
 import { TxStatus } from './TxStatus'
+import { useSwitchToArc } from '../hooks/useSwitchToArc'
 
 interface LaunchTradeSheetProps {
   launch: LaunchRecord
@@ -36,7 +36,7 @@ export function LaunchTradeSheet({
   onConfirmed,
 }: LaunchTradeSheetProps) {
   const { open } = useConnectSheet()
-  const { switchChainAsync } = useSwitchChain()
+  const switchToArc = useSwitchToArc()
   const settings = useSettings()
   const [side, setSide] = useState<LaunchSide>('buy')
   const [amount, setAmount] = useState('')
@@ -78,7 +78,7 @@ export function LaunchTradeSheet({
       return
     }
     if (trade.buttonState === 'wrongChain') {
-      await switchChainAsync({ chainId: activeChain.id })
+      await switchToArc()
       return
     }
     await trade.execute()

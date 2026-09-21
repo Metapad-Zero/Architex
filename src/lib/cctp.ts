@@ -241,9 +241,13 @@ export async function fetchSplUsdcBalance(chain: BridgeChain, owner: string): Pr
     }),
   })
   if (!response.ok) throw new Error(`Solana RPC returned ${response.status}`)
-  const body: unknown = await response.json()
-  const values = (body as { result?: { value?: { account: { data: { parsed: { info: { tokenAmount: { amount: string } } } } } }[] } }).result?.value
-  if (!values) return 0n
+  const body = (await response.json()) as {
+    result?: { value?: { account: { data: { parsed: { info: { tokenAmount: { amount: string } } } } } }[] }
+    error?: { message?: string }
+  }
+  // JSON-RPC errors arrive with HTTP 200; treating them as "no token accounts" would report a 0 balance.
+  const values = body.result?.value
+  if (!Array.isArray(values)) throw new Error(body.error?.message ?? 'Unexpected Solana RPC response')
   let total = 0n
   for (const item of values) {
     const raw = item.account.data.parsed.info.tokenAmount.amount

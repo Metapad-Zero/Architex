@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { formatBridgeUrl, parseBridgeUrl } from '../bridgeUrl'
 import { totalUsdcFees } from '../bridgeKit'
 import { activeChain } from '../../chain'
-import { BRIDGE_CHAINS, destChain, domainLabel, irisMessagesUrl, isMessenger, sourceChain, switchEvmChain } from '../cctp'
+import { BRIDGE_CHAINS, destChain, domainLabel, fetchSplUsdcBalance, irisMessagesUrl, isMessenger, sourceChain, switchEvmChain } from '../cctp'
 
 describe('bridge URL', () => {
   test('defaults to Ethereum into Arc', () => {
@@ -95,5 +95,17 @@ describe('adding Arc to a wallet during a claim', () => {
     const { calls, provider } = recorder(walletError(4001))
     await expect(switchEvmChain(provider, BRIDGE_CHAINS.arc)).rejects.toThrow('wallet error 4001')
     expect(calls.some((call) => call.method === 'wallet_addEthereumChain')).toBe(false)
+  })
+})
+
+describe('reading a Solana USDC balance', () => {
+  test('a JSON-RPC error is a failed read, not a zero balance', async () => {
+    const realFetch = globalThis.fetch
+    globalThis.fetch = () => Promise.resolve(new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, error: { code: 403, message: 'Access forbidden' } }), { status: 200 }))
+    try {
+      await expect(fetchSplUsdcBalance(BRIDGE_CHAINS.solana, 'owner')).rejects.toThrow('Access forbidden')
+    } finally {
+      globalThis.fetch = realFetch
+    }
   })
 })

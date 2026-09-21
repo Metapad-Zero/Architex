@@ -141,9 +141,11 @@ export function useLiquidity(onConfirmed: () => void | Promise<void>) {
 
       try {
         setStatus({ kind: 'pending', label: 'Signing permit…' })
-        // Fall back to approve + removeLiquidity only if the permit path fails before anything is
-        // broadcast. Once a removal is on chain, retrying could remove the same liquidity twice.
+        // Fall back to approve + removeLiquidity only when the permit could not be signed (a wallet
+        // without typed-data support). Once the removal has been handed to the wallet it may be on
+        // chain even if the reply was lost, and a retry would remove the same liquidity twice.
         let permitHash: Hash | undefined
+        let removalHandedOff = false
         try {
           // The EIP-712 domain name is the LP token's own name(): deployments made before the
           // rename say "ArcSwap LP", newer ones "Architex LP" — reading it keeps both valid.
@@ -171,6 +173,7 @@ export function useLiquidity(onConfirmed: () => void | Promise<void>) {
             message: { owner: account, spender: deployment.router, value: liquidity, nonce, deadline },
           })
           const { v, r, s } = parseSignature(signature)
+          removalHandedOff = true
           permitHash = await writeContractAsync({
             chainId: activeChain.id,
             address: deployment.router,
@@ -179,7 +182,7 @@ export function useLiquidity(onConfirmed: () => void | Promise<void>) {
             args: [...commonArgs, false, Number(v), r, s],
           })
         } catch (permitError) {
-          if (isUserRejection(permitError)) throw permitError
+          if (isUserRejection(permitError) || removalHandedOff) throw permitError
         }
 
         if (permitHash) {

@@ -23,7 +23,8 @@ export function BridgeView() {
   const [solanaProblem, setSolanaProblem] = useState<string>()
   const pay = usdcToken(bridge.source.usdc)
   const receive = usdcToken(bridge.dest.usdc)
-  const balances = new Map<string, bigint>([[pay.address.toLowerCase(), bridge.sourceBalance]])
+  // A failed read is not a zero balance: show no balance line rather than 'Balance 0 / Not enough USDC'.
+  const balances = bridge.balanceUnavailable ? new Map<string, bigint>() : new Map<string, bigint>([[pay.address.toLowerCase(), bridge.sourceBalance]])
   const receiveAmount = bridge.parsed > 0n ? formatAmount(bridge.receive, 6) : ''
   const feeLine = bridge.parsed > 0n && bridge.fee >= 0n ? `${formatAmount(bridge.fee, 6)} USDC` : GHOST
   const route = `${bridge.source.label} → ${bridge.dest.label}`
@@ -104,6 +105,7 @@ export function BridgeView() {
           onToken={() => undefined}
           balances={balances}
           usdValue={bridge.parsed > 0n ? formatAmount(bridge.parsed, 6) : undefined}
+          checkBalance={!bridge.balanceUnavailable}
           disableTokenSelect
           onSubmit={() => { if (!bridge.isDisabled && !bridge.isLoading) void handlePrimary() }}
         />

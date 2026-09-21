@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { Address, EIP1193Provider, Hash, Hex } from 'viem'
-import { useAccount, useSwitchChain } from 'wagmi'
+import { useAccount } from 'wagmi'
 import { activeChain } from '../chain'
 import { destinationContext, evmAdapter, getAppKit, solanaAdapter, sourceContext, totalUsdcFees, type EstimateKitResult } from '../lib/bridgeKit'
 import { formatBridgeUrl, parseBridgeUrl } from '../lib/bridgeUrl'
@@ -20,6 +20,7 @@ import { isUserRejection, revertReason } from '../lib/errors'
 import { parseAmount } from '../lib/format'
 import { pushRecent } from '../lib/recent'
 import { spendableBalance } from '../lib/gasReserve'
+import { useSwitchToArc } from './useSwitchToArc'
 
 export type BridgeButtonState =
   | 'disconnected'
@@ -61,7 +62,7 @@ function solanaProvider(): SolanaWallet | undefined {
 
 export function useBridge() {
   const { address, connector, isConnected, chainId } = useAccount()
-  const { switchChainAsync } = useSwitchChain()
+  const switchToArc = useSwitchToArc()
   const initial = useMemo(() => parseBridgeUrl(window.location.hash), [])
   const [side, setSide] = useState<BridgeSide>(initial.side)
   const [foreign, setForeign] = useState<ForeignChain>(initial.foreign)
@@ -302,6 +303,7 @@ export function useBridge() {
     fee,
     estimateError: canQuote ? estimateError : undefined,
     sourceBalance,
+    balanceUnavailable,
     solanaAddress,
     buttonState,
     label,
@@ -314,6 +316,6 @@ export function useBridge() {
     execute,
     claim,
     connectSolana,
-    switchToArc: () => switchChainAsync({ chainId: activeChain.id }),
+    switchToArc,
   }
 }

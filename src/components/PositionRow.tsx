@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import { formatUnits } from 'viem'
-import { useAccount, useSwitchChain } from 'wagmi'
+import { useAccount } from 'wagmi'
 import { useConnectSheet } from '../hooks/useConnectSheet'
 import { activeChain } from '../chain'
 import { removeAmounts } from '../lib/amm'
@@ -12,6 +12,7 @@ import { useSettings } from '../hooks/useSettings'
 import { ChevronIcon } from './Icons'
 import { PrimaryButton } from './PrimaryButton'
 import { TxStatus } from './TxStatus'
+import { useSwitchToArc } from '../hooks/useSwitchToArc'
 
 function editable(value: bigint): string {
   return formatUnits(value, 18).replace(/0+$/, '').replace(/\.$/, '')
@@ -27,7 +28,7 @@ interface PositionRowProps {
 export function PositionRow({ position, token0, token1, onConfirmed }: PositionRowProps) {
   const { address, chainId } = useAccount()
   const { open } = useConnectSheet()
-  const { switchChainAsync } = useSwitchChain()
+  const switchToArc = useSwitchToArc()
   const settings = useSettings()
   const liquidity = useLiquidity(onConfirmed)
   const [expanded, setExpanded] = useState(false)
@@ -47,7 +48,7 @@ export function PositionRow({ position, token0, token1, onConfirmed }: PositionR
 
   const remove = async () => {
     if (!address) return open()
-    if (chainId !== activeChain.id) return void switchChainAsync({ chainId: activeChain.id })
+    if (chainId !== activeChain.id) return void switchToArc()
     if (rawLiquidity <= 0n || rawLiquidity > position.lpBalance) return
     await liquidity.removeLiquidity({
       pair: position.pair,

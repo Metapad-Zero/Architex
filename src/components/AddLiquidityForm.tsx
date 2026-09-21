@@ -1,6 +1,6 @@
-import { useMemo, useState } from 'react'
+import { useId, useMemo, useState } from 'react'
 import { formatUnits, type Address } from 'viem'
-import { useAccount, useSwitchChain } from 'wagmi'
+import { useAccount } from 'wagmi'
 import { useConnectSheet } from '../hooks/useConnectSheet'
 import { activeChain } from '../chain'
 import { liquidityMinted, liquidityShareBps, pairFor, quote as ratioQuote, reservesFor, type AmmPair } from '../lib/amm'
@@ -12,6 +12,7 @@ import { useSettings } from '../hooks/useSettings'
 import { AmountField } from './AmountField'
 import { PrimaryButton } from './PrimaryButton'
 import { TxStatus } from './TxStatus'
+import { useSwitchToArc } from '../hooks/useSwitchToArc'
 
 interface AddLiquidityFormProps {
   pair?: AmmPair
@@ -33,9 +34,10 @@ function editable(value: bigint, decimals: number): string {
 export function AddLiquidityForm({ pair: fixedPair, pairs, tokens, balances, allowances, tokenA: fixedA, tokenB: fixedB, onConfirmed }: AddLiquidityFormProps) {
   const { address: account, chainId } = useAccount()
   const { open } = useConnectSheet()
-  const { switchChainAsync } = useSwitchChain()
+  const switchToArc = useSwitchToArc()
   const settings = useSettings()
   const liquidity = useLiquidity(onConfirmed)
+  const formId = useId()
   const [tokenAAddress, setTokenAAddress] = useState<Address | undefined>(fixedA?.address)
   const [tokenBAddress, setTokenBAddress] = useState<Address | undefined>(fixedB?.address)
   const [amountA, setAmountA] = useState('')
@@ -62,8 +64,9 @@ export function AddLiquidityForm({ pair: fixedPair, pairs, tokens, balances, all
   const spendableB = tokenB ? spendableBalance(tokenB.address, balances.get(tokenB.address.toLowerCase()) ?? 0n) : 0n
   const shortA = parsedA > spendableA
   const shortB = parsedB > spendableB
+  // Scaled by 1e18 so a token worth less than one raw unit of the other still shows its price.
   const initialPrice = !pair && tokenA && tokenB && parsedA > 0n && parsedB > 0n
-    ? `1 ${tokenA.symbol} = ${formatAmount((parsedB * 10n ** BigInt(tokenA.decimals)) / parsedA, tokenB.decimals)} ${tokenB.symbol}`
+    ? `1 ${tokenA.symbol} = ${formatAmount((parsedB * 10n ** BigInt(tokenA.decimals + 18)) / parsedA, tokenB.decimals + 18)} ${tokenB.symbol}`
     : undefined
 
   const updateA = (value: string) => {
@@ -106,7 +109,7 @@ export function AddLiquidityForm({ pair: fixedPair, pairs, tokens, balances, all
 
   const submit = async () => {
     if (!account) return open()
-    if (chainId !== activeChain.id) return void switchChainAsync({ chainId: activeChain.id })
+    if (chainId !== activeChain.id) return void switchToArc()
     if (!tokenA || !tokenB || parsedA === 0n || parsedB === 0n || shortA || shortB) return
     if (allowanceA < parsedA) return void liquidity.approve(tokenA.address, parsedA, tokenA.symbol)
     if (allowanceB < parsedB) return void liquidity.approve(tokenB.address, parsedB, tokenB.symbol)
@@ -129,7 +132,7 @@ export function AddLiquidityForm({ pair: fixedPair, pairs, tokens, balances, all
       {!pair && <p className="mb-6 text-sm leading-6 text-g700">You are creating this pool — the ratio you enter sets the initial price. Match the market rate: if it's off, arbitrageurs trade the difference out of your deposit.</p>}
       <div className="grid gap-8 sm:grid-cols-2">
         <AmountField
-          id={`liquidity-a-${pair?.pair ?? 'new'}`}
+          id={`liquidity-a${formId}`}
           label="Amount"
           amount={amountA}
           onAmount={updateA}
@@ -140,7 +143,7 @@ export function AddLiquidityForm({ pair: fixedPair, pairs, tokens, balances, all
           disableTokenSelect={Boolean(fixedA)}
         />
         <AmountField
-          id={`liquidity-b-${pair?.pair ?? 'new'}`}
+          id={`liquidity-b${formId}`}
           label="Amount"
           amount={amountB}
           onAmount={updateB}

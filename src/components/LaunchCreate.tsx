@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from 'react'
 import type { Address } from 'viem'
-import { useAccount, useSwitchChain } from 'wagmi'
+import { useAccount } from 'wagmi'
 import { activeChain } from '../chain'
 import { useConnectSheet } from '../hooks/useConnectSheet'
 import { useCreateToken } from '../hooks/useCreateToken'
@@ -15,6 +15,7 @@ import { METADATA_LIMITS, hasMetadata, metadataErrors, type MetadataInput } from
 import { GhostButton } from './GhostButton'
 import { PrimaryButton } from './PrimaryButton'
 import { TxStatus } from './TxStatus'
+import { useSwitchToArc } from '../hooks/useSwitchToArc'
 
 interface LaunchCreateProps {
   onCreated: (token: Address) => void
@@ -25,7 +26,7 @@ const GHOST = '—'
 export function LaunchCreate({ onCreated }: LaunchCreateProps) {
   const { address } = useAccount()
   const { open } = useConnectSheet()
-  const { switchChainAsync } = useSwitchChain()
+  const switchToArc = useSwitchToArc()
   const settings = useSettings()
   const { usdc, usdcBalance, usdcAllowance, refetch } = useLaunch(undefined)
   const [name, setName] = useState('')
@@ -103,7 +104,7 @@ export function LaunchCreate({ onCreated }: LaunchCreateProps) {
       return
     }
     if (create.buttonState === 'wrongChain') {
-      await switchChainAsync({ chainId: activeChain.id })
+      await switchToArc()
       return
     }
     if (!valid) return

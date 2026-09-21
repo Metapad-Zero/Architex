@@ -1,13 +1,14 @@
-import { useAccount, useSwitchChain } from 'wagmi'
+import { useAccount } from 'wagmi'
 import { activeChain } from '../chain'
 import { shortAddress } from '../lib/format'
 import { useConnectSheet } from '../hooks/useConnectSheet'
 import { WalletIcon } from './Icons'
 import { GhostButton } from './GhostButton'
+import { useSwitchToArc } from '../hooks/useSwitchToArc'
 
 export function WalletButton() {
   const { address, isConnected, isConnecting, chainId } = useAccount()
-  const { switchChain } = useSwitchChain()
+  const switchToArc = useSwitchToArc()
   const { isOpen, open, close, triggerRef } = useConnectSheet()
   const wrongChain = isConnected && chainId !== activeChain.id
   const label = wrongChain
@@ -28,7 +29,7 @@ export function WalletButton() {
       aria-expanded={isOpen}
       aria-haspopup="dialog"
       onClick={() => {
-        if (wrongChain) switchChain({ chainId: activeChain.id })
+        if (wrongChain) void switchToArc()
         else if (isOpen) close()
         else open()
       }}
