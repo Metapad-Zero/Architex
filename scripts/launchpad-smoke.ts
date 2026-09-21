@@ -73,6 +73,8 @@ const usdcOf = (who: Address) => pub.readContract({ address: usdc, abi: erc20Abi
  */
 const UNIT = 10n ** 12n
 const nativeOf = (who: Address) => pub.getBalance({ address: who })
+/** Curve buys and sells revert Expired past their deadline, like the launch router's: 20 minutes from now. */
+const deadline = () => BigInt(Math.floor(Date.now() / 1000) + 20 * 60)
 const gasCost = (receipt: TransactionReceipt) => receipt.gasUsed * receipt.effectiveGasPrice
 
 /** USDC the launchpad owes: platform fees, every token's creator fees, and every live curve's float (V13-SPEC §6.1). */
@@ -148,7 +150,7 @@ check('buy: quote tokens == model', quotedTokens, expectedBuy.tokensOut)
 check('buy: quote platform fee == model', quotedPlatform, expectedBuy.platformFee)
 check('buy: quote creator fee == model', quotedCreator, expectedBuy.creatorFee)
 before = await nativeOf(account.address)
-receipt = await send('buy', { ...pad, functionName: 'buy', args: [token, BUY, expectedBuy.tokensOut, account.address] })
+receipt = await send('buy', { ...pad, functionName: 'buy', args: [token, BUY, expectedBuy.tokensOut, account.address, deadline()] })
 check('buy: trader paid buy + gas', before - (await nativeOf(account.address)), BUY * UNIT + gasCost(receipt))
 await checkCurve('buy', token, expectedBuy.next)
 
@@ -159,7 +161,7 @@ const [quotedOut, sellPlatform, sellCreator] = await pub.readContract({ ...pad, 
 check('sell: quote == model', quotedOut, expectedSell.usdcOut)
 check('sell: fees == model', `${sellPlatform}/${sellCreator}`, `${expectedSell.platformFee}/${expectedSell.creatorFee}`)
 before = await nativeOf(account.address)
-receipt = await send('sell', { ...pad, functionName: 'sell', args: [token, held, expectedSell.usdcOut, account.address] })
+receipt = await send('sell', { ...pad, functionName: 'sell', args: [token, held, expectedSell.usdcOut, account.address, deadline()] })
 check('sell: trader received proceeds - gas', (await nativeOf(account.address)) - before, expectedSell.usdcOut * UNIT - gasCost(receipt))
 await checkCurve('sell', token, expectedSell.next)
 

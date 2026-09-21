@@ -40,7 +40,8 @@ export function DocsGraduation() {
       <p>
         Anyone can add liquidity on top of the burned graduation liquidity, but there's no button
         for it here: adding or removing launch-pool liquidity has to be done directly with the
-        pool contract, in a single transaction of your own.
+        pool contract, in a single transaction of your own. Tokens in the pool earn no holder
+        dividends — the launch pool is excluded from them, whoever put the tokens there.
       </p>
     </div>
   )

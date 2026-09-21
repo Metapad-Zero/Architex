@@ -10,7 +10,7 @@ import { formatAmount, formatPct, shortAddress } from '../lib/format'
 import type { LaunchRecord } from '../lib/launch'
 import { destinationLabel, destinationName, feeDestination } from '../lib/plugins/destination'
 import { claimableAfterDrip } from '../lib/plugins/holders'
-import type { BuybackState, ComboEntryState, HolderState, SplitState } from '../lib/plugins/state'
+import { BUYBACK_MIN_RUN_USDC, BUYBACK_RUN_INTERVAL, type BuybackState, type ComboEntryState, type HolderState, type SplitState } from '../lib/plugins/state'
 import { FeeGauge } from './FeeGauge'
 import { GhostButton } from './GhostButton'
 import { ExternalLinkIcon } from './Icons'
@@ -41,6 +41,10 @@ function useNow(intervalMs = 30_000): number {
 
 function formatWhen(seconds: bigint): string {
   return new Date(Number(seconds) * 1_000).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+}
+
+function formatTime(seconds: bigint): string {
+  return new Date(Number(seconds) * 1_000).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
 }
 
 interface ActionProps {
@@ -114,20 +118,27 @@ function SplitPanel({ split, symbol, busy, status, run, release, you }: {
   )
 }
 
-function BuybackPanel({ buyback, symbol, graduated, busy, status, run, runBuyback }: {
+function BuybackPanel({ buyback, symbol, graduated, alsoPaysHolders, busy, status, run, runBuyback }: {
   buyback: BuybackState
   symbol: string
   graduated: boolean
+  /** The token also pays holders (a Combo): say that burning does not raise their share. */
+  alsoPaysHolders: boolean
   busy: CreatorFeeAction | undefined
   status: ActionProps['status']
   run: Run
   runBuyback: () => Promise<void>
 }) {
+  // previewRun is the plugin's own answer for this block: the paced budget, the one-run-a-block limit and the
+  // smallest run all included. When it is 0 with USDC waiting, the budget is refilling since the last run.
   const next = buyback.offer > 0n
     ? `Up to ${usdc(buyback.offer)}`
-    : buyback.held > 0n
-      ? 'Ran this block. Try again in a moment.'
+    : buyback.held >= BUYBACK_MIN_RUN_USDC
+      ? 'Builds up over the next hour'
       : 'Nothing waiting yet'
+  const fullAt = buyback.lastRunAt > 0n ? buyback.lastRunAt + BUYBACK_RUN_INTERVAL : 0n
+  const now = BigInt(Math.floor(useNow() / 1_000))
+  const side = graduated ? 'pool’s' : 'curve’s'
   return (
     <section className="fee-plugin" aria-label="Buyback and burn">
       <div className="fee-plugin-head">
@@ -137,6 +148,16 @@ function BuybackPanel({ buyback, symbol, graduated, busy, status, run, runBuybac
       <dl className="receipt-lines">
         <div><dt>USDC waiting</dt><dd>{usdc(buyback.held)}</dd></div>
         <div><dt>Next run</dt><dd className={buyback.offer > 0n ? '' : 'text-g500'}>{next}</dd></div>
+        <div>
+          <dt>Last run</dt>
+          <dd className={buyback.lastRunAt > 0n ? '' : 'text-g500'}>
+            {buyback.lastRunAt === 0n
+              ? 'Never'
+              : fullAt > now
+                ? `${formatWhen(buyback.lastRunAt)} · full budget again at ${formatTime(fullAt)}`
+                : formatWhen(buyback.lastRunAt)}
+          </dd>
+        </div>
         <div><dt>Spent so far</dt><dd>{usdc(buyback.totalSpent)}</dd></div>
         <div><dt>Burned so far</dt><dd>{formatAmount(buyback.totalBurned, 18)} {symbol}</dd></div>
       </dl>
@@ -147,7 +168,8 @@ function BuybackPanel({ buyback, symbol, graduated, busy, status, run, runBuybac
       </div>
       <ActionStatus action="run" status={status} />
       <p className="fee-plugin-note">
-        Anyone can run it. Each run spends at most 0.25% of the {graduated ? 'pool’s' : 'curve’s'} USDC side, once a block, and burns every token it buys, so the supply only goes down.
+        Anyone can run it. It spends at most 0.25% of the {side} USDC side per hour and burns every token it buys, so the supply only goes down.
+        {alsoPaysHolders && ' It doesn’t raise anyone’s share of holder dividends: the tokens it buys come from the curve or the pool, which earn none.'}
       </p>
     </section>
   )
@@ -217,7 +239,8 @@ function ComboAllocation({ entries }: { entries: ComboEntryState[] }) {
       </div>
       <dl className="receipt-lines">
         {entries.map((entry) => {
-          const listed = listedPluginAt(entry.target)
+          // From allocationOf alone: its isPlugin flag is the Combo's stored decision to pay through hooks.
+          const listed = entry.isPlugin ? listedPluginAt(entry.target) : undefined
           return (
             <div key={entry.target}>
               <dt>
@@ -316,7 +339,16 @@ export function CreatorFeesPanel({ launch, onChanged }: CreatorFeesPanelProps) {
         <SplitPanel split={state.split} symbol={launch.symbol} busy={fees.busy} status={fees.status} run={run} release={fees.release} you={address} />
       )}
       {state?.buyback && (
-        <BuybackPanel buyback={state.buyback} symbol={launch.symbol} graduated={launch.graduated} busy={fees.busy} status={fees.status} run={run} runBuyback={fees.runBuyback} />
+        <BuybackPanel
+          buyback={state.buyback}
+          symbol={launch.symbol}
+          graduated={launch.graduated}
+          alsoPaysHolders={Boolean(state.holders)}
+          busy={fees.busy}
+          status={fees.status}
+          run={run}
+          runBuyback={fees.runBuyback}
+        />
       )}
       {state?.holders && (
         <HoldersPanel

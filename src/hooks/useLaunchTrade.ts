@@ -182,6 +182,8 @@ export function useLaunchTrade({
         hash = side === 'buy' ? api.buy(account, launch.token, quote.offer).hash : api.sell(account, launch.token, quote.offer).hash
       } else {
         if (!publicClient) return
+        // One deadline for both venues, from the sheet's settings: the curve and the launch router both revert
+        // Expired once block.timestamp is past it.
         const deadline = BigInt(Math.floor(Date.now() / 1_000) + deadlineMinutes * 60)
         // The offer, not the quoted spend: on the curve's sell-out buy the spend can be one unit below the smallest
         // offer that sells out, so offering only the spend could buy a hair less and not graduate.
@@ -191,7 +193,7 @@ export function useLaunchTrade({
               address: deployment.launchpad,
               abi: launchpadAbi,
               functionName: side,
-              args: [launch.token, quote.offer, quote.minReceived, account],
+              args: [launch.token, quote.offer, quote.minReceived, account, deadline],
             })
           : await writeContractAsync({
               chainId: activeChain.id,

@@ -12,8 +12,14 @@ export type FeeDestination =
   | { kind: 'creator'; address: Address }
   | { kind: 'custom'; address: Address }
 
-export function feeDestination(launch: { plugin: Address; creator: Address }, suite: LaunchSuite = launchSuite): FeeDestination {
-  const listed = listedPluginAt(launch.plugin, suite)
+/**
+ * Decided only from the token's registered plugin (`pluginOf`, the curve's `plugin`) and the hooks flag the launchpad
+ * stored at launch (`pluginHooks`), never from a plugin's `isConfigured` or its Configured events: a token's
+ * registered plugin can mark the token configured on any listed plugin later without changing where its fees go
+ * (V13-SPEC §9). A listed plugin's address counts as that plugin only when the launchpad pays it through its hooks.
+ */
+export function feeDestination(launch: { plugin: Address; creator: Address; pluginHooks: boolean }, suite: LaunchSuite = launchSuite): FeeDestination {
+  const listed = launch.pluginHooks ? listedPluginAt(launch.plugin, suite) : undefined
   if (listed) return { kind: 'listed', plugin: listed, address: launch.plugin }
   if (launch.plugin.toLowerCase() === launch.creator.toLowerCase()) return { kind: 'creator', address: launch.plugin }
   return { kind: 'custom', address: launch.plugin }

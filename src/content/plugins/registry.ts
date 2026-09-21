@@ -40,7 +40,7 @@ export const LISTED_PLUGINS: readonly ListedPlugin[] = [
     name: 'Buyback & burn',
     tagline: 'Buys the token back and burns it.',
     description:
-      'Spends the fees buying the token and burns what it buys, so the supply only goes down. Anyone can run a buyback; each run spends at most 0.25% of the USDC side of the curve or pool, once a block.',
+      'Spends the fees buying the token and burns what it buys, so the supply only goes down. Anyone can run a buyback; it spends at most 0.25% of the curve’s or pool’s USDC side per hour.',
     config: 'none',
     suiteKey: 'buybackPlugin',
     contractPath: 'contracts/plugins/launch/BuybackBurnPlugin.sol',

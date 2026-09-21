@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
-import { encodeFunctionData, getAddress, zeroAddress, type Hex } from 'viem'
-import { buybackPluginAbi, launchRouterAbi, launchpadAbi, splitPluginAbi } from '../abi'
+import { decodeErrorResult, encodeErrorResult, encodeFunctionData, getAddress, parseAbi, zeroAddress, type Hex } from 'viem'
+import { buybackPluginAbi, launchRouterAbi, launchpadAbi, launchpadWithPluginErrorsAbi, splitPluginAbi } from '../abi'
 import type { LaunchSuite } from '../deployment'
 import { explainRevert } from '../errors'
 import { formatCurveSold, soldLabel, utf8ByteLength } from '../launch'
@@ -54,6 +54,22 @@ describe('launchpad copy and validation', () => {
     expect(explainRevert('NotConfigured')).toBe('That plugin does not serve this token.')
   })
 
+  test('explains the review’s new refusals', () => {
+    expect(explainRevert('Expired')).toBe('Took too long — the deadline passed before it confirmed. Try again.')
+    expect(explainRevert('DataForNonPlugin')).toBe('That address isn’t a plugin, so it can’t take settings — clear them or pick a listed plugin.')
+    expect(explainRevert('InvalidPlugin')).toContain('a launch token or a launch pool')
+    expect(explainRevert('InvalidRecipient')).toContain('the launch router or pair factory')
+  })
+
+  test('decodes the launchpad’s DataForNonPlugin() and the Combo’s DataForNonPlugin(address) apart, both to one sentence', () => {
+    for (const args of [[], [getAddress('0x1111111111111111111111111111111111111111')]] as const) {
+      const data = encodeErrorResult({ abi: launchpadWithPluginErrorsAbi, errorName: 'DataForNonPlugin', args })
+      expect(decodeErrorResult({ abi: launchpadWithPluginErrorsAbi, data }).errorName).toBe('DataForNonPlugin')
+    }
+    const expired = encodeErrorResult({ abi: launchpadAbi, errorName: 'Expired' })
+    expect(decodeErrorResult({ abi: launchpadAbi, data: expired }).errorName).toBe('Expired')
+  })
+
   test('counts UTF-8 bytes, not characters', () => {
     expect(utf8ByteLength('DOGE')).toBe(4)
     expect(utf8ByteLength('é')).toBe(2)
@@ -101,27 +117,38 @@ describe('launchpad signing intent', () => {
     ])
   })
 
-  test('decodes curve buys and sells into titles and bounds', () => {
+  test('decodes curve buys and sells into titles, bounds and their deadline', () => {
     const buy = describeLaunchpadCall(
-      encodeFunctionData({ abi: launchpadAbi, functionName: 'buy', args: [token, 100_000_000n, 1n, account] }),
+      encodeFunctionData({ abi: launchpadAbi, functionName: 'buy', args: [token, 100_000_000n, 1n, account, 32_503_680_000n] }),
       account,
       tokens,
       suite,
     )
     expect(buy?.title).toBe('Buy DOGE')
     expect(buy?.lines[0]).toEqual({ label: 'You pay at most', value: '100 USDC' })
-    expect(buy?.lines[1]?.label).toBe('You receive at least')
+    expect(buy?.lines.map((line) => line.label)).toEqual(['You pay at most', 'You receive at least', 'Valid until'])
+    expect(buy?.lines[2]?.value).toBe('No deadline')
 
     const recipient = getAddress('0x00000000000000000000000000000000000000c1')
     const sell = describeLaunchpadCall(
-      encodeFunctionData({ abi: launchpadAbi, functionName: 'sell', args: [token, 10n ** 18n, 1n, recipient] }),
+      encodeFunctionData({ abi: launchpadAbi, functionName: 'sell', args: [token, 10n ** 18n, 1n, recipient, 1_700_000_000n] }),
       account,
       tokens,
       suite,
     )
     expect(sell?.title).toBe('Sell DOGE')
-    expect(sell?.lines[0]?.label).toBe('You sell')
-    expect(sell?.lines[2]?.label).toBe('Sent to')
+    expect(sell?.lines.map((line) => line.label)).toEqual(['You sell', 'You receive at least', 'Sent to', 'Valid until'])
+    expect(sell?.lines[3]?.value).not.toBe('No deadline')
+  })
+
+  test('the pre-v1.3 curve buy (no deadline) is no longer decoded as a launchpad buy', () => {
+    // v1.3's review changed the curve ABI: a four-argument buy is a different selector, so it falls through.
+    const legacy = encodeFunctionData({
+      abi: parseAbi(['function buy(address token, uint256 usdcIn, uint256 minTokensOut, address to)']),
+      functionName: 'buy',
+      args: [token, 1n, 1n, account],
+    })
+    expect(describeLaunchpadCall(legacy, account, tokens, suite)).toBe(undefined)
   })
 
   test('decodes a creator-fee collection', () => {

@@ -177,21 +177,23 @@ export function describeLaunchpadCall(data: Hex, from: string | undefined, token
       }
     }
     case 'buy': {
-      const [token, usdcIn, minTokensOut, to] = args as [Address, bigint, bigint, Address]
+      const [token, usdcIn, minTokensOut, to, deadline] = args as [Address, bigint, bigint, Address, bigint]
       const lines = [
         { label: 'You pay at most', value: amount(usdcIn, usdc, tokens) },
         { label: 'You receive at least', value: amount(minTokensOut, token, tokens) },
       ]
       if (!same(to, from)) lines.push({ label: 'Sent to', value: shortAddress(to) })
+      lines.push({ label: 'Valid until', value: until(deadline) })
       return { title: `Buy ${symbol(token, tokens)}`, lines }
     }
     case 'sell': {
-      const [token, tokensIn, minUsdcOut, to] = args as [Address, bigint, bigint, Address]
+      const [token, tokensIn, minUsdcOut, to, deadline] = args as [Address, bigint, bigint, Address, bigint]
       const lines = [
         { label: 'You sell', value: amount(tokensIn, token, tokens) },
         { label: 'You receive at least', value: amount(minUsdcOut, usdc, tokens) },
       ]
       if (!same(to, from)) lines.push({ label: 'Sent to', value: shortAddress(to) })
+      lines.push({ label: 'Valid until', value: until(deadline) })
       return { title: `Sell ${symbol(token, tokens)}`, lines }
     }
     case 'collectCreatorFees': {
@@ -256,7 +258,7 @@ export function describePluginCall(to: Address, data: Hex, from: string | undefi
       return {
         title: `Run ${symbol(token, tokens)} buyback`,
         lines: [{ label: 'Token', value: symbol(token, tokens) }],
-        note: 'Buys the token with its waiting creator fees, up to 0.25% of the USDC side, and burns what it buys.',
+        note: 'Buys the token with its waiting creator fees, within a budget of 0.25% of the USDC side per hour, and burns what it buys.',
       }
     }
   }

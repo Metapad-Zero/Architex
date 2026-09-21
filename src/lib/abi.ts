@@ -151,6 +151,7 @@ export const launchpadAbi = parseAbi([
   'error CurveGraduated()',
   'error NotGraduated()',
   'error SlippageExceeded()',
+  'error Expired()',
   'error ExceedsSold()',
   'error InvalidName()',
   'error InvalidSymbol()',
@@ -159,6 +160,7 @@ export const launchpadAbi = parseAbi([
   'error LaunchFeeAboveMax()',
   'error CreatorFeeTooHigh()',
   'error InvalidPlugin()',
+  'error DataForNonPlugin()',
   'error NotInitialized()',
   'error AlreadyInitialized()',
   'error InvalidWiring()',
@@ -169,6 +171,7 @@ export const launchpadAbi = parseAbi([
   'function usdc() view returns (address)',
   'function router() view returns (address)',
   'function pairFactory() view returns (address)',
+  'function isLaunchPair(address account) view returns (bool)',
   'function FEE_BPS() view returns (uint256)',
   'function feeTo() view returns (address)',
   'function feeToSetter() view returns (address)',
@@ -190,8 +193,8 @@ export const launchpadAbi = parseAbi([
   'function virtualUsdcOf(address token) view returns (uint256)',
   'function initialize(address pairFactory, address router)',
   'function createToken(string name, string symbol, string metadataURI, uint16 creatorFeeBps, address plugin, bytes pluginData, uint256 initialBuyUsdc, uint256 minTokensOut, uint256 maxLaunchFee) returns (address token)',
-  'function buy(address token, uint256 usdcIn, uint256 minTokensOut, address to) returns (uint256 tokensOut, uint256 usdcSpent)',
-  'function sell(address token, uint256 tokensIn, uint256 minUsdcOut, address to) returns (uint256 usdcOut)',
+  'function buy(address token, uint256 usdcIn, uint256 minTokensOut, address to, uint256 deadline) returns (uint256 tokensOut, uint256 usdcSpent)',
+  'function sell(address token, uint256 tokensIn, uint256 minUsdcOut, address to, uint256 deadline) returns (uint256 usdcOut)',
   'function quoteBuy(address token, uint256 usdcIn) view returns (uint256 tokensOut, uint256 platformFee, uint256 creatorFee, uint256 usdcSpent, bool graduates)',
   'function quoteSell(address token, uint256 tokensIn) view returns (uint256 usdcOut, uint256 platformFee, uint256 creatorFee)',
   'function curves(address token) view returns (Curve)',
@@ -388,7 +391,10 @@ const buybackPluginErrors = [
   'error NothingBought(address token)',
 ] as const
 
-/** IBuybackBurnPlugin: anyone runs a capped buyback per token per block; everything bought is burned. */
+/**
+ * IBuybackBurnPlugin: anyone runs a buyback, paced by time (at most 0.25% of the USDC-side reserve per hour, the
+ * budget refilling since the token's last run) and at most once per block; everything bought is burned.
+ */
 export const buybackPluginAbi = parseAbi([
   ...launchFeePluginEntries,
   ...buybackPluginErrors,
@@ -400,9 +406,12 @@ export const buybackPluginAbi = parseAbi([
   'error Expired()',
   'event BuybackRun(address indexed token, address indexed caller, bool graduated, uint256 usdcSpent, uint256 tokensBurned)',
   'function CAP_BPS() view returns (uint256)',
+  'function RUN_INTERVAL() view returns (uint256)',
+  'function MIN_RUN_USDC() view returns (uint256)',
   'function totalUsdcSpent(address token) view returns (uint256)',
   'function totalTokensBurned(address token) view returns (uint256)',
   'function nextRunBlock(address token) view returns (uint256)',
+  'function lastRunAt(address token) view returns (uint256)',
   'function previewRun(address token) view returns (uint256 usdcOffered, bool graduated)',
   'function run(address token) returns (uint256 usdcSpent, uint256 tokensBurned)',
 ])
@@ -446,6 +455,8 @@ export const launchpadWithPluginErrorsAbi = parseAbi([
   'error LaunchFeeAboveMax()',
   'error CreatorFeeTooHigh()',
   'error InvalidPlugin()',
+  // The launchpad's own (no argument); the Combo's DataForNonPlugin(address) is an overload with its own selector.
+  'error DataForNonPlugin()',
   'error NotInitialized()',
   'error PluginPullMismatch()',
   ...oz20Errors,

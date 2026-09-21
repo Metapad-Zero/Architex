@@ -113,12 +113,12 @@ export function LaunchTradeSheet({
     <div className="swap-sheet">
       {trade.isLoading && <span className="rule-sweep" aria-hidden="true" />}
       <div className="sheet-tools">
-        {/* The launch router takes a deadline; the curve's buy and sell do not, so only slippage applies there. */}
+        {/* Curve and launch-pool trades both take the deadline and the slippage set here. */}
         <SettingsPopover
           slippageBps={settings.slippageBps}
           onSlippage={settings.setSlippageBps}
-          deadlineMinutes={pool ? settings.deadlineMinutes : undefined}
-          onDeadline={pool ? settings.setDeadlineMinutes : undefined}
+          deadlineMinutes={settings.deadlineMinutes}
+          onDeadline={settings.setDeadlineMinutes}
         />
       </div>
       <p className="trade-venue">

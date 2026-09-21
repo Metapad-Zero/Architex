@@ -20,7 +20,11 @@ export function DocsFees() {
       <p>
         At launch the creator also picks one destination for the fee, and that's locked for good
         too. It can be a wallet (their own, or any other), one of the plugins listed in the token
-        builder, or any other address. The site always says plainly where a token's fees go: the
+        builder, or any other address that can pass fees on. The launchpad refuses the few that
+        can't: USDC itself, the launchpad and its launch router and pair factory, launch tokens,
+        and launch pools, where anyone could take fees sent in; the builder catches these before
+        you sign. Settings only go to a plugin: an address that isn't one takes none, which also
+        catches a mistyped plugin address. The site always says plainly where a token's fees go: the
         listed plugin's name, "Creator wallet" when it's the creator's own address, or "Custom
         address" with the address itself. Architex hasn't reviewed a custom address and makes no
         claim about it.
@@ -43,14 +47,23 @@ export function DocsFees() {
       <p>
         <span className="font-semibold text-ink">Buyback &amp; burn</span> spends the fees buying
         the token and burns everything it buys, so the supply only ever goes down. Anyone can run
-        a buyback. Each run spends at most 0.25% of the USDC side of the curve (or of the launch
-        pool, after graduation), and a token can run once per block. A run takes no price limit
-        on purpose: the cap keeps each one small enough that sandwiching it costs an attacker more
-        in fees than it could make.
+        a buyback, and the spending is paced by time: at most 0.25% of the USDC side of the curve
+        (or of the launch pool, after graduation) per hour, the budget building back up over the
+        hour after each run. A run takes no price limit on purpose. Because of the pacing, a
+        trader who buys ahead of the buybacks to sell into them pays both fees coming and going
+        and has to hold for hours before that pays off — about three hours at a 0.5% creator fee,
+        about two days at 10% — and by then they're just a holder.
+      </p>
+      <p>
+        Burning lowers the total supply, but it doesn't raise anyone's share of holder dividends:
+        the tokens a buyback buys come from the curve or the launch pool, which earn none, and are
+        burned straight away.
       </p>
       <p>
         <span className="font-semibold text-ink">Distribute to holders</span> pays the fees to
-        the token's holders in USDC, in proportion to what they hold. The fees aren't handed out
+        the token's holders in USDC, in proportion to what they hold. Tokens still on the curve,
+        in the launch pool (including any liquidity added to it) or burned earn none. The fees
+        aren't handed out
         the moment they arrive: they're released gradually, so nobody can buy, collect the fees
         and sell again in one go. Fees that arrive to an empty stream are released evenly over 24
         hours. When more arrive while some are still waiting, the end of the stream moves by
