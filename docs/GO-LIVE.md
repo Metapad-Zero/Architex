@@ -105,6 +105,11 @@ Passkeys made on `localhost` or a `*.vercel.app` preview do not exist on the rea
 - [ ] Launchpad (bonding curves that graduate into Architex pairs): built, reviewed twice, 152 tests,
       proven against the deployed testnet bytecode. LIVE ON TESTNET as v1.2, a 25,000 USDC curve (0x9429…84FD, bytecode verified, live smoke test passes).
       Mainnet only after the "Before mainnet" list: `docs/launchpad/TESTNET-DEPLOY.md`.
+- [x] Pre-audit tooling: Slither + Aderyn + Solhint on every push/PR (`.github/workflows/contracts-security.yml`),
+      Echidna property fuzzing alongside the existing Foundry invariants, Mythril symbolic execution
+      run manually before mainnet moves. See `SECURITY.md` — baseline run 2026-09-20, 0 high/critical.
 - [ ] Later, not blocking: third-party audit,
       full `connect-src` CSP (hosts in `docs/MAINNET-DEPLOY.md`), Google/email sign-in (Privy or Circle
       user-controlled wallets), re-sync the Arc Studio sandbox, rename the Arc Studio app.
+- [ ] Free third-party scanner checklist (De.Fi, PreAudit.org, ContractAudit.io, Hashlock) once
+      mainnet contracts are deployed and verified — see `SECURITY.md` §4.

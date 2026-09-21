@@ -1,0 +1,7 @@
+testMode: property
+testLimit: 50000
+seqLen: 100
+shrinkLimit: 5000
+coverage: true
+corpusDir: reports/security/echidna-corpus
+cryticArgs: ["--foundry-compile-all"]

@@ -1,0 +1,6 @@
+contracts/test/
+contracts/script/
+contracts/out/
+contracts/cache/
+lib/
+node_modules/

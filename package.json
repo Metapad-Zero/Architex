@@ -2,6 +2,7 @@
   "name": "studio-app",
   "private": true,
   "version": "0.0.0",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -13,7 +14,13 @@
     "typecheck": "tsc --noEmit",
     "check": "bash scripts/check.sh",
     "contracts:build": "forge build",
-    "contracts:test": "forge test"
+    "contracts:test": "forge test",
+    "contracts:solhint": "solhint 'contracts/**/*.sol' --ignore-path .solhintignore",
+    "contracts:slither": "slither .",
+    "contracts:aderyn": "aderyn . -o reports/security/aderyn-report.md",
+    "contracts:mythril": "bash scripts/security/run-mythril.sh",
+    "contracts:echidna": "bash scripts/security/run-echidna.sh",
+    "contracts:security": "bun run contracts:solhint && bun run contracts:slither && bun run contracts:aderyn"
   },
   "dependencies": {
     "@circle-fin/adapter-solana": "^1.7.3",
@@ -54,6 +61,7 @@
     "oxlint": "^1.80.0",
     "oxlint-tsgolint": "^7.0.2001",
     "postcss": "^8.4.49",
+    "solhint": "^6.2.4",
     "tailwindcss": "^3.4.17",
     "typescript": "~7.0.2",
     "vite": "^6.0.5",

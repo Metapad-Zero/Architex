@@ -1,0 +1,82 @@
+name: Contracts security
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "contracts/**"
+      - "!contracts/test/**"
+      - "!contracts/script/**"
+      - "foundry.toml"
+      - "remappings.txt"
+      - ".solhint.json"
+      - "slither.config.json"
+      - ".github/workflows/contracts-security.yml"
+  pull_request:
+    paths:
+      - "contracts/**"
+      - "foundry.toml"
+      - "remappings.txt"
+      - ".solhint.json"
+      - "slither.config.json"
+      - ".github/workflows/contracts-security.yml"
+
+jobs:
+  solhint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun run contracts:solhint
+
+  forge-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - uses: foundry-rs/foundry-toolchain@v1
+      - run: forge test -vvv
+
+  slither:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - uses: foundry-rs/foundry-toolchain@v1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install slither-analyzer
+      - run: mkdir -p reports/security && rm -f reports/security/slither-latest.json && slither . --json reports/security/slither-latest.json
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: slither-report
+          path: reports/security/slither-latest.json
+
+  aderyn:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - uses: foundry-rs/foundry-toolchain@v1
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: aderyn-cli
+      - run: cargo install aderyn --locked
+      - run: mkdir -p reports/security && aderyn . -o reports/security/aderyn-report.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aderyn-report
+          path: reports/security/aderyn-report.md
