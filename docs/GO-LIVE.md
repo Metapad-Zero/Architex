@@ -116,7 +116,7 @@ Passkeys made on `localhost` or a `*.vercel.app` preview do not exist on the rea
       `scripts/amm-smoke.ts` on USDC/EURC: swap out of USDC, swap back, withdraw 10%. 27 checks exact,
       gas included; pair reserves equal the chain-native balance to the wei. Before this, no USDC had
       ever passed through an Architex pair, and USDC/EURC is the first mainnet pool.
-- [x] **Launchpad live on mainnet** 2026-09-21: `0x9Ac420d77E019D5e9F79a3020B0b5eB28d72B959` (block
+- [x] **Launchpad v1.2 deployed on mainnet, then withdrawn from the site** 2026-09-21 (0 launches; replaced by v1.3 — see `docs/launchpad/V13-SPEC.md`). The contract stays on-chain at the address below, unreferenced by the app so nobody launches a token that v1.3 would strand: `0x9Ac420d77E019D5e9F79a3020B0b5eB28d72B959` (block
       22026362, 1 USDC launch fee, v1.2 curve, bytecode-verified; record in
       `broadcast/DeployLaunchpad.s.sol/5042/`). Deployed from the same hot wallet, which is also its
       `feeTo` and `feeToSetter` for now — **hand both launchpad roles to the Ledger** with the
