@@ -1,8 +1,9 @@
-import { useMemo, useSyncExternalStore } from 'react'
-import { useReadContract } from 'wagmi'
+import { useCallback, useMemo, useState, useSyncExternalStore } from 'react'
+import { useReadContract, useReadContracts } from 'wagmi'
 import { lensAbi, launchpadAbi } from '../lib/abi'
 import { deployment, isDeployed, isLaunchpadDeployed } from '../lib/deployment'
 import { asLaunchCurve, PAGE_SIZE, type LaunchRecord } from '../lib/launch'
+import { launchWindows } from '../lib/launchPages'
 import { launchFixtureApi } from '../lib/launchFixtureApi'
 import { rememberToken, type TokenMetaResult } from '../lib/tokens'
 
@@ -18,6 +19,7 @@ function zero(): number {
 export function useLaunches() {
   const api = launchFixtureApi()
   const fixtureVersion = useSyncExternalStore(api ? api.subscribe : noopSubscribe, api ? api.version : zero, zero)
+  const [pages, setPages] = useState(1)
 
   const lengthQuery = useReadContract({
     address: deployment.launchpad,
@@ -30,25 +32,27 @@ export function useLaunches() {
   })
 
   const length = lengthQuery.data ?? 0n
-  const start = length > PAGE_SIZE ? length - PAGE_SIZE : 0n
-  const count = length > PAGE_SIZE ? PAGE_SIZE : length
+  const windows = useMemo(() => launchWindows(length, pages), [length, pages])
 
-  const pageQuery = useReadContract({
-    address: deployment.launchpad,
-    abi: launchpadAbi,
-    functionName: 'curvesPage',
-    args: [start, count],
+  const pageQuery = useReadContracts({
+    allowFailure: false,
+    contracts: windows.map((window) => ({
+      address: deployment.launchpad,
+      abi: launchpadAbi,
+      functionName: 'curvesPage' as const,
+      args: [window.start, window.count] as const,
+    })),
     query: {
-      enabled: !fixtureOn && isLaunchpadDeployed && lengthQuery.data !== undefined,
+      enabled: !fixtureOn && isLaunchpadDeployed && windows.length > 0,
       refetchInterval: 4_000,
+      placeholderData: (previous) => previous,
     },
   })
 
-  const page = useMemo(() => {
-    const rows = [...(pageQuery.data ?? [])].map(asLaunchCurve)
-    rows.reverse()
-    return rows
-  }, [pageQuery.data])
+  const page = useMemo(
+    () => (windows.length === 0 ? [] : (pageQuery.data ?? []).flatMap((rows) => [...rows].reverse().map(asLaunchCurve))),
+    [pageQuery.data, windows.length],
+  )
 
   const addresses = useMemo(() => page.map((row) => row.token), [page])
 
@@ -60,6 +64,7 @@ export function useLaunches() {
     query: {
       enabled: !fixtureOn && isDeployed && addresses.length > 0,
       staleTime: Number.POSITIVE_INFINITY,
+      placeholderData: (previous) => previous,
     },
   })
 
@@ -94,8 +99,16 @@ export function useLaunches() {
     await Promise.all([lengthQuery.refetch(), pageQuery.refetch(), metaQuery.refetch()])
   }
 
+  const hasMore = !fixtureOn && BigInt(pages) * PAGE_SIZE < length
+  const isLoadingMore = pageQuery.isFetching && (pageQuery.data?.length ?? 0) < windows.length
+  const loadMore = useCallback(() => setPages((current) => current + 1), [])
+
   return {
     launches,
+    total: fixtureOn ? launches.length : Number(length),
+    hasMore,
+    isLoadingMore,
+    loadMore,
     isLoading: !fixtureOn && isLaunchpadDeployed && (lengthQuery.isLoading || pageQuery.isLoading),
     error: fixtureOn ? null : lengthQuery.error ?? pageQuery.error,
     refetch,
