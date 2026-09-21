@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { decodeAbiParameters, getAddress, zeroAddress, type Address, type Hex } from 'viem'
 import type { LaunchSuite } from '../deployment'
 import { destinationLabel, destinationName, feeDestination } from '../plugins/destination'
-import { claimableAfterDrip } from '../plugins/holders'
+import { dividendStatus, hasDividends } from '../plugins/holders'
 import {
   bpsToPercentText,
   encodeSplitData,
@@ -253,11 +253,26 @@ describe('where a token’s fees go', () => {
   })
 })
 
-describe('Distribute to holders', () => {
-  test('what dripAndClaim pays is the claimable balance plus a pro-rata share of the drip, floored', () => {
-    expect(claimableAfterDrip({ claimable: 5n, releasable: 1_000n, balance: 1n, eligibleSupply: 3n })).toBe(5n + 333n)
-    expect(claimableAfterDrip({ claimable: 5n, releasable: 1_000n, balance: 0n, eligibleSupply: 3n })).toBe(5n)
-    expect(claimableAfterDrip({ claimable: 0n, releasable: 1_000n, balance: 7n, eligibleSupply: 0n })).toBe(0n)
+describe('holder dividends, streamed inside the token', () => {
+  const running = { undistributed: 282_669_000n, streamRate: 3_272n, streamEnd: 1_790_100_000n, eligibleSupply: 620_000_000n * 10n ** 18n }
+
+  test('a running stream: what it still owes, when it ends, and about how much an hour it pays all holders', () => {
+    expect(dividendStatus(running)).toEqual({ kind: 'streaming', left: 282_669_000n, endsAt: 1_790_100_000n, perHour: 3_272n * 3_600n })
+  })
+
+  test('paused while under one whole token is eligible, with what it still owes', () => {
+    expect(dividendStatus({ ...running, eligibleSupply: 0n })).toEqual({ kind: 'paused', left: 282_669_000n })
+  })
+
+  test('nothing streaming once the stream owes nothing, even though the token keeps its last rate', () => {
+    expect(dividendStatus({ ...running, undistributed: 0n })).toEqual({ kind: 'none' })
+    expect(dividendStatus({ ...running, undistributed: 0n, eligibleSupply: 0n })).toEqual({ kind: 'none' })
+  })
+
+  test('the page shows dividends for any token that has had some, or where the wallet has some to claim', () => {
+    expect(hasDividends({ totalDistributed: 0n })).toBe(false)
+    expect(hasDividends({ totalDistributed: 1n })).toBe(true)
+    expect(hasDividends({ totalDistributed: 0n, you: { balance: 1n, claimable: 1n } })).toBe(true)
   })
 })
 

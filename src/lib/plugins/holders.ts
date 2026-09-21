@@ -1,75 +1,85 @@
 import { parseAbi, type Address } from 'viem'
-import { launchFeePluginEntries } from '../abi'
+import { launchFeePluginEntries, launchTokenAbi } from '../abi'
 
 /**
- * Distribute to holders ([D15], [D21]): a token's creator fees are dripped to its holders through the token's own
- * USDC dividend tracker. Everything the site reads from or sends to this plugin lives in this file, so the drip
- * API can be re-pointed in one place (contracts/interfaces/plugins/IHolderDistributionPlugin.sol):
+ * Holder dividends ([D15], [D21]). They live inside every launch token: `distribute(amount)` streams USDC to the
+ * eligible holders over DRIP_PERIOD (24 hours), and each holder earns second by second in proportion to what it
+ * holds, so buying just before a payout earns nothing extra. While under one whole token is eligible the stream
+ * pauses (its end moves out). Tokens in the launch pool, the curve's unsold inventory and burned tokens earn none.
  *
- * - `drip(token)`: anyone releases what the stream owes holders by now.
- * - `dripAndClaim(token)`: drips, then pays the caller its claimable USDC (never anyone else).
- * - `unreleased(token)`: USDC still waiting to be released to holders.
- * - `releasable(token)`: what a drip would release right now (0 without eligible supply).
- * - `streamEnd(token)`: from then on everything unreleased is due. A delivery moves it to an amount-weighted
- *   point between the old end and a full DRIP_PERIOD (24 hours) from now, so the site reads it, never computes it.
- * - drip and dripAndClaim revert NotConfigured(token) for a token that does not use this plugin. There is no flush.
- *
- * A holder's own claimable balance is read from the token (`claimable(holder)`), not from here.
+ * The Distribute to holders plugin only forwards a token's creator fees to that token's `distribute`; it holds
+ * nothing. Everything the site reads or sends for holder dividends lives in this file:
+ * - token: `claimable(holder)` (grows live), `claim()`, `streamRate()` (USDC units per second to all holders),
+ *   `streamEnd()`, `undistributed()` (what the running stream still owes), `eligibleSupply()`,
+ *   `totalDistributed()`, `balanceOf(holder)`;
+ * - plugin: `totalDistributed(token)` only.
  */
 export const holderPluginAbi = parseAbi([
   ...launchFeePluginEntries,
-  'event FeesStreamed(address indexed token, uint256 amount, uint256 unreleased, uint256 streamEnd)',
   'event Distributed(address indexed token, uint256 amount)',
-  'function DRIP_PERIOD() view returns (uint256)',
-  'function drip(address token) returns (uint256 released)',
-  'function dripAndClaim(address token) returns (uint256 released, uint256 claimed)',
-  'function unreleased(address token) view returns (uint256)',
-  'function releasable(address token) view returns (uint256)',
-  'function lastDrip(address token) view returns (uint256)',
-  'function streamEnd(address token) view returns (uint256)',
   'function totalDistributed(address token) view returns (uint256)',
 ])
 
-/** The plugin's per-token stream, as the token page shows it. */
-export interface HolderStream {
-  unreleased: bigint
-  releasable: bigint
-  /** Unix seconds from which all of `unreleased` is due; 0 if the stream was never fed. */
+/** A token's dividend stream and, with a wallet connected, that wallet's part in it. */
+export interface HolderDividends {
+  /** What the running stream still owes all holders from now on; 0 when none runs. */
+  undistributed: bigint
+  /** The stream's current payout to all eligible holders together, in USDC units per second (rounded down). */
+  streamRate: bigint
+  /** When the running stream ends, unless it pauses or more is distributed; 0 if nothing was ever distributed. */
   streamEnd: bigint
+  /** All USDC ever distributed to holders, streamed out or not. */
   totalDistributed: bigint
+  /** 0 below one whole eligible token, where the stream pauses. */
+  eligibleSupply: bigint
+  you?: {
+    balance: bigint
+    /** Everything the wallet has earned up to the second it was read, less what it claimed. */
+    claimable: bigint
+  }
 }
 
-/** The reads behind `HolderStream`, in order, for one multicall. */
-export function holderStreamReads(plugin: Address, token: Address) {
+/** The token reads behind `HolderDividends`, in this order: undistributed, streamRate, streamEnd, totalDistributed, eligibleSupply. */
+export function dividendReads(token: Address) {
   return [
-    { address: plugin, abi: holderPluginAbi, functionName: 'unreleased', args: [token] },
-    { address: plugin, abi: holderPluginAbi, functionName: 'releasable', args: [token] },
-    { address: plugin, abi: holderPluginAbi, functionName: 'streamEnd', args: [token] },
-    { address: plugin, abi: holderPluginAbi, functionName: 'totalDistributed', args: [token] },
+    { address: token, abi: launchTokenAbi, functionName: 'undistributed' },
+    { address: token, abi: launchTokenAbi, functionName: 'streamRate' },
+    { address: token, abi: launchTokenAbi, functionName: 'streamEnd' },
+    { address: token, abi: launchTokenAbi, functionName: 'totalDistributed' },
+    { address: token, abi: launchTokenAbi, functionName: 'eligibleSupply' },
   ] as const
 }
 
-export function holderStreamFrom(results: readonly [bigint, bigint, bigint, bigint]): HolderStream {
-  const [unreleased, releasable, streamEnd, totalDistributed] = results
-  return { unreleased, releasable, streamEnd, totalDistributed }
+/** A holder's part: balanceOf, then claimable. */
+export function holderReads(token: Address, holder: Address) {
+  return [
+    { address: token, abi: launchTokenAbi, functionName: 'balanceOf', args: [holder] },
+    { address: token, abi: launchTokenAbi, functionName: 'claimable', args: [holder] },
+  ] as const
 }
 
-/** The holder's claim: drip what is due, then pay the caller. */
-export function dripAndClaimCall(plugin: Address, token: Address) {
-  return { address: plugin, abi: holderPluginAbi, functionName: 'dripAndClaim', args: [token] } as const
+/** The connected wallet claims its own dividends, on the token. */
+export function claimCall(token: Address) {
+  return { address: token, abi: launchTokenAbi, functionName: 'claim' } as const
 }
 
-/** Releases what is due to every holder, without claiming. */
-export function dripCall(plugin: Address, token: Address) {
-  return { address: plugin, abi: holderPluginAbi, functionName: 'drip', args: [token] } as const
-}
+export type DividendStatus =
+  | { kind: 'none' }
+  /** Owed, but under one whole token is eligible: nothing accrues until someone holds. */
+  | { kind: 'paused'; left: bigint }
+  | { kind: 'streaming'; left: bigint; endsAt: bigint; perHour: bigint }
 
 /**
- * What `dripAndClaim` would pay `holder` now: what the token already owes them, plus their pro-rata share of
- * what the drip releases. The share is floored the way the token floors it, so this can differ from the payment by
- * at most one unit, and the drip keeps growing until the transaction lands.
+ * What the stream is doing, for the token page. `streamRate` keeps its last value after a stream ends, so a stream
+ * counts as running only while it still owes something (the token's `undistributed()` is 0 once it has ended).
  */
-export function claimableAfterDrip(input: { claimable: bigint; releasable: bigint; balance: bigint; eligibleSupply: bigint }): bigint {
-  const share = input.eligibleSupply > 0n && input.balance > 0n ? (input.releasable * input.balance) / input.eligibleSupply : 0n
-  return input.claimable + share
+export function dividendStatus(dividends: Pick<HolderDividends, 'undistributed' | 'streamRate' | 'streamEnd' | 'eligibleSupply'>): DividendStatus {
+  if (dividends.undistributed === 0n) return { kind: 'none' }
+  if (dividends.eligibleSupply === 0n) return { kind: 'paused', left: dividends.undistributed }
+  return { kind: 'streaming', left: dividends.undistributed, endsAt: dividends.streamEnd, perHour: dividends.streamRate * 3_600n }
+}
+
+/** Whether the token page should show holder dividends: the token pays them, or someone paid it some. */
+export function hasDividends(dividends: Pick<HolderDividends, 'totalDistributed' | 'you'>): boolean {
+  return dividends.totalDistributed > 0n || (dividends.you?.claimable ?? 0n) > 0n
 }

@@ -32,8 +32,8 @@ export interface LaunchFixtureApi {
   collect: (token: Address) => Hash
   release: (token: Address, payee: Address) => Hash
   runBuyback: (token: Address) => Hash
-  drip: (token: Address) => Hash
-  dripAndClaim: (token: Address, owner: Address) => Hash
+  /** The owner claims its dividends on the token. */
+  claim: (token: Address, owner: Address) => Hash
 }
 
 let api: LaunchFixtureApi | undefined

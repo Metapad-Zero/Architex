@@ -128,7 +128,6 @@ const launchTokenErrors = [
   'error PairAlreadySet()',
   'error AlreadyGraduated()',
   'error PairLockedUntilGraduation()',
-  'error NoEligibleSupply()',
 ] as const
 
 /** IArchitexLaunchpad (v1.3), including IArchitexLaunchpadLite. */
@@ -212,7 +211,10 @@ export const launchpadAbi = parseAbi([
   'function setLaunchFee(uint256 launchFee)',
 ])
 
-/** ILaunchToken (v2): fixed supply, burn, USDC dividends, and the no-approval `pull` for sells. */
+/**
+ * ILaunchToken (v2): fixed supply, burn, USDC dividends streamed inside the token (distribute pays holders second
+ * by second over DRIP_PERIOD; claimable grows live), and the no-approval `pull` for sells.
+ */
 export const launchTokenAbi = parseAbi([
   ...launchTokenErrors,
   ...oz20Errors,
@@ -241,10 +243,15 @@ export const launchTokenAbi = parseAbi([
   'function pull(address from, address to, uint256 amount)',
   'function burn(uint256 amount)',
   'function distribute(uint256 amount)',
+  'function DRIP_PERIOD() view returns (uint256)',
   'function eligibleSupply() view returns (uint256)',
   'function isExcluded(address account) view returns (bool)',
   'function totalDistributed() view returns (uint256)',
   'function claimable(address holder) view returns (uint256)',
+  'function streamRate() view returns (uint256)',
+  'function streamEnd() view returns (uint256)',
+  'function lastAccrual() view returns (uint256)',
+  'function undistributed() view returns (uint256)',
   'function claim() returns (uint256 amount)',
   'function claimFor(address holder) returns (uint256 amount)',
 ])
