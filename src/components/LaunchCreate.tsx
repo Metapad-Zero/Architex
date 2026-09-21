@@ -6,7 +6,8 @@ import { useConnectSheet } from '../hooks/useConnectSheet'
 import { useCreateToken } from '../hooks/useCreateToken'
 import { useLaunch } from '../hooks/useLaunch'
 import { useSettings } from '../hooks/useSettings'
-import { formatAmount, parseAmount } from '../lib/format'
+import { parseOptionalAmount, sanitizeAmount } from '../lib/amountInput'
+import { formatAmount } from '../lib/format'
 import { metadataStatus } from '../lib/ipfs'
 import { NAME_MAX_BYTES, SYMBOL_MAX_BYTES, utf8ByteLength } from '../lib/launch'
 import { prepareImage, type PreparedImage } from '../lib/prepareImage'
@@ -70,15 +71,11 @@ export function LaunchCreate({ onCreated }: LaunchCreateProps) {
   const detailErrors = detailsEnabled ? metadataErrors(details) : {}
   const wantsDetails = detailsEnabled && (Boolean(image) || hasMetadata(details))
 
-  const initialBuyUsdc = useMemo(() => {
-    try {
-      return firstBuy ? parseAmount(firstBuy, usdc.decimals) : 0n
-    } catch {
-      return 0n
-    }
-  }, [firstBuy, usdc.decimals])
+  const firstBuyInput = useMemo(() => parseOptionalAmount(firstBuy, usdc.decimals), [firstBuy, usdc.decimals])
+  const initialBuyUsdc = firstBuyInput.amount ?? 0n
+  const firstBuyError = firstBuyInput.error
 
-  const valid = !nameError && !symbolError && Object.keys(detailErrors).length === 0 && !imageProblem
+  const valid = !nameError && !symbolError && !firstBuyError && Object.keys(detailErrors).length === 0 && !imageProblem
 
   const create = useCreateToken({
     name: name.trim(),
@@ -90,6 +87,7 @@ export function LaunchCreate({ onCreated }: LaunchCreateProps) {
     usdcBalance,
     usdcAllowance,
     usdcDecimals: usdc.decimals,
+    onApproved: refetch,
     onCreated: (token) => {
       void refetch()
       onCreated(token)
@@ -147,7 +145,7 @@ export function LaunchCreate({ onCreated }: LaunchCreateProps) {
   }
 
   const receive = create.firstBuy ? `${formatAmount(create.firstBuy.tokensOut, 18)} ${symbol.trim() || 'TOKEN'}` : GHOST
-  const total = `${formatAmount(create.totalUsdc, usdc.decimals)} USDC`
+  const total = create.feeKnown && !firstBuyError ? `${formatAmount(create.totalUsdc, usdc.decimals)} USDC` : GHOST
 
   return (
     <div className="pools-page">
@@ -275,12 +273,15 @@ export function LaunchCreate({ onCreated }: LaunchCreateProps) {
                 placeholder="0"
                 value={firstBuy}
                 onChange={(event) => {
-                  const next = event.target.value.replace(/,/g, '')
-                  if (next === '' || /^\d*(?:\.\d*)?$/.test(next)) setFirstBuy(next)
+                  const next = sanitizeAmount(event.target.value, usdc.decimals)
+                  if (next !== undefined) setFirstBuy(next)
                 }}
+                aria-invalid={submitted && Boolean(firstBuyError)}
+                aria-describedby={submitted && firstBuyError ? 'launch-first-buy-error' : undefined}
               />
               <span>USDC</span>
             </div>
+            {submitted && firstBuyError && <p id="launch-first-buy-error" className="mt-2 text-sm text-loss" role="alert">{firstBuyError}</p>}
             <p className="mt-2 text-xs leading-5 text-g500">
               Optional. This buy happens in the same transaction as the create, so nobody can buy before you.
             </p>
@@ -291,7 +292,7 @@ export function LaunchCreate({ onCreated }: LaunchCreateProps) {
         </div>
 
         <dl className="receipt-lines mt-8">
-          <div><dt>Launch fee</dt><dd>{create.launchFee > 0n ? `${create.formatFee} USDC` : GHOST}</dd></div>
+          <div><dt>Launch fee</dt><dd>{create.feeKnown ? `${create.formatFee} USDC` : GHOST}</dd></div>
           <div><dt>You receive</dt><dd className={create.firstBuy ? '' : 'text-g500'}>{receive}</dd></div>
           <div><dt>Total</dt><dd>{total}</dd></div>
         </dl>
