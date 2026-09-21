@@ -39,7 +39,7 @@ function reserveValueInUsdc(token: Token, amount: bigint, pairs: readonly AmmPai
 
 export function PoolsView({ selectedPair, onSelectPair }: PoolsViewProps) {
   const { address } = useAccount()
-  const { pairs, isLoading, refetch: refetchPairs } = usePairs()
+  const { pairs, heldBack, isLoading, refetch: refetchPairs } = usePairs()
   const { tokens } = useTokens(pairs)
   const { balances, refetch: refetchBalances } = useBalances(address, tokens)
   const { allowances, refetch: refetchAllowances } = useAllowances(address, tokens)
@@ -77,7 +77,7 @@ export function PoolsView({ selectedPair, onSelectPair }: PoolsViewProps) {
       {creating && (
         <section className="mb-14 border-t border-ink">
           <div className="section-heading-row"><h2>Create a pool</h2></div>
-          <AddLiquidityForm pairs={pairs} tokens={tokens} balances={balances} allowances={allowances} onConfirmed={refresh} />
+          <AddLiquidityForm pairs={pairs} heldBack={heldBack} tokens={tokens} balances={balances} allowances={allowances} onConfirmed={refresh} />
         </section>
       )}
 

@@ -1,10 +1,11 @@
 import { useMemo } from 'react'
-import { zeroAddress } from 'viem'
-import { useReadContract, useReadContracts } from 'wagmi'
+import { useQuery } from '@tanstack/react-query'
+import { usePublicClient, useReadContracts } from 'wagmi'
 import { activeChain } from '../chain'
 import { launchpadAbi, lensAbi } from '../lib/abi'
 import { deployment, isDeployed, isLaunchpadDeployed } from '../lib/deployment'
 import { pairKey, type AmmPair } from '../lib/amm'
+import { LENS_PAGE, poolHold, readAllPages, type PoolHold } from '../lib/pairList'
 
 export interface PairInfo extends AmmPair {
   blockTimestampLast: number
@@ -12,15 +13,25 @@ export interface PairInfo extends AmmPair {
 
 const isUsdc = (address: string) => address.toLowerCase() === activeChain.usdc.toLowerCase()
 
+const pairsPage = (start: bigint) =>
+  ({ address: deployment.lens, abi: lensAbi, functionName: 'pairs', args: [start, LENS_PAGE] }) as const
+
 export function usePairs() {
-  const query = useReadContract({
-    address: deployment.lens,
-    abi: lensAbi,
-    functionName: 'pairs',
-    args: [0n, 200n],
-    query: {
-      enabled: isDeployed,
-      refetchInterval: 4_000,
+  const publicClient = usePublicClient()
+  const query = useQuery({
+    queryKey: ['pairs', activeChain.id, deployment.lens],
+    enabled: isDeployed && Boolean(publicClient),
+    refetchInterval: 4_000,
+    queryFn: () => {
+      if (!publicClient) throw new Error('No RPC client for Arc')
+      // Every launch adds a factory pair, so the list outgrows one page.
+      return readAllPages(
+        () => Promise.all([
+          publicClient.readContract({ address: deployment.lens, abi: lensAbi, functionName: 'pairsLength' }),
+          publicClient.readContract(pairsPage(0n)),
+        ]),
+        (starts) => publicClient.multicall({ contracts: starts.map(pairsPage), allowFailure: false }),
+      )
     },
   })
 
@@ -52,19 +63,24 @@ export function usePairs() {
       functionName: 'curves' as const,
       args: [isUsdc(pair.token0) ? pair.token1 : pair.token0] as const,
     })),
-    query: { enabled: unfunded.length > 0, staleTime: 30_000 },
+    query: {
+      enabled: unfunded.length > 0,
+      staleTime: 30_000,
+      refetchInterval: (current) => (!current.state.data || current.state.data.some((lookup) => poolHold(lookup) === 'unknown') ? 4_000 : false),
+    },
   })
 
-  const pairs = useMemo<PairInfo[]>(() => {
-    if (unfunded.length === 0) return all
+  const { pairs, heldBack } = useMemo(() => {
+    const held = new Map<string, PoolHold>()
+    if (unfunded.length === 0) return { pairs: all, heldBack: held }
     const hidden = new Set<string>()
     unfunded.forEach((pair, index) => {
-      const result = curves.data?.[index]
-      // Until the launchpad has answered, an unfunded USDC pool is held back rather than flashed and removed.
-      if (!result) hidden.add(pair.pair.toLowerCase())
-      else if (result.status === 'success' && result.result.token !== zeroAddress && !result.result.graduated) hidden.add(pair.pair.toLowerCase())
+      const hold = poolHold(curves.data?.[index])
+      if (!hold) return
+      hidden.add(pair.pair.toLowerCase())
+      held.set((isUsdc(pair.token0) ? pair.token1 : pair.token0).toLowerCase(), hold)
     })
-    return all.filter((pair) => !hidden.has(pair.pair.toLowerCase()))
+    return { pairs: all.filter((pair) => !hidden.has(pair.pair.toLowerCase())), heldBack: held }
   }, [all, curves.data, unfunded])
 
   const pairMap = useMemo(
@@ -75,6 +91,7 @@ export function usePairs() {
   return {
     pairs,
     pairMap,
+    heldBack,
     isLoading: isDeployed && query.isLoading,
     error: query.error,
     refetch: query.refetch,
