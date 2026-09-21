@@ -1,4 +1,7 @@
-# Architex Launchpad v1.3 — binding spec (draft for owner sign-off)
+# Architex Launchpad v1.3 — binding spec
+
+Signed off by the owner 2026-09-21 and built on branch `v13`. This file describes what was built, including
+the builders' safer interpretations (marked **[built]**) and two later owner decisions (**[D21]**, **[D22]**).
 
 v1.3 replaces the v1.2 launchpad (deployed on mainnet at `0x9Ac420d77E019D5e9F79a3020B0b5eB28d72B959`,
 0 launches, withdrawn from the site 2026-09-21). It adds per-token **creator fees** routed to **plugins**
@@ -18,7 +21,8 @@ Details not asked but forced by those decisions are marked **[derived]** — rev
 - **Both fees are taken in USDC [D11]**, computed on the trade's gross USDC and rounded **up** (they
   never round in the trader's favour). A buy pays them out of the USDC in; a sell out of the USDC out.
 - **No liquidity-provider fee** in launch pools. An "LP fee" is plugin behaviour (owner, Q "Pool fees").
-- **Launch fee: 1 USDC** (unchanged from v1.2).
+- **Launch fee: 1 USDC** (unchanged from v1.2). `createToken` takes `maxLaunchFee` and reverts `LaunchFeeAboveMax`
+  if the admin raised the fee above it while the launch was pending **[D22]**.
 - **Every bonding curve is identical**: the v1.2 constants stay hard-coded (`TOTAL_SUPPLY` 1B,
   `CURVE_SUPPLY` 800M, `POOL_SUPPLY` 200M, `VIRTUAL_TOKENS_0`, `VIRTUAL_USDC_0 = 8_333_333_333`). Not a
   constructor parameter, not per deployment (owner).
@@ -61,9 +65,15 @@ interface IArchitexFeePlugin is IERC165 {
   merely calls `onFees` directly: every credit is backed by USDC transferred in the same call.
 - **`onLaunch` is authenticated per token.** Launch-token addresses are predictable, so a plugin could be
   pre-configured by an attacker for a token about to be created. Listed plugins accept `onLaunch` only
-  if `launchpad.curves(token).plugin == msg.sender` or `msg.sender == launchpad`. This covers the Combo
-  case, where the Combo is the token's plugin and configures its sub-plugins. Configuration is write-once
-  per token.
+  if `launchpad.pluginOf(token) == msg.sender`, or if `msg.sender == launchpad` and
+  `pluginOf(token) == address(this)`. This covers the Combo case, where the Combo is the token's plugin
+  and configures its sub-plugins. Use `pluginOf`, not `curves()`: `curves()` reverts for unknown tokens.
+  Configuration is write-once per token.
+- **The hook decision is made once, at launch, and stored** (`Curve.pluginHooks`) **[built]**. Collection uses
+  the stored value, so `onFees` runs for a token exactly when `onLaunch` did. This matters for a plugin whose
+  `supportsInterface` answer could change later (an upgradeable proxy).
+- **Hooks run under the launchpad's reentrancy guard**, so a plugin cannot trade inside `onFees`. Buyback &
+  burn buys in its own separate `run` call.
 - If `onLaunch` reverts, `createToken` reverts (the creator's own choice). If `onFees` reverts, that
   collection reverts and the fees stay accrued **[D10]**.
 
@@ -72,10 +82,10 @@ interface IArchitexFeePlugin is IERC165 {
 | Plugin | Behaviour |
 | --- | --- |
 | **Creator wallet** | No contract: `plugin` is an address the creator names (default: the creator). |
-| **Split** | Up to **20** payees with fixed shares, set in `onLaunch` data **[D16]**. Per-token accounting; each payee (or anyone for them) pulls `release(token, payee)`. |
+| **Split** | Up to **20** payees with fixed shares, set in `onLaunch` data **[D16]**. Per-token accounting; each payee (or anyone for them) pulls `release(token, payee)`. Payees can't be zero, duplicates, the plugin, the launchpad, USDC or the token **[built]**: fees sent to any of those would be stuck. |
 | **Buyback & burn** | Anyone can run it **[D14]**. Each run buys the token with that token's accrued USDC (through the launchpad while on the curve, the launch router after graduation) and **burns** it, so total supply drops **[D13]**. |
-| **Distribute to holders** | On `onFees`, distributes the USDC to the token's holders pro-rata through the token's built-in dividend tracker **[D15]**. Holders claim USDC on the token page. |
-| **Combo** | Splits a token's fees across up to 5 plugins by basis points summing to 10,000, forwarding `onLaunch` data to each. |
+| **Distribute to holders** | Pays the USDC to the token's holders pro-rata through the token's built-in dividend tracker **[D15]**, **dripped over 24 hours** so a bot can't buy, collect, claim and sell in one transaction **[D21]**. A new deposit restarts the 24-hour window for everything still undistributed. Anyone can `drip(token)`; holders use `dripAndClaim(token)` on the token page. |
+| **Combo** | Splits a token's fees across up to 5 plugins by basis points summing to 10,000, forwarding `onLaunch` data to each. An entry that isn't a plugin must have empty data, which catches a mistyped plugin address **[built]**. A Combo inside a Combo can't configure listed plugins. |
 
 **Buyback & burn chunking [derived]**: each run spends at most **0.25% of the USDC-side reserve** (the
 curve's `virtualUsdc`, or the pool's USDC reserve), and **at most one run per token per block**. A
@@ -95,8 +105,13 @@ cap is the protection.
   - Standard magnified-dividend-per-share accounting with per-account corrections (2^128 magnitude). A
     distribution with zero eligible supply reverts.
 - Transfers **into** its launch pool are blocked until graduation (as v1.2).
-- `pull(from, amount)`: callable by the launchpad or the launch router, only with their own `msg.sender`
-  as `from`. Sells on the curve and in the pool need no approval **[derived]**.
+- `pull(from, to, amount)`: callable only by the launchpad (into itself) or the launch router (into the pair),
+  each passing only its own `msg.sender` as `from`. Sells on the curve and in the pool need no approval
+  **[derived]**.
+- **Dividends need at least one whole eligible token** (`MIN_ELIGIBLE_SUPPLY`) **[built]**: below that,
+  `eligibleSupply()` reports 0 and `distribute` reverts. Without it, a sole holder of 1 wei could recycle
+  flash-loaned USDC through distribute/claim until the per-share value overflowed on large transfers, which
+  would freeze the curve. Each holder's share rounds down by at most 1 unit; the dust stays in the token.
 
 ## 4. Launch pools (separate suite)
 
@@ -122,7 +137,7 @@ cap is the protection.
   4. `launchpad.initialize(factory, router)`: one call only, by the deployer. `createToken` reverts until
      it has run.
 - **Creating a token:** `createToken(name, symbol, metadataURI, creatorFeeBps, plugin, pluginData,
-  initialBuyUsdc, minTokensOut)`.
+  initialBuyUsdc, minTokensOut, maxLaunchFee)` **[D22]**. The plugin can't be zero or the launchpad itself.
   - It validates `creatorFeeBps ≤ 1000` and `plugin ≠ 0`, deploys the token, creates its launch pair, and
     registers the curve (with `creatorFeeBps` and `plugin`).
   - It then calls `onLaunch` if the plugin declares the interface, and finally runs the optional first
@@ -141,8 +156,13 @@ cap is the protection.
   - `collectCreatorFees(token)` is permissionless and non-reentrant. It pays the token's plugin as in §2.1.
 - **Graduation:** as v1.2 (atomic inside the sell-out buy, direct transfers, no router, LP to the burn
   address), into the **launch pair**.
-- **Events:** `Trade` carries `platformFee` and `creatorFee`. `TokenCreated` carries `creatorFeeBps`
-  and `plugin`. There is also `CreatorFeesCollected(token, plugin, amount)`.
+- **Events:** `Trade` carries `platformFee` and `creatorFee`. `TokenCreated` indexes token, creator and plugin
+  and carries `creatorFeeBps`. Also `CreatorFeesCollected(token, plugin, amount)`,
+  `PoolFeesAccrued(token, platformFee, creatorFee)`, `Initialized(pairFactory, router)`, and the router's
+  `PoolTrade`.
+- **Hardening [built]:** `initialize` checks the factory and router point at this launchpad and its USDC;
+  `accrueTradeFees` only accepts a known, graduated token; `collectFees` is non-reentrant; a trade whose
+  rounded-up fees eat the whole input or output reverts `ZeroAmount`.
 - **Admin:** unchanged (`setFeeTo`, `setFeeToSetter`, `setLaunchFee` capped at 100 USDC). The admin has
   no power over creator fees, plugins, curves or pools.
 
@@ -188,7 +208,18 @@ cap is the protection.
    graduation rehearsal.
 3. Mainnet: the owner deploys. The Launch tab reappears pointing at v1.3.
 
-## 9. Not in v1.3
+## 9. Accepted limits
+
+- **Launch tokens in third-party pools.** Anyone can pair a launch token in a core-AMM pool. Trades there skip
+  creator fees, and that pool's dividends can be pulled out with `claimFor` then `skim`. Nothing on-chain can
+  prevent it, as with any ERC-20.
+- **Launch-pool liquidity** has no router helper, so adding or removing it must be done atomically by the caller.
+- **USDC blocklist.** If a plain-address Combo entry is blocklisted by USDC, that token's collections fail and
+  its fees stay with the launchpad **[D10]**. A blocklisted Split payee only blocks their own release.
+- **USDC sent straight to a plugin** (not through collection) is credited to no token and can't be recovered.
+  The builder should not offer plugin addresses as Split payees.
+
+## 10. Not in v1.3
 
 Launch tokens trading against anything but USDC. Creator fees changing after launch. Plugin changes after
 launch. An on-chain plugin allowlist. An LP plugin (buildable later on open `mint`, per [D17]).

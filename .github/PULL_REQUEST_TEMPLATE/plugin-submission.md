@@ -1,31 +1,26 @@
 ## Plugin submission
 
-See `docs/plugins/CONTRIBUTING.md` before filling this out.
+Read `docs/plugins/CONTRIBUTING.md` first.
 
-**Contract:** `contracts/plugins/fee-distribution/`
-**Registry entry:** `src/content/plugins/registry.ts`
+**Contract:** `contracts/plugins/launch/`
+**Registry entry:** `src/content/plugins/`
 
-### What it does
+### What it does with a token's creator fee
 
-<!-- One or two sentences: what split logic, for what use case. -->
+<!-- One or two sentences. -->
 
-### The two rules
+### The rules
 
-- [ ] Never reverts on receipt — no `receive()`/`fallback()`/transfer hook that could block a
-      fee accrual from `ArchitexFactory` or `ArchitexLaunchpad`.
-- [ ] Distribution is pull-based — no payee can block another payee's withdrawal.
+- [ ] Declares `IArchitexFeePlugin` through ERC-165, and the answer can't change.
+- [ ] `onFees` pulls exactly `amount` from `msg.sender` and credits only that, per token.
+- [ ] `onLaunch` is authenticated with `pluginOf(token)`, and its config is write-once per token.
+- [ ] Does not trade, add liquidity or call the launchpad inside a hook.
+- [ ] Pays out by pull, never push.
 
 ### Tests
 
-- [ ] Happy path
-- [ ] Adversarial inputs (zero-share payee, duplicate payee, funds arriving after a partial
-      release, multiple tokens held simultaneously — whichever apply to this design)
-- [ ] Fuzz test: released amounts never exceed what the contract received
-- [ ] `bun run contracts:test` passes locally
-- [ ] `bun run contracts:solhint` and `bun run contracts:slither` pass locally (CI re-runs both
-      regardless)
-
-### Registry entry
-
-- [ ] `status: 'community'` and `submittedBy` set
-- [ ] `constructorArgs` match the actual constructor
+- [ ] Happy path, including the end-to-end payout.
+- [ ] An attacker pre-configuring a token is rejected; under- and over-pulls revert; two tokens never mix.
+- [ ] Fuzz: paid out never exceeds received.
+- [ ] Invariant: USDC held equals the sum of per-token balances.
+- [ ] `bun run contracts:test`, `contracts:solhint` and `contracts:slither` pass locally.
