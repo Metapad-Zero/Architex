@@ -8,6 +8,7 @@ import { isLaunchViewAvailable } from './lib/deployment'
 const PoolsView = lazy(() => import('./components/PoolsView').then((module) => ({ default: module.PoolsView })))
 const LaunchView = lazy(() => import('./components/LaunchView').then((module) => ({ default: module.LaunchView })))
 const BridgeView = lazy(() => import('./components/BridgeView').then((module) => ({ default: module.BridgeView })))
+const DocsView = lazy(() => import('./components/DocsView').then((module) => ({ default: module.DocsView })))
 
 export default function App() {
   const { route, setRoute } = useHashRoute()
@@ -31,6 +32,10 @@ export default function App() {
       ) : route.view === 'bridge' ? (
         <Suspense fallback={<div className="pools-page"><TableSkeleton rows={5} /></div>}>
           <BridgeView />
+        </Suspense>
+      ) : route.view === 'docs' ? (
+        <Suspense fallback={<div className="pools-page"><TableSkeleton rows={5} /></div>}>
+          <DocsView section={route.section} onSection={(section) => setRoute({ view: 'docs', section })} />
         </Suspense>
       ) : (
         <SwapSheet />

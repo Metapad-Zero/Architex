@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { isAddress, type Address } from 'viem'
+import { DEFAULT_DOC_SECTION, isDocSection, type DocSection } from '../lib/docs'
 
 export type AppRoute =
   | { view: 'swap' }
@@ -7,12 +8,14 @@ export type AppRoute =
   | { view: 'launch'; token?: Address }
   | { view: 'launch-new' }
   | { view: 'bridge' }
+  | { view: 'docs'; section?: DocSection }
 
 function hashFor(next: AppRoute): string {
   if (next.view === 'swap') return '#swap'
   if (next.view === 'pools') return next.pair ? `#pools/${next.pair}` : '#pools'
   if (next.view === 'launch-new') return '#launch/new'
   if (next.view === 'bridge') return '#bridge'
+  if (next.view === 'docs') return next.section && next.section !== DEFAULT_DOC_SECTION ? `#docs/${next.section}` : '#docs'
   return next.token ? `#launch/${next.token}` : '#launch'
 }
 
@@ -27,6 +30,11 @@ function readRoute(): AppRoute {
   }
   if (hash === '#launch') return { view: 'launch' }
   if (hash === '#bridge' || hash.startsWith('#bridge?')) return { view: 'bridge' }
+  if (hash.startsWith('#docs/')) {
+    const section = hash.slice('#docs/'.length)
+    return { view: 'docs', section: isDocSection(section) ? section : DEFAULT_DOC_SECTION }
+  }
+  if (hash === '#docs') return { view: 'docs', section: DEFAULT_DOC_SECTION }
   return { view: 'swap' }
 }
 

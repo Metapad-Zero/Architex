@@ -117,6 +117,14 @@ input[type='checkbox'], input[type='radio'], input[type='range'] { accent-color:
   .nav-tab[data-active='true']::after { @apply bg-ink; }
   .nav-tab:hover { @apply bg-g100; }
 
+  .doc-nav-link {
+    @apply inline-block whitespace-nowrap border-b-2 border-transparent px-3 py-2 text-sm font-semibold text-g500 hover:bg-g100 hover:text-ink sm:block sm:w-full sm:border-b-0 sm:border-l-2 sm:pl-3 sm:pr-2 sm:text-left;
+  }
+
+  .doc-nav-link[data-active='true'] {
+    @apply border-ink text-ink;
+  }
+
   .swap-column {
     @apply mx-auto w-full max-w-[512px] px-4 pb-24 pt-12 sm:px-4 sm:pt-16;
   }
