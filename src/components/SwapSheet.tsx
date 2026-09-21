@@ -60,16 +60,24 @@ export function SwapSheet() {
     ?? tokens.find((token) => token.address !== tokenIn?.address)
   const enteredAmount = mode === 'exactIn' ? amountIn : amountOut
 
+  // A token named in the URL (e.g. "Trade on Swap" from a launch) may not be in the list yet — the pairs are still
+  // loading, or the read failed. Until the user picks, don't overwrite it with the fallback pair.
+  const unresolvedRef =
+    (initialState.in !== undefined && !findTokenByRef(tokens, initialState.in))
+    || (initialState.out !== undefined && !findTokenByRef(tokens, initialState.out))
+  const userPicked = selectedTokenIn !== undefined || selectedTokenOut !== undefined
+
   // Keep the URL shareable and remember the pair; replaceState so the back button is not spammed.
   useEffect(() => {
     if (!tokenIn || !tokenOut) return
+    if (unresolvedRef && !userPicked) return
     const pair = { in: tokenRef(tokenIn), out: tokenRef(tokenOut) }
     writeLastPair(pair)
     const next = formatSwapUrl({ ...pair, amount: enteredAmount || undefined, mode })
     if (window.location.hash !== next && (window.location.hash.startsWith('#swap') || window.location.hash === '')) {
       window.history.replaceState(null, '', next)
     }
-  }, [enteredAmount, mode, tokenIn, tokenOut])
+  }, [enteredAmount, mode, tokenIn, tokenOut, unresolvedRef, userPicked])
 
   // ⌘K / Ctrl+K opens the "You pay" token picker from anywhere on the sheet.
   useEffect(() => {

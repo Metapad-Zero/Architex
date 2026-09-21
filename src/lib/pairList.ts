@@ -2,7 +2,8 @@ import { BaseError, ContractFunctionRevertedError, zeroAddress, type Address } f
 
 /** Rows per lens.pairs / lens.positions call. */
 export const LENS_PAGE = 200n
-// Each lens page costs a few million gas; a few per request keeps every eth_call well under an RPC's gas cap.
+// A 200-row page costs ~3.9M gas, so 4 pages (~16M) keep each request well under Arc's ~30M eth_call cap. The
+// grouping only holds when the pages go out on a non-batching client (see lensClient.ts).
 const PAGES_PER_REQUEST = 4
 
 /** The start of every page after the first that `total` rows need, grouped one request's worth at a time. */

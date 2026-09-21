@@ -171,8 +171,8 @@ export function AddLiquidityForm({ pair: fixedPair, pairs, heldBack, tokens, bal
       </div>
       <dl className="receipt-lines mt-6">
         {initialPrice && <div><dt>Initial price</dt><dd>{initialPrice}</dd></div>}
-        <div><dt>Expected LP</dt><dd>{formatLp(expectedLp)}</dd></div>
-        <div><dt>Your share</dt><dd>{formatPct(shareBps)}</dd></div>
+        {!hold && <div><dt>Expected LP</dt><dd>{formatLp(expectedLp)}</dd></div>}
+        {!hold && <div><dt>Your share</dt><dd>{formatPct(shareBps)}</dd></div>}
       </dl>
       <PrimaryButton className="mt-6 w-full sm:w-auto sm:min-w-56" loading={pending} disabled={pending || (Boolean(account) && chainId === activeChain.id && (Boolean(hold) || parsedA === 0n || parsedB === 0n || shortA || shortB))} onClick={() => void submit()}>{pending ? liquidity.status?.label : label}</PrimaryButton>
       <TxStatus status={liquidity.status} />

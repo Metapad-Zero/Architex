@@ -5,6 +5,7 @@ import { activeChain } from '../chain'
 import { launchpadAbi, lensAbi } from '../lib/abi'
 import { deployment, isDeployed, isLaunchpadDeployed } from '../lib/deployment'
 import { pairKey, type AmmPair } from '../lib/amm'
+import { lensClient } from '../lib/lensClient'
 import { LENS_PAGE, poolHold, readAllPages, type PoolHold } from '../lib/pairList'
 
 export interface PairInfo extends AmmPair {
@@ -30,7 +31,7 @@ export function usePairs() {
           publicClient.readContract({ address: deployment.lens, abi: lensAbi, functionName: 'pairsLength' }),
           publicClient.readContract(pairsPage(0n)),
         ]),
-        (starts) => publicClient.multicall({ contracts: starts.map(pairsPage), allowFailure: false }),
+        (starts) => lensClient.multicall({ contracts: starts.map(pairsPage), allowFailure: false }),
       )
     },
   })

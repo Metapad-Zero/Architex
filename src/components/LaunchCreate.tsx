@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from 'react'
 import type { Address } from 'viem'
 import { useAccount } from 'wagmi'
-import { activeChain } from '../chain'
 import { useConnectSheet } from '../hooks/useConnectSheet'
 import { useCreateToken } from '../hooks/useCreateToken'
 import { useLaunch } from '../hooks/useLaunch'

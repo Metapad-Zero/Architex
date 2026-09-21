@@ -5,6 +5,7 @@ import { usePublicClient } from 'wagmi'
 import { activeChain } from '../chain'
 import { lensAbi } from '../lib/abi'
 import { deployment, isDeployed } from '../lib/deployment'
+import { lensClient } from '../lib/lensClient'
 import { LENS_PAGE, readAllPages } from '../lib/pairList'
 
 export interface PositionInfo {
@@ -33,7 +34,7 @@ export function usePositions(owner: Address | undefined) {
           publicClient.readContract({ address: deployment.lens, abi: lensAbi, functionName: 'pairsLength' }),
           publicClient.readContract(page(0n)),
         ]),
-        (starts) => publicClient.multicall({ contracts: starts.map(page), allowFailure: false }),
+        (starts) => lensClient.multicall({ contracts: starts.map(page), allowFailure: false }),
       )
     },
   })

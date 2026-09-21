@@ -138,15 +138,18 @@ export function useLaunchTrades(token: Address | undefined, createdAt: number | 
 
   const trades = query.data?.trades ?? []
   const historyComplete = query.data?.complete ?? false
+  // With no data yet, every refetch puts the query back to pending and clears its error; errorUpdatedAt survives,
+  // so a failed first read keeps showing as failed instead of flipping back to "Reading the trades…" each poll.
+  const failedFirstRead = !query.data && query.errorUpdatedAt > 0
   return {
     trades,
     historyComplete,
     /** True when `trades` is every trade since the token was created, not just the newest page of them. */
     reachesCreation: Boolean(query.data) && historyComplete && trades.length < MAX_TRADES,
     /** True until the first read has finished, retries included. */
-    isLoading: query.isPending,
+    isLoading: query.isPending && !failedFirstRead,
     /** Set only when no read has succeeded; a failed poll keeps the last good trades. */
-    error: query.data ? null : query.error,
+    error: query.data ? null : (query.error ?? (failedFirstRead ? new Error('The trades could not be read') : null)),
     version: 0,
   }
 }

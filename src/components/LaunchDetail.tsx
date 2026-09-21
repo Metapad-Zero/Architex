@@ -108,10 +108,10 @@ export function LaunchDetail({ token, onBack }: LaunchDetailProps) {
             unit="USDC"
             formatValue={formatCap}
             loading={tradesLoading}
-            partial={!historyComplete}
+            partial={!historyComplete || Boolean(tradesError)}
             loadingText="Reading the trades…"
             emptyText="No trades yet — the first buy starts the chart."
-            partialText="No recent trades. Older history could not be loaded."
+            partialText={tradesError ? 'The trades could not be loaded.' : 'No recent trades. Older history could not be loaded.'}
           />
         </div>
         <dl className="receipt-lines launch-facts">

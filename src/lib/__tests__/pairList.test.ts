@@ -66,3 +66,10 @@ describe('held-back launch pools', () => {
     expect(poolHold({ status: 'failure', error: new Error('timeout') })).toBe('unknown')
   })
 })
+
+describe('the client used for paged lens reads', () => {
+  test('does not batch calls into shared multicalls, which would merge page groups back into one request', async () => {
+    const { lensClient } = await import('../lensClient')
+    expect(Boolean(lensClient.batch?.multicall)).toBe(false)
+  })
+})

@@ -1,5 +1,4 @@
 import { useMemo, useState } from 'react'
-import { activeChain } from '../chain'
 import { useConnectSheet } from '../hooks/useConnectSheet'
 import { useLaunchTrade, type LaunchSide } from '../hooks/useLaunchTrade'
 import { useSettings } from '../hooks/useSettings'
