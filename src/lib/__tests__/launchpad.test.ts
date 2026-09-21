@@ -1,30 +1,57 @@
 import { describe, expect, test } from 'bun:test'
-import { encodeFunctionData, getAddress, type Hex } from 'viem'
-import { launchpadAbi } from '../abi'
+import { encodeFunctionData, getAddress, zeroAddress, type Hex } from 'viem'
+import { buybackPluginAbi, launchRouterAbi, launchpadAbi, splitPluginAbi } from '../abi'
+import type { LaunchSuite } from '../deployment'
 import { explainRevert } from '../errors'
 import { formatCurveSold, soldLabel, utf8ByteLength } from '../launch'
-import { describeLaunchpadCall } from '../signingIntent'
+import { holderPluginAbi } from '../plugins/holders'
+import { encodeComboData, encodeSplitData } from '../plugins/plan'
+import { describeLaunchRouterCall, describeLaunchpadCall, describePluginCall } from '../signingIntent'
 import type { Token } from '../tokens'
 
 const account = getAddress('0x00000000000000000000000000000000000000a1')
 const token = getAddress('0x00000000000000000000000000000000000000b1')
 const usdc = getAddress('0x3600000000000000000000000000000000000000')
+const alice = getAddress('0x1111111111111111111111111111111111111111')
+const bob = getAddress('0x2222222222222222222222222222222222222222')
+
+const suite: LaunchSuite = {
+  launchpad: getAddress('0x00000000000000000000000000000000000000d1'),
+  launchPairFactory: getAddress('0x00000000000000000000000000000000000000d2'),
+  launchRouter: getAddress('0x00000000000000000000000000000000000000d3'),
+  splitPlugin: getAddress('0x00000000000000000000000000000000000000e1'),
+  buybackPlugin: getAddress('0x00000000000000000000000000000000000000e2'),
+  holderPlugin: getAddress('0x00000000000000000000000000000000000000e3'),
+  comboPlugin: getAddress('0x00000000000000000000000000000000000000e4'),
+}
 
 const tokens: Token[] = [
   { address: usdc, symbol: 'USDC', name: 'USD Coin', decimals: 6, faucet: false },
   { address: token, symbol: 'DOGE', name: 'Doge on Arc', decimals: 18, faucet: false, isLaunch: true },
 ]
 
-function data(functionName: 'createToken' | 'buy' | 'sell', args: readonly unknown[]): Hex {
-  return encodeFunctionData({ abi: launchpadAbi, functionName, args: args as never })
+function createToken(creatorFeeBps: number, plugin: string, pluginData: Hex, initialBuyUsdc = 10_000_000n): Hex {
+  return encodeFunctionData({
+    abi: launchpadAbi,
+    functionName: 'createToken',
+    args: ['Doge on Arc', 'DOGE', 'ipfs://bafy', creatorFeeBps, getAddress(plugin), pluginData, initialBuyUsdc, 1n, 1_000_000n],
+  })
 }
 
 describe('launchpad copy and validation', () => {
   test('explains launchpad custom errors in a sentence', () => {
     expect(explainRevert('SlippageExceeded')).toBe('The price moved past your slippage limit. Try again or raise slippage in settings.')
-    expect(explainRevert('CurveGraduated')).toBe('This curve has graduated. Trade it on Swap.')
+    expect(explainRevert('CurveGraduated')).toBe('This curve has graduated. It now trades in its launch pool; reload the page.')
     expect(explainRevert('InvalidName')).toBe('Name must be 1 to 32 bytes.')
     expect(explainRevert('UnknownToken')).toBe('That token is not on the launchpad.')
+    expect(explainRevert('LaunchFeeAboveMax')).toBe('The launch fee went up after this form read it. Check the new fee, then create again.')
+  })
+
+  test('explains the plugins’ refusals too', () => {
+    expect(explainRevert('DuplicatePayee')).toBe('The same address is in the Split twice.')
+    expect(explainRevert('BpsSumNot10000')).toBe('The Combo shares must add up to exactly 100%.')
+    expect(explainRevert('AlreadyRanThisBlock')).toBe('A buyback already ran in this block. Try again in a moment.')
+    expect(explainRevert('NotConfigured')).toBe('That plugin does not serve this token.')
   })
 
   test('counts UTF-8 bytes, not characters', () => {
@@ -40,36 +67,97 @@ describe('launchpad copy and validation', () => {
 })
 
 describe('launchpad signing intent', () => {
-  test('decodes createToken into a receipt', () => {
-    const intent = describeLaunchpadCall(
-      data('createToken', ['Doge on Arc', 'DOGE', 'https://example.com/doge.png', 10_000_000n, 1n]),
-      account,
-      tokens,
-    )
+  test('decodes createToken: the fee, where it goes, the first buy and the most launch fee', () => {
+    const intent = describeLaunchpadCall(createToken(250, suite.buybackPlugin, '0x'), account, tokens, suite)
     expect(intent?.title).toBe('Create token')
-    expect(intent?.lines.map((line) => line.label)).toEqual(['Name', 'Symbol', 'First buy', 'Launch fee'])
-    expect(intent?.lines[0]?.value).toBe('Doge on Arc')
-    expect(intent?.lines[1]?.value).toBe('DOGE')
+    expect(intent?.lines.map((line) => line.label)).toEqual(['Name', 'Symbol', 'Creator fee', 'Fees go to', 'First buy', 'Launch fee'])
+    expect(intent?.lines.map((line) => line.value)).toEqual(['Doge on Arc', 'DOGE', '2.50% of every trade', 'Buyback & burn', '10 USDC', 'Up to 1 USDC'])
   })
 
-  test('decodes buy and sell into titles and bounds', () => {
-    const buy = describeLaunchpadCall(
-      data('buy', [token, 100_000_000n, 1n, account]),
+  test('names a wallet destination as yours only when it is the signer', () => {
+    expect(describeLaunchpadCall(createToken(0, account, '0x', 0n), account, tokens, suite)?.lines[3]?.value).toBe('Your wallet')
+    expect(describeLaunchpadCall(createToken(0, bob, '0x', 0n), account, tokens, suite)?.lines[3]?.value).toBe('Custom address 0x2222…2222')
+    expect(describeLaunchpadCall(createToken(0, bob, '0x', 0n), account, tokens, suite)?.lines[4]?.value).toBe('None')
+  })
+
+  test('spells out a Split’s payees and a Combo’s destinations', () => {
+    const split = describeLaunchpadCall(createToken(100, suite.splitPlugin, encodeSplitData([alice, bob], [3n, 1n])), account, tokens, suite)
+    expect(split?.lines.slice(3, 6)).toEqual([
+      { label: 'Fees go to', value: 'Split' },
+      { label: 'Payee 0x1111…1111', value: '75.00%' },
+      { label: 'Payee 0x2222…2222', value: '25.00%' },
+    ])
+    const combo = describeLaunchpadCall(
+      createToken(100, suite.comboPlugin, encodeComboData([suite.splitPlugin, suite.holderPlugin, alice], [5_000, 3_000, 2_000], [encodeSplitData([alice, bob], [1n, 1n]), '0x', '0x'])),
       account,
       tokens,
+      suite,
+    )
+    expect(combo?.lines.slice(3, 7)).toEqual([
+      { label: 'Fees go to', value: 'Combo' },
+      { label: 'Split · 2 payees', value: '50.00%' },
+      { label: 'Distribute to holders', value: '30.00%' },
+      { label: 'Wallet 0x1111…1111', value: '20.00%' },
+    ])
+  })
+
+  test('decodes curve buys and sells into titles and bounds', () => {
+    const buy = describeLaunchpadCall(
+      encodeFunctionData({ abi: launchpadAbi, functionName: 'buy', args: [token, 100_000_000n, 1n, account] }),
+      account,
+      tokens,
+      suite,
     )
     expect(buy?.title).toBe('Buy DOGE')
-    expect(buy?.lines[0]?.label).toBe('You pay')
+    expect(buy?.lines[0]).toEqual({ label: 'You pay at most', value: '100 USDC' })
     expect(buy?.lines[1]?.label).toBe('You receive at least')
 
     const recipient = getAddress('0x00000000000000000000000000000000000000c1')
     const sell = describeLaunchpadCall(
-      data('sell', [token, 10n ** 18n, 1n, recipient]),
+      encodeFunctionData({ abi: launchpadAbi, functionName: 'sell', args: [token, 10n ** 18n, 1n, recipient] }),
       account,
       tokens,
+      suite,
     )
     expect(sell?.title).toBe('Sell DOGE')
     expect(sell?.lines[0]?.label).toBe('You sell')
     expect(sell?.lines[2]?.label).toBe('Sent to')
+  })
+
+  test('decodes a creator-fee collection', () => {
+    const intent = describeLaunchpadCall(encodeFunctionData({ abi: launchpadAbi, functionName: 'collectCreatorFees', args: [token] }), account, tokens, suite)
+    expect(intent?.title).toBe('Collect creator fees')
+    expect(intent?.lines).toEqual([{ label: 'Token', value: 'DOGE' }])
+  })
+
+  test('decodes launch-pool trades through the launch router, with their deadline', () => {
+    const buy = describeLaunchRouterCall(
+      encodeFunctionData({ abi: launchRouterAbi, functionName: 'buy', args: [token, 5_000_000n, 1n, account, 32_503_680_000n] }),
+      account,
+      tokens,
+    )
+    expect(buy?.title).toBe('Buy DOGE')
+    expect(buy?.lines.map((line) => line.label)).toEqual(['You pay', 'You receive at least', 'Valid until'])
+    expect(buy?.lines[2]?.value).toBe('No deadline')
+    const sell = describeLaunchRouterCall(
+      encodeFunctionData({ abi: launchRouterAbi, functionName: 'sell', args: [token, 10n ** 18n, 1n, bob, 1_700_000_000n] }),
+      account,
+      tokens,
+    )
+    expect(sell?.title).toBe('Sell DOGE')
+    expect(sell?.lines.map((line) => line.label)).toEqual(['You sell', 'You receive at least', 'Sent to', 'Valid until'])
+  })
+
+  test('decodes the plugins’ public actions', () => {
+    const release = describePluginCall(suite.splitPlugin, encodeFunctionData({ abi: splitPluginAbi, functionName: 'release', args: [token, account] }), account, tokens, suite)
+    expect(release?.title).toBe('Release creator fees')
+    expect(release?.lines[1]).toEqual({ label: 'Paid to', value: 'You' })
+    const run = describePluginCall(suite.buybackPlugin, encodeFunctionData({ abi: buybackPluginAbi, functionName: 'run', args: [token] }), account, tokens, suite)
+    expect(run?.title).toBe('Run DOGE buyback')
+    const claim = describePluginCall(suite.holderPlugin, encodeFunctionData({ abi: holderPluginAbi, functionName: 'dripAndClaim', args: [token] }), account, tokens, suite)
+    expect(claim?.title).toBe('Claim DOGE USDC')
+    // The same calldata sent to an address that is not the listed plugin is not described as that plugin's action.
+    expect(describePluginCall(bob, encodeFunctionData({ abi: buybackPluginAbi, functionName: 'run', args: [token] }), account, tokens, suite)).toBe(undefined)
+    expect(describePluginCall(suite.splitPlugin, '0x', account, tokens, { ...suite, splitPlugin: zeroAddress })).toBe(undefined)
   })
 })

@@ -2,6 +2,7 @@ import type { ComponentType } from 'react'
 import { DEFAULT_DOC_SECTION, DOC_SECTIONS, type DocSection } from '../lib/docs'
 import { DocsCurve } from '../content/docs/Curve'
 import { DocsFaq } from '../content/docs/Faq'
+import { DocsFees } from '../content/docs/Fees'
 import { DocsGraduation } from '../content/docs/Graduation'
 import { DocsLaunching } from '../content/docs/Launching'
 import { DocsMetadata } from '../content/docs/Metadata'
@@ -13,6 +14,7 @@ const CONTENT: Record<DocSection, ComponentType> = {
   overview: DocsOverview,
   curve: DocsCurve,
   launching: DocsLaunching,
+  fees: DocsFees,
   trading: DocsTrading,
   graduation: DocsGraduation,
   metadata: DocsMetadata,

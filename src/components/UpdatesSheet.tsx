@@ -11,6 +11,7 @@ import {
   type UpdateFigure,
 } from '../lib/updates'
 import { navigate, type AppRoute } from '../hooks/useHashRoute'
+import { FeeGauge } from './FeeGauge'
 import { GhostButton } from './GhostButton'
 import { PrimaryButton } from './PrimaryButton'
 
@@ -180,6 +181,23 @@ export function UpdatesSheet() {
 }
 
 function UpdateFigure({ figure }: { figure: UpdateFigure }) {
+  if (figure === 'fees') {
+    return (
+      <div className="flex items-center gap-6">
+        <FeeGauge bps={250} size="lg" showValue={false} decorative />
+        <dl className="receipt-lines min-w-0 flex-1 border-t-0">
+          <div>
+            <dt>Creator fee</dt>
+            <dd>2.50%</dd>
+          </div>
+          <div>
+            <dt>Fees go to</dt>
+            <dd>Buyback &amp; burn</dd>
+          </div>
+        </dl>
+      </div>
+    )
+  }
   if (figure === 'launch') {
     return (
       <div>

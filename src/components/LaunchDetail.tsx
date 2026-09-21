@@ -3,12 +3,16 @@ import type { Address } from 'viem'
 import { addressExplorerUrl, txExplorerUrl } from '../chain'
 import { useLaunch } from '../hooks/useLaunch'
 import { useLaunchTrades } from '../hooks/useLaunchTrades'
+import { usePriceHistory } from '../hooks/usePriceHistory'
 import { useTokenMetadata } from '../hooks/useTokenMetadata'
 import { formatAmount, shortAddress } from '../lib/format'
-import { INITIAL_CURVE, marketCap } from '../lib/curve'
-import { GRADUATES_AT_USD, launchFacts } from '../lib/launch'
+import { INITIAL_CURVE, marketCap, poolMarketCap } from '../lib/curve'
+import { GRADUATES_AT_USD, launchFacts, tradeUsdc } from '../lib/launch'
+import { destinationLabel, destinationName, feeDestination } from '../lib/plugins/destination'
 import { relativeTime } from '../lib/recent'
 import { linkLabel } from '../lib/tokenMetadata'
+import { CreatorFeesPanel } from './CreatorFeesPanel'
+import { FeeGauge } from './FeeGauge'
 import { ExternalLinkIcon } from './Icons'
 import { GhostButton } from './GhostButton'
 import { LaunchMeter, LaunchTokenMark } from './LaunchBits'
@@ -16,28 +20,42 @@ import { LaunchTradeSheet } from './LaunchTradeSheet'
 import { PriceHistory, type SeriesPoint } from './PriceHistory'
 import { TableSkeleton } from './Skeleton'
 
+const fixtureOn = import.meta.env.DEV && import.meta.env.VITE_LAUNCHPAD_FIXTURE === '1'
+
 interface LaunchDetailProps {
   token: Address
   onBack: () => void
+  /** Which side the trade sheet opens on (a link from Swap can ask for sell). */
+  side?: 'buy' | 'sell'
 }
 
 function formatCap(value: number): string {
   return `$${value.toLocaleString('en-US', { maximumFractionDigits: value >= 100 ? 0 : 2 })}`
 }
 
-export function LaunchDetail({ token, onBack }: LaunchDetailProps) {
+export function LaunchDetail({ token, onBack, side }: LaunchDetailProps) {
   const { launch, token: launchToken, usdc, tokenBalance, usdcBalance, usdcAllowance, isLoading, unknown, refetch } = useLaunch(token)
-  const { trades, historyComplete, reachesCreation, isLoading: tradesLoading, error: tradesError } = useLaunchTrades(token, launch ? Number(launch.createdAt) : undefined)
-  // Market cap after each trade, oldest first. The creation point is only drawn when every trade since is known.
+  const graduated = Boolean(launch?.graduated)
+  const { trades, historyComplete, reachesCreation, isLoading: tradesLoading, error: tradesError } = useLaunchTrades(
+    token,
+    launch ? Number(launch.createdAt) : undefined,
+    graduated,
+  )
+  // After graduation the launch pool's reserve history carries the chart on: its Sync event has the core pair's shape.
+  const poolHistory = usePriceHistory(graduated ? launch?.pair : undefined, !fixtureOn && graduated)
+  // Market cap after each trade, oldest first: the curve's (from the reserves each curve Trade carries), then the
+  // pool's. The creation point is only drawn when every trade since is known.
   const capSeries = useMemo<SeriesPoint[]>(() => {
-    const usdcOf = (virtualUsdc: bigint, virtualTokens: bigint) => Number(marketCap({ virtualUsdc, virtualTokens, tokensSold: 0n })) / 1e6
-    const points = trades
-      .filter((trade) => trade.virtualUsdc !== undefined && trade.virtualTokens !== undefined)
-      .map((trade) => ({ value: usdcOf(trade.virtualUsdc!, trade.virtualTokens!), time: trade.time, block: trade.block }))
+    const curvePoints = trades
+      .filter((trade) => trade.venue === 'curve' && trade.virtualUsdc !== undefined && trade.virtualTokens !== undefined)
+      .map((trade) => ({ value: Number(marketCap({ virtualUsdc: trade.virtualUsdc!, virtualTokens: trade.virtualTokens! })) / 1e6, time: trade.time, block: trade.block }))
       .reverse()
-    if (launch && reachesCreation) points.unshift({ value: usdcOf(INITIAL_CURVE.virtualUsdc, INITIAL_CURVE.virtualTokens), time: Number(launch.createdAt), block: 0 })
-    return points
-  }, [launch, reachesCreation, trades])
+    if (launch && reachesCreation) curvePoints.unshift({ value: Number(marketCap(INITIAL_CURVE)) / 1e6, time: Number(launch.createdAt), block: 0 })
+    const poolPoints = (poolHistory.data?.points ?? [])
+      .filter((point) => point.reserve0 > 0n)
+      .map((point) => ({ value: Number(poolMarketCap({ reserveToken: point.reserve0, reserveUsdc: point.reserve1 })) / 1e6, time: point.time, block: point.block }))
+    return [...curvePoints, ...poolPoints].sort((a, b) => a.block - b.block)
+  }, [launch, poolHistory.data?.points, reachesCreation, trades])
   const details = useTokenMetadata(launch?.metadataURI)
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
@@ -69,6 +87,7 @@ export function LaunchDetail({ token, onBack }: LaunchDetailProps) {
   }
 
   const facts = launchFacts(launch)
+  const destination = feeDestination(launch)
   const about = details.metadata
   const links = [['Website', about?.external_link], ['X', about?.twitter], ['Telegram', about?.telegram]].flatMap(([label, url]) => (label && url ? [[label, url] as const] : []))
 
@@ -115,16 +134,34 @@ export function LaunchDetail({ token, onBack }: LaunchDetailProps) {
           />
         </div>
         <dl className="receipt-lines launch-facts">
-          <div><dt>Price</dt><dd>{facts.price}</dd></div>
-          <div><dt>Market cap</dt><dd>{facts.cap}</dd></div>
+          <div><dt>Price</dt><dd>{graduated && !launch.pool ? '—' : facts.price}</dd></div>
+          <div><dt>Market cap</dt><dd>{graduated && !launch.pool ? '—' : facts.cap}</dd></div>
           <div>
             <dt>Sold</dt>
             <dd>
               <LaunchMeter tokensSold={launch.tokensSold} graduated={launch.graduated} />
             </dd>
           </div>
-          <div><dt>Raised</dt><dd>{facts.raised}</dd></div>
-          <div><dt>Graduates at</dt><dd>{GRADUATES_AT_USD}</dd></div>
+          {graduated ? (
+            <div><dt>Launch pool</dt><dd>{facts.pooled ?? '—'}</dd></div>
+          ) : (
+            <>
+              <div><dt>Raised</dt><dd>{facts.raised}</dd></div>
+              <div><dt>Graduates at</dt><dd>{GRADUATES_AT_USD}</dd></div>
+            </>
+          )}
+          <div>
+            <dt>Creator fee</dt>
+            <dd><FeeGauge bps={launch.creatorFeeBps} label={`${launch.symbol} creator fee`} /></dd>
+          </div>
+          <div>
+            <dt>Fees go to</dt>
+            <dd>
+              <a className="inline-flex items-center gap-1 underline" href={addressExplorerUrl(destination.address)} target="_blank" rel="noreferrer">
+                {destination.kind === 'listed' ? destinationName(destination) : destinationLabel(destination)} <ExternalLinkIcon className="h-4 w-4" />
+              </a>
+            </dd>
+          </div>
           <div>
             <dt>Creator</dt>
             <dd>
@@ -150,10 +187,13 @@ export function LaunchDetail({ token, onBack }: LaunchDetailProps) {
             tokenBalance={tokenBalance}
             usdcBalance={usdcBalance}
             usdcAllowance={usdcAllowance}
+            initialSide={side}
             onConfirmed={refresh}
           />
         </div>
       </div>
+
+      <CreatorFeesPanel launch={launch} onChanged={refresh} />
 
       <section className="ledger" aria-label="Trades">
         <div className="section-heading-row"><h2>Trades</h2>{!tradesLoading && !tradesError && <span>{trades.length}</span>}</div>
@@ -171,9 +211,14 @@ export function LaunchDetail({ token, onBack }: LaunchDetailProps) {
               <li key={`${trade.txHash}:${trade.logIndex ?? 0}`} className="ledger-row">
                 <span className="min-w-0 flex-1">
                   <span className="block truncate">
-                    <span className={trade.isBuy ? 'trade-buy' : 'trade-sell'}>{trade.isBuy ? 'Buy' : 'Sell'}</span> {formatAmount(trade.tokenAmount, 18)} {launch.symbol} · {formatAmount(trade.isBuy ? trade.usdcAmount : trade.usdcAmount - trade.fee, 6)} USDC
+                    <span className={trade.isBuy ? 'trade-buy' : 'trade-sell'}>{trade.isBuy ? 'Buy' : 'Sell'}</span> {formatAmount(trade.tokenAmount, 18)} {launch.symbol} · {formatAmount(tradeUsdc(trade), 6)} USDC
                   </span>
-                  <span className="block text-xs text-g500">{shortAddress(trade.trader)}{trade.time > 0 && ` · ${relativeTime(trade.time * 1000, now)}`}</span>
+                  <span className="block truncate text-xs text-g500">
+                    {shortAddress(trade.trader)}
+                    {trade.time > 0 && ` · ${relativeTime(trade.time * 1000, now)}`}
+                    {` · ${trade.venue === 'pool' ? 'pool' : 'curve'}`}
+                    {trade.creatorFee > 0n && ` · ${formatAmount(trade.creatorFee, 6)} USDC creator fee`}
+                  </span>
                 </span>
                 <a className="inline-flex shrink-0 items-center gap-1 font-semibold underline" href={txExplorerUrl(trade.txHash)} target="_blank" rel="noreferrer">
                   View <ExternalLinkIcon className="h-4 w-4" />

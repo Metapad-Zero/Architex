@@ -36,7 +36,7 @@ export function LaunchMeter({
   tokensSold: bigint
   graduated: boolean
 }) {
-  const pct = graduated ? 100 : Math.min(100, Number(progressBps({ virtualUsdc: 0n, virtualTokens: 1n, tokensSold })) / 100)
+  const pct = graduated ? 100 : Math.min(100, Number(progressBps({ tokensSold })) / 100)
   const label = graduated ? 'Graduated' : soldLabel(tokensSold)
   return (
     <div className="launch-sold">

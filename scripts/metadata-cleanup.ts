@@ -14,12 +14,19 @@
  *
  * The key is read from the environment and never printed. Run it yourself; it is not scheduled.
  */
-import { createPublicClient, getAddress, http, zeroAddress } from 'viem'
+import { createPublicClient, getAddress, http, parseAbi, zeroAddress, type Address } from 'viem'
 import mainnet from '../src/deployments/arc-mainnet.json'
 import testnet from '../src/deployments/arc-testnet.json'
 import { pinata } from '../server/pinata'
 import { launchpadAbi } from '../src/lib/abi'
 import { cidOfIpfsUri } from '../src/lib/tokenMetadata'
+
+/** What a retired (v1.2) launchpad answers with: its Curve struct predates creator fees and plugins. */
+const retiredLaunchpadAbi = parseAbi([
+  'struct Curve { address token; address creator; address pair; uint128 virtualUsdc; uint128 virtualTokens; uint128 tokensSold; uint64 createdAt; bool graduated; string metadataURI; }',
+  'function tokensLength() view returns (uint256)',
+  'function curvesPage(uint256 start, uint256 count) view returns (Curve[])',
+])
 
 const DAY_MS = 24 * 60 * 60 * 1000
 const RPC: Record<number, string> = { 5042: 'https://rpc.mainnet.arc.io', 5042002: 'https://rpc.testnet.arc.io' }
@@ -29,22 +36,31 @@ if (!jwt) throw new Error('PINATA_JWT missing. Pass it in the environment for th
 const remove = process.argv.includes('--delete')
 const pins = pinata(jwt)
 
-/** Every details file a launched token points to. Throws if any deployed launchpad cannot be read. */
+/**
+ * Every details file a launched token points to, on the current launchpad and on every retired one (their tokens
+ * still exist and still name their files). Throws if any launchpad cannot be read.
+ */
 async function filesInUse(): Promise<Set<string>> {
   const inUse = new Set<string>()
   for (const deployment of [testnet, mainnet]) {
-    const launchpad = getAddress(deployment.launchpad)
-    if (launchpad === zeroAddress) continue
     const client = createPublicClient({ transport: http(RPC[deployment.chainId]) })
-    const count = await client.readContract({ address: launchpad, abi: launchpadAbi, functionName: 'tokensLength' })
-    for (let start = 0n; start < count; start += 50n) {
-      const page = await client.readContract({ address: launchpad, abi: launchpadAbi, functionName: 'curvesPage', args: [start, 50n] })
-      for (const curve of page) {
-        const cid = cidOfIpfsUri(curve.metadataURI)
-        if (cid) inUse.add(cid)
+    const launchpads: { address: Address; retired: boolean }[] = [
+      { address: getAddress(deployment.launchpad), retired: false },
+      ...deployment.retiredLaunchpads.map((address) => ({ address: getAddress(address), retired: true })),
+    ]
+    for (const { address, retired } of launchpads) {
+      if (address === zeroAddress) continue
+      const abi = retired ? retiredLaunchpadAbi : launchpadAbi
+      const count = await client.readContract({ address, abi, functionName: 'tokensLength' })
+      for (let start = 0n; start < count; start += 50n) {
+        const page = await client.readContract({ address, abi, functionName: 'curvesPage', args: [start, 50n] })
+        for (const curve of page) {
+          const cid = cidOfIpfsUri(curve.metadataURI)
+          if (cid) inUse.add(cid)
+        }
       }
+      console.log(`${deployment.network}${retired ? ` (retired ${address})` : ''}: ${count} launches read`)
     }
-    console.log(`${deployment.network}: ${count} launches read`)
   }
   return inUse
 }
