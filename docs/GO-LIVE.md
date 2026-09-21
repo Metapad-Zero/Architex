@@ -22,17 +22,25 @@ done by the agent on request. Order matters: each block depends on the one befor
 
 ## 1. Contracts on Arc mainnet (you, ~15 min)
 
+**Done 2026-09-21** from a hot wallet (the Ledger had not arrived): factory
+`0x3648cc1323b4729e472cffdC570C6096565b0923`, router `0xC373dCf04547515801b4502500924459b8c877a8`,
+lens `0x9302f61cbb1f1572F50EB76C794ca623DacD1aDd`, block 21995348, 0.107 USDC gas. Deployer and
+current `feeToSetter`: `0xc387A6C9229A91bfcdA286078d248a41dff9cf60`. Wiring checked on-chain and all
+three runtime bytecodes match the local build (`scripts/verify-bytecode.ts`). Record:
+`broadcast/DeployArchitex.s.sol/5042/`. **Still open: move `feeToSetter` to the Ledger** (the
+`cast send … setFeeToSetter` line below) as soon as it arrives.
+
 Checked on this machine 2026-09-19: contracts compile and 63/63 tests pass locally
 (`~/.foundry/bin/forge test`); Arc mainnet RPC is live (chain 5042); a no-broadcast simulation of the
 deploy script against mainnet succeeds and estimates **~6.5M gas ≈ 0.27 USDC** in total.
 
-- [ ] Put 1–2 USDC on Arc mainnet in the deploying wallet (USDC is the gas token; bridge with CCTP
+- [x] Put 1–2 USDC on Arc mainnet in the deploying wallet (USDC is the gas token; bridge with CCTP
       or withdraw to Arc from an exchange that supports it).
 - [ ] Free rehearsal, any time (no `--broadcast`, nothing is sent):
       ```bash
       FEE_TO_SETTER=0xYourAddress ~/.foundry/bin/forge script contracts/script/DeployArchitex.s.sol:DeployArchitex --rpc-url https://rpc.mainnet.arc.io
       ```
-- [ ] Deploy **with the Ledger** (Ethereum app open, blind signing on; three transactions to approve):
+- [x] Deploy **with the Ledger** (Ethereum app open, blind signing on; three transactions to approve):
       ```bash
       FEE_TO_SETTER=0xYourLedgerAddress ~/.foundry/bin/forge script contracts/script/DeployArchitex.s.sol:DeployArchitex --rpc-url https://rpc.mainnet.arc.io --broadcast --ledger --sender 0xYourLedgerAddress
       ```
@@ -44,7 +52,7 @@ deploy script against mainnet succeeds and estimates **~6.5M gas ≈ 0.27 USDC**
       ~/.foundry/bin/cast send <factory> "setFeeToSetter(address)" 0xYourLedgerAddress --rpc-url https://rpc.mainnet.arc.io --interactive
       ```
       Never put a private key in a file or on the command line.
-- [ ] Give Claude the JSON line the script prints (`{"factory":…,"router":…,"lens":…}`) and the three
+- [x] Give Claude the JSON line the script prints (`{"factory":…,"router":…,"lens":…}`) and the three
       tx hashes (in `broadcast/DeployArchitex.s.sol/5042/run-latest.json`) → Claude fills
       `src/deployments/arc-mainnet.json`, verifies the wiring on-chain and redeploys the site.
 - [ ] Verify the contracts on the explorer.
@@ -71,8 +79,14 @@ deploy script against mainnet succeeds and estimates **~6.5M gas ≈ 0.27 USDC**
       no dev wallet seeded, passkey sign-in offered, WalletConnect issues a QR, security headers served.
       Redeploy with `vercel deploy --prod` from the repo root (CLI deploys; the GitHub repo is not
       connected to Vercel yet).
-- [ ] **Flip to mainnet** once section 1 is done: set `VITE_ARC_NETWORK=mainnet` on Production,
-      fill `src/deployments/arc-mainnet.json`, redeploy.
+- [x] **Flipped to mainnet** 2026-09-21: `VITE_ARC_NETWORK=mainnet` on Production, deployed from a
+      clean checkout of `df0653c` (not the working tree — another session's uncommitted work was in
+      it). Before the flip, a mainnet-readiness audit and a review of its fixes ran; see commits
+      `fda1e08` and `df0653c`. Production has no `VITE_ARC_RPC_URL` override and no
+      `VITE_SOLANA_RPC_URL`, so the bridge offers Ethereum only: the public Solana mainnet RPC
+      refuses browser origins. To turn Solana on, set `VITE_SOLANA_RPC_URL` to a keyed endpoint that
+      allows `https://architex.fun` (e.g. a domain-restricted Helius key), then redeploy.
+      **Deploy from a clean checkout of `main`**: `vercel deploy` uploads uncommitted files too.
 - [x] Passkey scope pinned to `architex.fun` (apex, www and subdomains share wallets) before any real
       wallet exists on the domain.
 - [ ] Reown dashboard: WalletConnect already works from `architex.fun`; if you ever turn the
