@@ -5,7 +5,7 @@
   "factory": "0x3648cc1323b4729e472cffdC570C6096565b0923",
   "router": "0xC373dCf04547515801b4502500924459b8c877a8",
   "lens": "0x9302f61cbb1f1572F50EB76C794ca623DacD1aDd",
-  "launchpad": "0x0000000000000000000000000000000000000000",
+  "launchpad": "0x9Ac420d77E019D5e9F79a3020B0b5eB28d72B959",
   "deployer": "0xc387A6C9229A91bfcdA286078d248a41dff9cf60",
   "tokens": [
     {
@@ -27,6 +27,7 @@
   "txs": {
     "factory": "0xa2776fad1845395f48132ca38aaf7666577c015738ca663cc05cce38554312df",
     "router": "0x595b59b6e2ebbbf7f4c6108f7e8d000cc4135efd6c082265af433e7dcc3c5a65",
-    "lens": "0x6b79cf6dbc814fa9adc42ca1b1e6fbbbf64ce0590550321a99ebf562cdc7c6ac"
+    "lens": "0x6b79cf6dbc814fa9adc42ca1b1e6fbbbf64ce0590550321a99ebf562cdc7c6ac",
+    "launchpad": "0x38de82154c3ed28df6743377cf5a7fae13bb8e86bc0ff504a25a57d42e523544"
   }
 }
