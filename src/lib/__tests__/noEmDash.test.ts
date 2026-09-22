@@ -24,6 +24,7 @@ const FILES = [
   'src/lib/docs.ts',
   'src/lib/errors.ts',
   'src/lib/format.ts',
+  'src/lib/impactGuard.ts',
   'src/lib/keystore.ts',
   'src/lib/launch.ts',
   'src/lib/localWallet.ts',

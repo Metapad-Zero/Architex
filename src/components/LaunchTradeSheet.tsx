@@ -4,11 +4,13 @@ import type { LaunchAllowances } from '../hooks/useLaunch'
 import { useLaunchTrade, type LaunchSide } from '../hooks/useLaunchTrade'
 import { useSettings } from '../hooks/useSettings'
 import { GHOST, formatAmount, formatPct, parseAmount } from '../lib/format'
+import { impactSizeHint, isHighImpact, maxLaunchTrade } from '../lib/impactGuard'
 import type { LaunchRecord } from '../lib/launch'
 import { destinationLabel, feeDestination } from '../lib/plugins/destination'
 import type { Token } from '../lib/tokens'
 import { AmountField } from './AmountField'
 import { FeeGauge } from './FeeGauge'
+import { ImpactGuard, ImpactValue, impactValueClass } from './ImpactGuard'
 import { PrimaryButton } from './PrimaryButton'
 import { SettingsPopover } from './SettingsPopover'
 import { TxStatus } from './TxStatus'
@@ -40,6 +42,13 @@ export function LaunchTradeSheet({
   const settings = useSettings()
   const [side, setSide] = useState<LaunchSide>(initialSide)
   const [amount, setAmount] = useState('')
+  // The price-impact acknowledgment the trader ticked, kept as the key of the trade it was given for (useLaunchTrade).
+  // Any edit to the amount or the side clears it: it is ticked again for the new trade.
+  const [impactAcknowledgedKey, setImpactAcknowledgedKey] = useState<string>()
+  const editAmount = (value: string) => {
+    setAmount(value)
+    setImpactAcknowledgedKey(undefined)
+  }
 
   const payToken = side === 'buy' ? usdc : token
   const receiveToken = side === 'buy' ? token : usdc
@@ -70,7 +79,8 @@ export function LaunchTradeSheet({
     usdcBalance,
     usdcAllowance,
     onConfirmed,
-    onClear: () => setAmount(''),
+    onClear: () => editAmount(''),
+    impactAcknowledgedKey,
   })
 
   const handlePrimary = async () => {
@@ -89,12 +99,10 @@ export function LaunchTradeSheet({
   const pool = trade.venue === 'pool'
   const destination = feeDestination(launch)
   const receiveAmount = quote ? formatAmount(quote.amountOut, receiveToken.decimals) : ''
-  const impact = quote
-    ? `${formatPct(quote.priceImpactBps)}${quote.priceImpactBps > 500n ? ' · High price impact' : ''}`
-    : GHOST
-  const impactShort = quote
-    ? `${formatPct(quote.priceImpactBps)}${quote.priceImpactBps > 500n ? ' · High impact' : ''}`
-    : GHOST
+  // From 5% impact: the largest buy or sell that moves the price under 1% where this token trades now.
+  const impactHint = quote && isHighImpact(quote.priceImpactBps)
+    ? impactSizeHint(maxLaunchTrade(launch, side), payToken.decimals, payToken.symbol)
+    : undefined
   const bound = quote ? `${formatAmount(quote.minReceived, receiveToken.decimals)} ${receiveToken.symbol}` : GHOST
   // Always quoted the same way round (tokens per 1 USDC), fees included, so buys and sells compare at a glance.
   const rate = quote && quote.amountIn > 0n && quote.amountOut > 0n
@@ -134,7 +142,7 @@ export function LaunchTradeSheet({
             aria-pressed={side === value}
             onClick={() => {
               setSide(value)
-              setAmount('')
+              editAmount('')
             }}
           >
             {value === 'buy' ? 'Buy' : 'Sell'}
@@ -145,7 +153,7 @@ export function LaunchTradeSheet({
         id="launch-pay"
         label="You pay"
         amount={amount}
-        onAmount={setAmount}
+        onAmount={editAmount}
         token={payToken}
         tokens={[payToken]}
         onToken={() => undefined}
@@ -173,10 +181,13 @@ export function LaunchTradeSheet({
         </div>
         <div>
           <dt>Price impact</dt>
-          <dd className={quote && quote.priceImpactBps > 500n ? 'text-loss' : quote ? '' : 'text-g500'}>
-            <span className="hidden sm:inline">{impact}</span>
-            <span className="sm:hidden">{impactShort}</span>
-          </dd>
+          {quote ? (
+            <dd className={impactValueClass(quote.priceImpactBps)}>
+              <ImpactValue bps={quote.priceImpactBps} lossUsd={trade.impactLossUsd} />
+            </dd>
+          ) : (
+            <dd className="text-g500">{GHOST}</dd>
+          )}
         </div>
         <div><dt>Platform fee</dt><dd>{platformFee}</dd></div>
         <div>
@@ -198,6 +209,14 @@ export function LaunchTradeSheet({
           This buy sells out the curve and graduates {launch.symbol}. It spends {formatAmount(quote.amountIn, usdc.decimals)} of the {formatAmount(quote.offer, usdc.decimals)} USDC offered.
         </p>
       )}
+      <ImpactGuard
+        id="launch-impact-accept"
+        bps={quote?.priceImpactBps}
+        hint={impactHint}
+        acknowledgment={trade.impactAcknowledgment}
+        acknowledged={trade.impactAcknowledged}
+        onAcknowledge={(checked) => setImpactAcknowledgedKey(checked ? trade.impactKey : undefined)}
+      />
       <PrimaryButton className="mt-6 w-full" loading={trade.isLoading} disabled={trade.isDisabled} onClick={() => void handlePrimary()}>
         {trade.label}
       </PrimaryButton>

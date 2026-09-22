@@ -8,6 +8,7 @@ import { pushRecent } from '../lib/recent'
 import { erc20Abi, routerAbi } from '../lib/abi'
 import { deployment } from '../lib/deployment'
 import { formatAmount } from '../lib/format'
+import { acknowledgmentKey, acknowledgmentText, impactAllows, impactTier, isHighImpact } from '../lib/impactGuard'
 import type { QuoteMode } from '../lib/amm'
 import type { LocalQuote, NoQuoteReason } from './useQuote'
 import type { Token } from '../lib/tokens'
@@ -24,6 +25,7 @@ export type SwapButtonState =
   | 'ready'
   | 'quoteMoved'
   | 'pending'
+  | 'impactTooHigh'
 
 export interface SwapTxStatus {
   kind: 'pending' | 'confirmed' | 'failed' | 'cancelled'
@@ -44,6 +46,10 @@ interface UseSwapArgs {
   deadlineMinutes: number
   onConfirmed: () => void | Promise<void>
   onClear: () => void
+  /** What the quote's price impact costs, in USD (6 decimals), for the acknowledgment sentence; undefined if unpriced. */
+  impactLossUsd: bigint | undefined
+  /** The `impactKey` the trader ticked the acknowledgment for, if any. */
+  impactAcknowledgedKey: string | undefined
 }
 
 
@@ -58,6 +64,8 @@ export function useSwap({
   deadlineMinutes,
   onConfirmed,
   onClear,
+  impactLossUsd,
+  impactAcknowledgedKey,
 }: UseSwapArgs) {
   const { address: account, isConnected, chainId } = useAccount()
   const publicClient = usePublicClient()
@@ -68,7 +76,25 @@ export function useSwap({
 
   const requiredApproval = quote ? (mode === 'exactIn' ? quote.amountIn : quote.maxSent) : 0n
 
+  // The price-impact guard (lib/impactGuard.ts): a refused trade is neither approved nor sent, and one past the
+  // acknowledgment line only while the sheet's checkbox is ticked for this trade (tokens, typed amount, route) and
+  // for the sentence the trader read.
+  const impactAcknowledgment = quote ? acknowledgmentText(quote.priceImpactBps, impactLossUsd) : undefined
+  const impactKey =
+    quote && tokenIn && tokenOut && impactAcknowledgment
+      ? acknowledgmentKey(
+          [tokenIn.address, tokenOut.address, mode, mode === 'exactIn' ? quote.amountIn : quote.amountOut, quote.path.join('>')],
+          impactAcknowledgment,
+        )
+      : undefined
+  const impactAcknowledged = impactKey !== undefined && impactAcknowledgedKey === impactKey
+  const impactRefused = quote !== undefined && impactTier(quote.priceImpactBps) === 'refused'
+  const impactClear = quote === undefined || impactAllows(quote.priceImpactBps, impactAcknowledged)
+
   const buttonState = useMemo<SwapButtonState>(() => {
+    // Refused whatever the wallet's state, so nobody is asked to connect for a trade that cannot happen; an approval
+    // or a swap already on its way still shows as one.
+    if (impactRefused && phase !== 'approving' && phase !== 'pending') return 'impactTooHigh'
     if (!isConnected || !account) return 'disconnected'
     if (chainId !== activeChain.id) return 'wrongChain'
     if (phase === 'approving') return 'approving'
@@ -82,7 +108,7 @@ export function useSwap({
     if (!tokenIn || spendableBalance(tokenIn.address, balance) < requiredApproval) return 'insufficientBalance'
     if (allowance < requiredApproval) return 'needsApproval'
     return 'ready'
-  }, [account, allowance, balance, chainId, isConnected, phase, quote, reason, requiredApproval, tokenIn])
+  }, [account, allowance, balance, chainId, impactRefused, isConnected, phase, quote, reason, requiredApproval, tokenIn])
 
   const label = useMemo(() => {
     switch (buttonState) {
@@ -107,7 +133,9 @@ export function useSwap({
       case 'pending':
         return 'Swapping…'
       case 'ready':
-        return quote && quote.priceImpactBps > 500n ? 'Swap anyway' : 'Swap'
+        return quote && isHighImpact(quote.priceImpactBps) ? 'Swap anyway' : 'Swap'
+      case 'impactTooHigh':
+        return 'Price impact too high'
     }
   }, [buttonState, quote, tokenIn])
 
@@ -119,6 +147,9 @@ export function useSwap({
       setPhase('idle')
       return
     }
+
+    // The button is disabled for these already; this holds for any other way in (Enter in a field, say).
+    if (!impactClear) return
 
     try {
       if (buttonState === 'needsApproval') {
@@ -203,6 +234,7 @@ export function useSwap({
     account,
     buttonState,
     deadlineMinutes,
+    impactClear,
     mode,
     onClear,
     onConfirmed,
@@ -229,8 +261,14 @@ export function useSwap({
     label,
     hint,
     isLoading: buttonState === 'approving' || buttonState === 'pending',
-    isDisabled: ['enterAmount', 'noRoute', 'insufficientLiquidity', 'insufficientBalance', 'pending'].includes(buttonState),
+    isDisabled:
+      ['enterAmount', 'noRoute', 'insufficientLiquidity', 'insufficientBalance', 'pending', 'impactTooHigh'].includes(buttonState)
+      || (!impactClear && (buttonState === 'needsApproval' || buttonState === 'ready')),
     txStatus,
     execute,
+    /** The acknowledgment sentence for this quote, and the key a tick is kept against (see lib/impactGuard.ts). */
+    impactAcknowledgment,
+    impactKey,
+    impactAcknowledged,
   }
 }

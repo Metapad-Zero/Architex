@@ -207,7 +207,16 @@ input[type='checkbox'], input[type='radio'], input[type='range'] { accent-color:
   .receipt-lines > div { @apply flex min-h-10 items-center justify-between gap-4 border-b border-g300 py-2; }
   .receipt-lines dt { @apply shrink-0 whitespace-nowrap text-g500; }
   .receipt-lines dd { @apply m-0 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-right; }
+  /* The one exception: the price-impact value wraps rather than clips, because its cost, its warning and its pool
+     share must all be read. It breaks only between those parts, and its key stays level with the first line. */
+  .receipt-lines > div:has(> dd.receipt-impact) { @apply items-baseline; }
+  .receipt-lines dd.receipt-impact { @apply whitespace-normal; }
   .quote-message { @apply py-3 text-sm text-g700; }
+  /* The acknowledgment a trade past 15% price impact waits for: one plain sentence beside its checkbox, 44px tall,
+     the box level with the sentence's first line when a phone breaks it. */
+  .impact-accept { @apply flex min-h-11 cursor-pointer items-start gap-3 py-3 text-sm leading-5; }
+  .impact-accept input { @apply m-0 h-5 w-5 shrink-0 cursor-pointer; }
+  .impact-accept span { @apply text-balance; }
 
   .hint-line { @apply mt-3 text-sm leading-6 text-g500; }
   .ledger { @apply mt-14 border-t border-ink; }

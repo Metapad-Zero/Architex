@@ -5,7 +5,14 @@ import { useConnectSheet } from '../hooks/useConnectSheet'
 import { activeChain } from '../chain'
 import { quote as ratioQuote, reservesFor, type QuoteMode } from '../lib/amm'
 import { isDeployed, isLaunchViewAvailable } from '../lib/deployment'
-import { formatAmount, formatUsd, parseAmount } from '../lib/format'
+import { formatAmount, formatPct, formatUsd, parseAmount } from '../lib/format'
+import {
+  impactSizeHint,
+  isHighImpact,
+  maxRouteInput,
+  swapImpactLossUsd,
+  swapImpactLossUsdFromOutput,
+} from '../lib/impactGuard'
 import { useRecent } from '../lib/recent'
 import { findTokenByRef, formatSwapUrl, parseSwapUrl, readLastPair, tokenRef, writeLastPair } from '../lib/swapUrl'
 import type { Token } from '../lib/tokens'
@@ -18,6 +25,7 @@ import { useSwap } from '../hooks/useSwap'
 import { useTokens } from '../hooks/useTokens'
 import { AmountField } from './AmountField'
 import { FlipIcon } from './Icons'
+import { ImpactGuard } from './ImpactGuard'
 import { PrimaryButton } from './PrimaryButton'
 import { ReceiptLines } from './ReceiptLines'
 import { RecentLedger } from './RecentLedger'
@@ -64,6 +72,8 @@ export function SwapSheet() {
   const [mode, setMode] = useState<QuoteMode>(() => initialState.mode ?? 'exactIn')
   const [flipCount, setFlipCount] = useState(0)
   const [announcement, setAnnouncement] = useState('')
+  // The price-impact acknowledgment the trader ticked, kept as the key of the trade it was given for (useSwap).
+  const [impactAcknowledgedKey, setImpactAcknowledgedKey] = useState<string>()
   const recent = useRecent(activeChain.id)
 
   // The pair comes from the shareable URL, else the last pair used in this browser, else the registry order.
@@ -111,15 +121,19 @@ export function SwapSheet() {
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      setAnnouncement(quote && tokenOut ? `You receive ${formatAmount(quote.amountOut, tokenOut.decimals)} ${tokenOut.symbol}` : '')
+      const high = quote && isHighImpact(quote.priceImpactBps) ? `. High price impact: ${formatPct(quote.priceImpactBps)}.` : ''
+      setAnnouncement(quote && tokenOut ? `You receive ${formatAmount(quote.amountOut, tokenOut.decimals)} ${tokenOut.symbol}${high}` : '')
     }, 300)
     return () => window.clearTimeout(timer)
   }, [quote, tokenOut])
 
-  const tokenUsdValue = useCallback(
-    (token: Token | undefined, rawAmount: bigint | undefined): string | undefined => {
+  /** A token amount in USD (6 decimals) at its USDC pool's price now; undefined without a funded USDC pool. */
+  const tokenUsd = useCallback(
+    (token: Token | undefined, rawAmount: bigint | undefined): bigint | undefined => {
       if (!token || rawAmount === undefined) return undefined
-      if (token.address.toLowerCase() === activeChain.usdc.toLowerCase()) return formatUsd(rawAmount, token.decimals)
+      if (token.address.toLowerCase() === activeChain.usdc.toLowerCase()) {
+        return token.decimals === 6 ? rawAmount : (rawAmount * 10n ** 6n) / 10n ** BigInt(token.decimals)
+      }
       const pair = pairs.find(
         (item) =>
           [item.token0.toLowerCase(), item.token1.toLowerCase()].includes(token.address.toLowerCase()) &&
@@ -128,9 +142,16 @@ export function SwapSheet() {
       if (!pair) return undefined
       const [reserveToken, reserveUsdc] = reservesFor(pair, token.address)
       if (reserveToken === 0n || reserveUsdc === 0n) return undefined
-      return formatUsd(ratioQuote(rawAmount, reserveToken, reserveUsdc), 6)
+      return ratioQuote(rawAmount, reserveToken, reserveUsdc)
     },
     [pairs],
+  )
+  const tokenUsdValue = useCallback(
+    (token: Token | undefined, rawAmount: bigint | undefined): string | undefined => {
+      const usd = tokenUsd(token, rawAmount)
+      return usd === undefined ? undefined : formatUsd(usd, 6)
+    },
+    [tokenUsd],
   )
 
   const parseDisplayed = (value: string, token: Token | undefined) => {
@@ -152,7 +173,22 @@ export function SwapSheet() {
   const clearAmounts = useCallback(() => {
     setAmountIn('')
     setAmountOut('')
+    setImpactAcknowledgedKey(undefined)
   }, [])
+
+  // What the price impact costs, in USD (lib/impactGuard.ts): from what is paid, else from what is received.
+  const impactLossUsd = useMemo(() => {
+    if (!quote) return undefined
+    const paid = tokenUsd(tokenIn, quote.amountIn)
+    if (paid !== undefined) return swapImpactLossUsd(paid, quote.priceImpactBps, quote.pairs.length)
+    const received = tokenUsd(tokenOut, quote.amountOut)
+    return received === undefined ? undefined : swapImpactLossUsdFromOutput(received, quote.priceImpactBps)
+  }, [quote, tokenIn, tokenOut, tokenUsd])
+  // From 5% impact: the largest trade on this route that stays under 1%, in the token paid.
+  const impactHint = useMemo(
+    () => (quote && tokenIn && isHighImpact(quote.priceImpactBps) ? impactSizeHint(maxRouteInput(quote), tokenIn.decimals, tokenIn.symbol) : undefined),
+    [quote, tokenIn],
+  )
 
   const swap = useSwap({
     tokenIn,
@@ -165,20 +201,25 @@ export function SwapSheet() {
     deadlineMinutes: settings.deadlineMinutes,
     onConfirmed: afterTransaction,
     onClear: clearAmounts,
+    impactLossUsd,
+    impactAcknowledgedKey,
   })
 
-  // Changing a token keeps the amount the user typed; only the derived side is recomputed by the quote.
+  // Changing a token keeps the amount the user typed; only the derived side is recomputed by the quote. Any edit
+  // (a token, an amount, a flip) clears the price-impact acknowledgment: it is ticked again for the new trade.
   const selectIn = (token: Token) => {
     if (token.address.toLowerCase() === tokenOut?.address.toLowerCase()) setSelectedTokenOut(tokenIn?.address)
     setSelectedTokenIn(token.address)
     if (mode === 'exactOut') setAmountIn('')
     else setAmountOut('')
+    setImpactAcknowledgedKey(undefined)
   }
   const selectOut = (token: Token) => {
     if (token.address.toLowerCase() === tokenIn?.address.toLowerCase()) setSelectedTokenIn(tokenOut?.address)
     setSelectedTokenOut(token.address)
     if (mode === 'exactOut') setAmountIn('')
     else setAmountOut('')
+    setImpactAcknowledgedKey(undefined)
   }
   const flip = () => {
     setSelectedTokenIn(tokenOut?.address)
@@ -187,6 +228,7 @@ export function SwapSheet() {
     setAmountOut(displayedIn.replace(/,/g, ''))
     setMode(mode === 'exactIn' ? 'exactOut' : 'exactIn')
     setFlipCount((value) => value + 1)
+    setImpactAcknowledgedKey(undefined)
   }
 
   const handlePrimary = async () => {
@@ -222,6 +264,7 @@ export function SwapSheet() {
             setMode('exactIn')
             setAmountIn(value)
             setAmountOut('')
+            setImpactAcknowledgedKey(undefined)
           }}
           token={tokenIn}
           tokens={tokens.filter((token) => token.address.toLowerCase() !== tokenOut?.address.toLowerCase())}
@@ -247,6 +290,7 @@ export function SwapSheet() {
             setMode('exactOut')
             setAmountOut(value)
             setAmountIn('')
+            setImpactAcknowledgedKey(undefined)
           }}
           token={tokenOut}
           tokens={tokens.filter((token) => token.address.toLowerCase() !== tokenIn?.address.toLowerCase())}
@@ -258,7 +302,7 @@ export function SwapSheet() {
           pickerExtra={RECEIVE_SIDE_LAUNCHES}
         />
 
-        <ReceiptLines quote={quote} mode={mode} tokenIn={tokenIn} tokenOut={tokenOut} tokens={tokens} />
+        <ReceiptLines quote={quote} mode={mode} tokenIn={tokenIn} tokenOut={tokenOut} tokens={tokens} impactLossUsd={impactLossUsd} />
         {enteredAmount && reason && reason !== 'ZeroAmount' && (
           <p className="quote-message" role="status">
             {reason === 'InsufficientLiquidity'
@@ -266,6 +310,14 @@ export function SwapSheet() {
               : 'No pool connects these tokens yet.'}
           </p>
         )}
+        <ImpactGuard
+          id="swap-impact-accept"
+          bps={quote?.priceImpactBps}
+          hint={impactHint}
+          acknowledgment={swap.impactAcknowledgment}
+          acknowledged={swap.impactAcknowledged}
+          onAcknowledge={(checked) => setImpactAcknowledgedKey(checked ? swap.impactKey : undefined)}
+        />
 
         <PrimaryButton className="mt-6 w-full" loading={swap.isLoading} disabled={swap.isDisabled} onClick={() => void handlePrimary()}>
           {swap.label}

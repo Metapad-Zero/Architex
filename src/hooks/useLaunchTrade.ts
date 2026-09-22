@@ -6,6 +6,14 @@ import { erc20Abi, launchRouterAbi, launchpadAbi } from '../lib/abi'
 import { deployment, launchSuite } from '../lib/deployment'
 import { isUserRejection, revertReason } from '../lib/errors'
 import { formatAmount } from '../lib/format'
+import {
+  acknowledgmentKey,
+  acknowledgmentText,
+  impactAllows,
+  impactTier,
+  isHighImpact,
+  launchImpactLossUsd,
+} from '../lib/impactGuard'
 import type { LaunchRecord, TradeVenue } from '../lib/launch'
 import { quoteLaunchTrade, type LaunchQuote, type LaunchSide } from '../lib/launchQuote'
 import { pushRecent } from '../lib/recent'
@@ -30,6 +38,7 @@ export type LaunchButtonState =
   | 'ready'
   | 'quoteMoved'
   | 'pending'
+  | 'impactTooHigh'
 
 interface UseLaunchTradeArgs {
   launch: LaunchRecord | undefined
@@ -44,6 +53,8 @@ interface UseLaunchTradeArgs {
   usdcAllowance: LaunchAllowances
   onConfirmed: () => void | Promise<void>
   onClear: () => void
+  /** The `impactKey` the trader ticked the price-impact acknowledgment for, if any. */
+  impactAcknowledgedKey: string | undefined
 }
 
 export function useLaunchTrade({
@@ -59,6 +70,7 @@ export function useLaunchTrade({
   usdcAllowance,
   onConfirmed,
   onClear,
+  impactAcknowledgedKey,
 }: UseLaunchTradeArgs) {
   const { address: account, isConnected, chainId } = useAccount()
   const publicClient = usePublicClient()
@@ -68,6 +80,19 @@ export function useLaunchTrade({
   const [approvedThisSession, setApprovedThisSession] = useState(false)
 
   const quote = useMemo(() => (launch ? quoteLaunchTrade(launch, side, parsedIn, slippageBps) : undefined), [launch, parsedIn, side, slippageBps])
+
+  // The price-impact guard (lib/impactGuard.ts), as on Swap: a refused trade is neither approved nor sent, and one past
+  // the acknowledgment line only while the sheet's checkbox is ticked for this trade (side, typed amount, venue) and
+  // for the sentence the trader read.
+  const impactLossUsd = launch && quote ? launchImpactLossUsd(launch, side, quote) : undefined
+  const impactAcknowledgment = quote ? acknowledgmentText(quote.priceImpactBps, impactLossUsd) : undefined
+  const impactKey =
+    launch && quote && impactAcknowledgment
+      ? acknowledgmentKey([launch.token, side, quote.venue, quote.offer], impactAcknowledgment)
+      : undefined
+  const impactAcknowledged = impactKey !== undefined && impactAcknowledgedKey === impactKey
+  const impactRefused = quote !== undefined && impactTier(quote.priceImpactBps) === 'refused'
+  const impactClear = quote === undefined || impactAllows(quote.priceImpactBps, impactAcknowledged)
 
   const venue: TradeVenue = launch?.graduated ? 'pool' : 'curve'
   // A buy on the curve spends through the launchpad, in the pool through the launch router. A sell needs no
@@ -81,6 +106,8 @@ export function useLaunchTrade({
   const required = parsedIn
 
   const buttonState = useMemo<LaunchButtonState>(() => {
+    // Refused whatever the wallet's state; an approval or a trade already on its way still shows as one.
+    if (impactRefused && phase !== 'approving' && phase !== 'pending') return 'impactTooHigh'
     if (!isConnected || !account) return 'disconnected'
     if (chainId !== activeChain.id) return 'wrongChain'
     if (phase === 'approving') return 'approving'
@@ -91,7 +118,7 @@ export function useLaunchTrade({
     if (!payToken || spendableBalance(payToken.address, balance) < required) return 'insufficientBalance'
     if (side === 'buy' && allowance < required) return 'needsApproval'
     return 'ready'
-  }, [account, allowance, balance, chainId, isConnected, launch?.graduated, launch?.pool, payToken, phase, quote, required, side])
+  }, [account, allowance, balance, chainId, impactRefused, isConnected, launch?.graduated, launch?.pool, payToken, phase, quote, required, side])
 
   const label = useMemo(() => {
     const symbol = token?.symbol ?? 'token'
@@ -115,9 +142,11 @@ export function useLaunchTrade({
       case 'pending':
         return side === 'buy' ? 'Buying…' : 'Selling…'
       case 'ready':
-        return quote && quote.priceImpactBps > 500n
+        return quote && isHighImpact(quote.priceImpactBps)
           ? side === 'buy' ? 'Buy anyway' : 'Sell anyway'
           : side === 'buy' ? `Buy ${symbol}` : `Sell ${symbol}`
+      case 'impactTooHigh':
+        return 'Price impact too high'
     }
   }, [buttonState, payToken?.symbol, quote, side, token?.symbol])
 
@@ -129,6 +158,9 @@ export function useLaunchTrade({
       setPhase('idle')
       return
     }
+
+    // The button is disabled for these already; this holds for any other way in (Enter in a field, say).
+    if (!impactClear) return
 
     try {
       if (buttonState === 'needsApproval') {
@@ -227,6 +259,7 @@ export function useLaunchTrade({
     account,
     buttonState,
     deadlineMinutes,
+    impactClear,
     launch,
     onClear,
     onConfirmed,
@@ -261,8 +294,15 @@ export function useLaunchTrade({
     label,
     hint,
     isLoading: buttonState === 'approving' || buttonState === 'pending',
-    isDisabled: ['enterAmount', 'poolLoading', 'insufficientBalance', 'pending'].includes(buttonState),
+    isDisabled:
+      ['enterAmount', 'poolLoading', 'insufficientBalance', 'pending', 'impactTooHigh'].includes(buttonState)
+      || (!impactClear && (buttonState === 'needsApproval' || buttonState === 'ready')),
     txStatus,
     execute,
+    /** What the price impact costs in USD, the acknowledgment sentence, and the key a tick is kept against. */
+    impactLossUsd,
+    impactAcknowledgment,
+    impactKey,
+    impactAcknowledged,
   }
 }
