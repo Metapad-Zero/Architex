@@ -11,13 +11,14 @@ import {LaunchPluginTestBase} from "./LaunchPluginTestBase.sol";
 /// @notice Shared setup for Deepen pool's unit tests: the mock launchpad (curve buys at 1e14 token units per USDC unit,
 ///         a 1% creator fee), a mock launch router with the real router's arithmetic, and REAL LaunchPairs routed by it.
 ///         Reference math here is written independently of the plugin: the split from the textbook quadratic formula,
-///         the add from the pair's state after a simulated buy.
+///         the dust rule from the spec, and the two sides of a pool run simulated step by step.
 abstract contract DeepenPoolTestBase is LaunchPluginTestBase {
     address internal constant DEAD = 0x000000000000000000000000000000000000dEaD;
     uint256 internal constant POOL_TOKENS = 200_000_000e18;
     uint256 internal constant POOL_USDC = 25_000e6;
     uint256 internal constant FEE_BPS_TOTAL = 150; // the mock launchpad's 0.5% platform fee + 1% creator fee
     uint256 internal constant TOKENS_PER_UNIT = 1e14; // the mock curve's price
+    uint256 internal constant MIN_RUN = 3;
 
     DeepenPoolPlugin internal deepen;
     DeepenMockRouter internal poolRouter;
@@ -29,12 +30,22 @@ abstract contract DeepenPoolTestBase is LaunchPluginTestBase {
         deepen = new DeepenPoolPlugin(address(launchpad));
     }
 
-    /// @dev A token whose plugin is Deepen pool, with a real (still empty) LaunchPair routed by the mock router.
+    /// @dev A token whose plugin is Deepen pool with the default burn share (empty configuration data), with a real
+    ///      (still empty) LaunchPair routed by the mock router.
     function _launchDeepen() internal returns (MockLaunchToken token, LaunchPair pair) {
+        return _launchDeepen("");
+    }
+
+    /// @dev The same with an explicit burn share.
+    function _launchDeepen(uint16 burnBps) internal returns (MockLaunchToken token, LaunchPair pair) {
+        return _launchDeepen(abi.encode(burnBps));
+    }
+
+    function _launchDeepen(bytes memory data) internal returns (MockLaunchToken token, LaunchPair pair) {
         token = _newToken();
         pair = new LaunchPair(address(token), address(usdc), address(poolRouter));
         token.setPair(address(pair));
-        launchpad.launch(address(token), creator, address(deepen), address(pair), "");
+        launchpad.launch(address(token), creator, address(deepen), address(pair), data);
     }
 
     /// @dev Graduation as the launchpad does it: tokens and USDC straight into the pair, LP minted to 0x…dEaD.
@@ -55,7 +66,20 @@ abstract contract DeepenPoolTestBase is LaunchPluginTestBase {
         return deepen.run(token);
     }
 
+    function _offeredFor(address token) internal view returns (uint256 offered) {
+        (offered,,,) = deepen.previewRun(token);
+    }
+
     // ─── Reference math (independent of the plugin) ───────────────────────────
+
+    /// @dev The documented dust rule: `burnBps` of the offer burns, the rest deepens, and a side under MIN_RUN_USDC
+    ///      gives way to the other (the burn side first).
+    function _sidesRef(uint256 offer, uint256 burnBps) internal pure returns (uint256 toBurn, uint256 toDeepen) {
+        toBurn = offer * burnBps / 10_000;
+        toDeepen = offer - toBurn;
+        if (toBurn < MIN_RUN) (toBurn, toDeepen) = (0, offer);
+        else if (toDeepen < MIN_RUN) (toBurn, toDeepen) = (offer, 0);
+    }
 
     /// @dev The textbook root (-B + sqrt(B^2 + 4AC)) / 2A of A b^2 + B b - C = 0 with A = q^2, B = 1e4 (1e4 + q) R,
     ///      C = 1e8 U R: the buy b for which b + n + n^2/R = U, n = b q / 1e4. Not clamped.
@@ -67,40 +91,77 @@ abstract contract DeepenPoolTestBase is LaunchPluginTestBase {
         return (Math.sqrt(b * b + 4 * a * c) - b) / (2 * a);
     }
 
+    /// @dev The launch router's exact-in buy at given reserves (both fees rounded up on the USDC in).
+    function _quoteAt(uint256 rt, uint256 ru, uint256 usdcIn) internal pure returns (uint256 out, uint256 net) {
+        (uint256 platformFee, uint256 creatorFee) = _fees(usdcIn);
+        net = usdcIn - platformFee - creatorFee;
+        out = net * rt / (ru + net);
+    }
+
     struct Sim {
-        uint256 tokensBought;
+        uint256 usdcToBurn;
+        uint256 usdcToBuy;
+        uint256 tokensBought; // both sides
         uint256 tokensAdded;
         uint256 usdcAdded;
         uint256 liquidity;
         uint256 burned;
+        uint256 spent;
         uint256 leftover;
+        uint256 reserveToken; // the pool after the run
+        uint256 reserveUsdc;
     }
 
-    /// @dev What a pool run that buys with `toBuy` out of `offer` would do: the router's buy (its own quote), then the
-    ///      Uniswap V2 router's optimal amounts at the pool's reserves after that buy, and the LaunchPair mint formula.
-    function _simulate(address token, LaunchPair pair, uint256 offer, uint256 toBuy, uint256 extraTokens)
+    /// @dev What a pool run does, step by step, from the pool's state and the split the plugin previews: the burn
+    ///      side's buy, then the deepen side's buy at the reserves that leaves, then the Uniswap V2 router's optimal
+    ///      amounts and the LaunchPair mint formula. `extraTokens` is anything sent to the plugin beforehand.
+    function _simulate(LaunchPair pair, uint256 offer, uint256 usdcToBurn, uint256 usdcToBuy, uint256 extraTokens)
         internal
         view
         returns (Sim memory s)
     {
-        (s.tokensBought,,) = poolRouter.quoteBuy(token, toBuy);
         (uint256 rt, uint256 ru) = _reservesOf(pair);
-        (uint256 platformFee, uint256 creatorFee) = _fees(toBuy);
-        uint256 net = toBuy - platformFee - creatorFee;
-        rt -= s.tokensBought;
-        ru += net;
-        uint256 tokens = s.tokensBought + extraTokens;
-        uint256 usdcLeft = offer - toBuy;
         uint256 supply = pair.totalSupply();
-        if (tokens != 0 && usdcLeft != 0) {
-            uint256 usdcFor = tokens * ru / rt;
-            if (usdcFor <= usdcLeft) (s.tokensAdded, s.usdcAdded) = (tokens, usdcFor);
-            else (s.tokensAdded, s.usdcAdded) = (usdcLeft * rt / ru, usdcLeft);
-            s.liquidity = Math.min(s.tokensAdded * supply / rt, s.usdcAdded * supply / ru);
-            if (s.liquidity == 0) (s.tokensAdded, s.usdcAdded) = (0, 0);
+        s.usdcToBurn = usdcToBurn;
+        s.usdcToBuy = usdcToBuy;
+        if (usdcToBurn != 0) {
+            (uint256 out, uint256 net) = _quoteAt(rt, ru, usdcToBurn);
+            (rt, ru) = (rt - out, ru + net);
+            s.tokensBought += out;
+            s.spent += usdcToBurn;
         }
-        s.burned = tokens - s.tokensAdded;
-        s.leftover = usdcLeft - s.usdcAdded;
+        uint256 deepenTokens;
+        if (usdcToBuy != 0) {
+            (uint256 out, uint256 net) = _quoteAt(rt, ru, usdcToBuy);
+            (rt, ru) = (rt - out, ru + net);
+            s.tokensBought += out;
+            s.spent += usdcToBuy;
+            deepenTokens = out;
+            uint256 usdcLeft = offer - usdcToBurn - usdcToBuy;
+            if (usdcLeft != 0) {
+                uint256 usdcFor = out * ru / rt;
+                if (usdcFor <= usdcLeft) (s.tokensAdded, s.usdcAdded) = (out, usdcFor);
+                else (s.tokensAdded, s.usdcAdded) = (usdcLeft * rt / ru, usdcLeft);
+                s.liquidity = Math.min(s.tokensAdded * supply / rt, s.usdcAdded * supply / ru);
+                if (s.liquidity == 0) (s.tokensAdded, s.usdcAdded) = (0, 0);
+            }
+            s.spent += s.usdcAdded;
+            (rt, ru) = (rt + s.tokensAdded, ru + s.usdcAdded);
+        }
+        deepenTokens; // the add can only ever take the deepen side's own tokens
+        s.burned = s.tokensBought + extraTokens - s.tokensAdded;
+        s.leftover = offer - s.spent;
+        (s.reserveToken, s.reserveUsdc) = (rt, ru);
+    }
+
+    /// @dev The same, taking the split from the plugin's own preview (which the run uses).
+    function _simulateRun(address token, LaunchPair pair, uint256 offer, uint256 extraTokens)
+        internal
+        view
+        returns (Sim memory s)
+    {
+        (uint256 usdcToBurn, uint256 usdcToBuy,) = deepen.previewSplit(token, offer);
+        return _simulate(pair, offer, usdcToBurn, usdcToBuy, extraTokens);
     }
 
     function _fees(uint256 usdcIn) internal pure returns (uint256 platformFee, uint256 creatorFee) {

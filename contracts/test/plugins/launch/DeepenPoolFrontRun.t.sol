@@ -47,10 +47,13 @@ contract DeepenPoolFrontRunTest is LaunchpadV13Base {
         vm.stopPrank();
     }
 
-    /// @dev A token whose creator fees go to Deepen pool, `pre` USDC already bought on its curve by carol, `waiting`
-    ///      USDC in the plugin for it (delivered straight to onFees, which anyone may do).
-    function _setUpToken(uint16 c, uint256 pre, uint256 waiting) internal returns (address token) {
-        token = _create(c, address(deepen));
+    /// @dev A token whose creator fees go to Deepen pool with burn share `burnBps`, `pre` USDC already bought on its
+    ///      curve by carol, `waiting` USDC in the plugin for it (delivered straight to onFees, which anyone may do).
+    function _setUpToken(uint16 c, uint16 burnBps, uint256 pre, uint256 waiting) internal returns (address token) {
+        vm.prank(alice);
+        token = pad.createToken(
+            "Deepen", "DPN", "", c, address(deepen), abi.encode(burnBps), 0, 0, type(uint256).max
+        );
         if (pre != 0) {
             vm.prank(carol);
             pad.buy(token, pre, 0, carol, type(uint256).max);
@@ -65,7 +68,7 @@ contract DeepenPoolFrontRunTest is LaunchpadV13Base {
         (targets[0], targets[1]) = (address(deepen), address(buyback));
         uint16[] memory bps = new uint16[](2);
         (bps[0], bps[1]) = (5000, 5000);
-        bytes[] memory datas = new bytes[](2);
+        bytes[] memory datas = new bytes[](2); // both entries take their defaults
         vm.prank(alice);
         token = pad.createToken(
             "Combo", "CMB", "", c, address(combo), abi.encode(targets, bps, datas), 0, 0, type(uint256).max
@@ -77,7 +80,7 @@ contract DeepenPoolFrontRunTest is LaunchpadV13Base {
     /// @dev A keeper runs the plugin if it has a budget. In the pool a run spends its offer but for the split's
     ///      rounding (at most 4 units), on the curve exactly (less only on the sell-out buy).
     function _run(address token) internal returns (uint256 spent) {
-        (uint256 offered,) = deepen.previewRun(token);
+        (uint256 offered,,,) = deepen.previewRun(token);
         if (offered == 0) return 0;
         vm.prank(keeper);
         (spent,,) = deepen.run(token);
@@ -150,9 +153,18 @@ contract DeepenPoolFrontRunTest is LaunchpadV13Base {
         gaps[count - 1] += hold % count;
     }
 
-    /// @dev 90% of the documented pool bound, (2 * (0.5% + c) / 0.25% - 1) hours = (75 + 2c) * 144 seconds.
-    function _underThePoolBound(uint256 c) internal pure returns (uint256) {
-        return ((75 + 2 * c) * 144 * 9) / 10;
+    /// @dev 90% of the documented pool bound: 2 * (0.5% + c) / (0.25% * lift) - 1 hours, where `lift` counts how fast
+    ///      the runs raise the price in units of 0.25% per cap: 1e4 + burnBps for one Deepen pool (burning lifts twice
+    ///      as fast per USDC as deepening), plus another 2e4 if Buyback & burn is paced alongside it.
+    function _underTheBound(uint256 c, uint256 liftUnits) internal pure returns (uint256) {
+        uint256 num = 2 * (50 + c) * 10_000 * 3600;
+        uint256 den = 25 * liftUnits;
+        if (num <= den * 3600) return 0;
+        return ((num - den * 3600) * 9) / (den * 10);
+    }
+
+    function _underThePoolBound(uint256 c, uint256 burnBps) internal pure returns (uint256) {
+        return _underTheBound(c, 10_000 + burnBps);
     }
 
     /// @dev 90% of the documented curve bound, Buyback & burn's ((0.5% + c) / 0.25% - 1) hours.
@@ -177,16 +189,16 @@ contract DeepenPoolFrontRunTest is LaunchpadV13Base {
     // ─── Sandwiching one run ──────────────────────────────────────────────────
 
     /// @dev Front-run one full-cap run with a buy of any size, back-run it with the sell: always a loss, at every
-    ///      creator fee and every size, because a run lifts the price by about 0.25% while the round trip costs
-    ///      2 * (0.5% + c). The loss as a share of the position barely moves with the size: a run leaves the pool's
-    ///      token reserve where it was, so the trader's own price impact cancels out.
-    function test_sandwichingOneRunLoses_everySizeAndFee() public {
+    ///      creator fee, every size and every burn share, because a full cap lifts the price by at most about 0.5%
+    ///      (all of it burning) while the round trip costs 2 * (0.5% + c).
+    function test_sandwichingOneRunLoses_everySizeFeeAndBurnShare() public {
         uint16[6] memory fees = [uint16(0), 50, 100, 200, 500, 1000];
         uint256[5] memory sizes = [uint256(1), 100, 2_000, 20_000, 200_000];
+        uint16[3] memory burns = [uint16(0), 5_000, 10_000];
         for (uint256 i; i < fees.length; ++i) {
             for (uint256 j; j < sizes.length; ++j) {
                 uint256 snap = vm.snapshotState();
-                address token = _setUpToken(fees[i], 0, PLENTY);
+                address token = _setUpToken(fees[i], burns[j % 3], 0, PLENTY);
                 _graduate(token);
                 int256 pnl = _attackInPool(token, sizes[j] * 1e6, _gaps(0, 0));
                 assertLt(pnl, 0, "sandwiching one run loses");
@@ -197,10 +209,11 @@ contract DeepenPoolFrontRunTest is LaunchpadV13Base {
     }
 
     /// forge-config: default.fuzz.runs = 128
-    function testFuzz_sandwichingOneRunLoses_inPool(uint64 sizeRaw, uint16 feeRaw) public {
+    function testFuzz_sandwichingOneRunLoses_inPool(uint64 sizeRaw, uint16 feeRaw, uint16 burnRaw) public {
         uint16 c = uint16(bound(feeRaw, 0, 1000));
+        uint16 burnBps = uint16(bound(burnRaw, 0, 10_000));
         uint256 size = bound(sizeRaw, 1e6, 500_000e6);
-        address token = _setUpToken(c, 0, PLENTY);
+        address token = _setUpToken(c, burnBps, 0, PLENTY);
         _graduate(token);
         int256 pnl = _attackInPool(token, size, _gaps(0, 0));
         assertLt(pnl, 0, "sandwiching one run loses money");
@@ -211,7 +224,7 @@ contract DeepenPoolFrontRunTest is LaunchpadV13Base {
     function testFuzz_sandwichingOneRunLoses_onCurve(uint64 sizeRaw, uint16 feeRaw) public {
         uint16 c = uint16(bound(feeRaw, 0, 1000));
         uint256 size = bound(sizeRaw, 1e6, 15_000e6);
-        address token = _setUpToken(c, 2_000e6, PLENTY);
+        address token = _setUpToken(c, 5_000, 2_000e6, PLENTY);
         int256 pnl = _attackOnCurve(token, size, _gaps(0, 0), false);
         assertLt(pnl, 0, "sandwiching one run loses money");
         _assertLedger(token, PLENTY);
@@ -219,23 +232,24 @@ contract DeepenPoolFrontRunTest is LaunchpadV13Base {
 
     // ─── Chaining runs block after block ──────────────────────────────────────
 
-    /// @dev Buy, run in each of the next 50 blocks (a second apart, the most whole-second timestamps allow), sell.
-    ///      Every combination loses, by exactly what the exact-integer model says.
+    /// @dev Buy, run in each of the next 50 blocks (a second apart, the most whole-second timestamps allow), sell, at
+    ///      the default half-and-half burn share. Every combination loses, by exactly what the exact-integer model
+    ///      says.
     function test_chainAttack_fiftyBlocksLosesAtEveryCreatorFee() public {
         uint16[6] memory fees = [uint16(0), 50, 100, 200, 500, 1000];
         uint256[3] memory sizes = [uint256(2_000e6), 8_000e6, 20_000e6];
         int256[3][6] memory model = [
-            [int256(-14_944_910), -59_779_623, -149_449_027],
-            [int256(-34_857_596), -139_430_352, -348_575_877],
-            [int256(-54_669_833), -218_679_309, -546_698_229],
-            [int256(-93_992_978), -375_971_917, -939_929_765],
-            [int256(-209_551_877), -838_207_491, -2_095_518_679],
-            [int256(-394_115_066), -1_576_460_262, -3_941_150_588]
+            [int256(-12_633_350), -52_214_307, -135_585_441],
+            [int256(-32_586_079), -131_994_281, -334_951_664],
+            [int256(-52_437_890), -211_370_975, -533_310_600],
+            [int256(-91_838_743), -368_914_542, -927_006_643],
+            [int256(-207_619_540), -831_867_590, -2_083_922_358],
+            [int256(-392_516_676), -1_571_202_578, -3_931_551_643]
         ];
         for (uint256 i; i < fees.length; ++i) {
             for (uint256 j; j < sizes.length; ++j) {
                 uint256 snap = vm.snapshotState();
-                address token = _setUpToken(fees[i], 0, PLENTY);
+                address token = _setUpToken(fees[i], 5_000, 0, PLENTY);
                 _graduate(token);
                 int256 pnl = _attackInPool(token, sizes[j], _gaps(49, 1));
                 assertLt(pnl, 0, "the chain attack loses");
@@ -249,19 +263,21 @@ contract DeepenPoolFrontRunTest is LaunchpadV13Base {
     // ─── The documented bound ─────────────────────────────────────────────────
 
     /// @dev Buy S in the pool, k runs spread over a hold of T, sell: never a profit while T stays under the documented
-    ///      bound for the token's creator fee (with a 10% margin), whatever the fee, the size and the number of runs.
-    ///      The pot never limits a run (the worst case).
+    ///      bound for the token's creator fee and burn share (with a 10% margin), whatever the fee, the share, the
+    ///      size and the number of runs. The pot never limits a run (the worst case).
     function testFuzz_holdUnderTheBoundNeverProfits_pool(
         uint16 feeRaw,
+        uint16 burnRaw,
         uint64 sizeRaw,
         uint8 runsRaw,
         uint32 holdRaw
     ) public {
         uint16 c = uint16(bound(feeRaw, 0, 1000));
+        uint16 burnBps = uint16(bound(burnRaw, 0, 10_000));
         uint256 size = bound(sizeRaw, 1e6, 50_000e6);
         uint256 k = bound(runsRaw, 1, 48);
-        uint256 hold = bound(holdRaw, 0, _underThePoolBound(c));
-        address token = _setUpToken(c, 0, PLENTY);
+        uint256 hold = bound(holdRaw, 0, _underThePoolBound(c, burnBps));
+        address token = _setUpToken(c, burnBps, 0, PLENTY);
         _graduate(token);
 
         int256 pnl = _attackInPool(token, size, _spread(hold, k));
@@ -270,20 +286,22 @@ contract DeepenPoolFrontRunTest is LaunchpadV13Base {
         _assertLedger(token, PLENTY);
     }
 
-    /// @dev On the curve a run is Buyback & burn's, so its bound is Buyback & burn's too.
+    /// @dev On the curve a run is Buyback & burn's whatever the burn share, so its bound is Buyback & burn's too.
     function testFuzz_holdUnderTheBoundNeverProfits_curve(
         uint16 feeRaw,
+        uint16 burnRaw,
         uint64 preRaw,
         uint64 sizeRaw,
         uint8 runsRaw,
         uint32 holdRaw
     ) public {
         uint16 c = uint16(bound(feeRaw, 0, 1000));
+        uint16 burnBps = uint16(bound(burnRaw, 0, 10_000));
         uint256 pre = preRaw % 4 == 0 ? 0 : bound(preRaw, 1e6, 8_000e6);
         uint256 size = bound(sizeRaw, 1e6, 12_000e6);
         uint256 k = bound(runsRaw, 1, 48);
         uint256 hold = bound(holdRaw, 0, _underTheCurveBound(c));
-        address token = _setUpToken(c, pre, PLENTY);
+        address token = _setUpToken(c, burnBps, pre, PLENTY);
 
         int256 pnl = _attackOnCurve(token, size, _spread(hold, k), false);
         assertEq(vm.getBlockTimestamp(), START + hold, "held for T");
@@ -292,50 +310,61 @@ contract DeepenPoolFrontRunTest is LaunchpadV13Base {
     }
 
     /// @dev So the losses above are not vacuous: past the bound a trader profits, like any holder of a token whose
-    ///      fees are spent deepening its pool. At a 1% creator fee the shortest profitable hold is 11.2 h; holding
-    ///      24 h with a run every 10 minutes makes +64.59 USDC on 2,000, and 8 h still loses 15.75.
+    ///      fees buy it back and deepen its pool. At the default burn share and a 1% creator fee the shortest
+    ///      profitable hold is 7.2 h; holding 12 h with a run every 10 minutes makes +33.73 USDC on 2,000, and 6 h
+    ///      still loses 9.87.
     function test_holdingPastTheBoundProfits_pool() public {
         uint256 snap = vm.snapshotState();
-        address token = _setUpToken(100, 0, PLENTY);
+        address token = _setUpToken(100, 5_000, 0, PLENTY);
         _graduate(token);
-        assertEq(_attackInPool(token, 2_000e6, _gaps(48, 600)), -15_746_599, "8 h: the exact-integer model");
+        assertEq(_attackInPool(token, 2_000e6, _gaps(36, 600)), -9_866_538, "6 h: the exact-integer model");
         vm.revertToState(snap);
 
-        token = _setUpToken(100, 0, PLENTY);
+        token = _setUpToken(100, 5_000, 0, PLENTY);
         _graduate(token);
-        int256 pnl = _attackInPool(token, 2_000e6, _gaps(144, 600));
-        assertEq(pnl, 64_591_257, "24 h: the exact-integer model");
+        int256 pnl = _attackInPool(token, 2_000e6, _gaps(72, 600));
+        assertEq(pnl, 33_727_796, "12 h: the exact-integer model");
         assertGt(pnl, 0);
         _assertLedger(token, PLENTY);
     }
 
-    /// @dev The runs leave the pool's token reserve where it was, so the round trip's result is the same share of the
-    ///      position at any size: a sandwicher gains nothing by trading bigger.
-    function test_theResultIsTheSameShareAtAnySize() public {
+    /// @dev With no burn share the runs give back every token they buy, so the pool's token reserve never moves and
+    ///      the round trip returns the same share of the position at any size. A burn share takes tokens out of the
+    ///      pool, which makes the pool shallower and bigger positions worse off, never better.
+    function test_howTheResultScalesWithSize() public {
         uint256[4] memory sizes = [uint256(10e6), 1_000e6, 20_000e6, 200_000e6];
         int256 firstBps;
         for (uint256 i; i < sizes.length; ++i) {
             uint256 snap = vm.snapshotState();
-            address token = _setUpToken(100, 0, PLENTY);
+            address token = _setUpToken(100, 0, 0, PLENTY);
             _graduate(token);
-            int256 pnl = _attackInPool(token, sizes[i], _gaps(12, 600));
-            int256 bps = (pnl * 10_000) / int256(sizes[i]);
+            int256 bps = (_attackInPool(token, sizes[i], _gaps(12, 600)) * 10_000) / int256(sizes[i]);
             if (i == 0) firstBps = bps;
-            else assertApproxEqAbs(bps, firstBps, 1, "the same loss in basis points of the position");
+            else assertApproxEqAbs(bps, firstBps, 1, "pure deepening: the same loss in basis points at any size");
+            vm.revertToState(snap);
+        }
+        int256 previous;
+        for (uint256 i; i < sizes.length; ++i) {
+            uint256 snap = vm.snapshotState();
+            address token = _setUpToken(100, 10_000, 0, PLENTY);
+            _graduate(token);
+            int256 bps = (_attackInPool(token, sizes[i], _gaps(12, 600)) * 10_000) / int256(sizes[i]);
+            if (i != 0) assertLe(bps, previous, "with a burn share, bigger positions do no better");
+            previous = bps;
             vm.revertToState(snap);
         }
     }
 
     // ─── Two paced plugins on one token ───────────────────────────────────────
 
-    /// @dev A Combo holding both Deepen pool and Buyback & burn paces each separately, so the token's price is lifted
-    ///      about twice as fast and the bound roughly halves: at a 1% creator fee a four-hour hold, which loses
-    ///      against Deepen pool alone (its curve bound is 5.1 h), profits when Buyback & burn runs alongside it (the
-    ///      combined bound is 2.1 h). Both pots are full here, which is the worst case; a Combo splits the same fees
-    ///      between them.
+    /// @dev What the burn share replaces. A Combo holding both Deepen pool and Buyback & burn paces each separately,
+    ///      so the token's price is lifted about twice as fast and the bound roughly halves: at a 1% creator fee a
+    ///      four-hour hold, which loses against Deepen pool alone (its curve bound is 5.1 h), profits when
+    ///      Buyback & burn runs alongside it. Both pots are full here, which is the worst case; a Combo splits the
+    ///      same fees between them.
     function test_twoPacedPluginsHalveTheBound_curve() public {
         uint256 snap = vm.snapshotState();
-        address token = _setUpToken(100, 0, PLENTY);
+        address token = _setUpToken(100, 5_000, 0, PLENTY);
         int256 alone = _attackOnCurve(token, 2_000e6, _spread(4 hours, 24), false);
         assertLt(alone, 0, "Deepen pool alone: the curve bound is 5.1 h, so four hours still loses");
         vm.revertToState(snap);
@@ -346,19 +375,38 @@ contract DeepenPoolFrontRunTest is LaunchpadV13Base {
         assertGt(together, alone);
     }
 
-    /// @dev In the pool, the same: the combined bound is about ((25 + 2c) / 75) hours, so a hold under 90% of it
+    /// @dev In the pool, the same: two paced plugins lift the price by (1 + burnBps / 1e4) + 2 units of 0.25% per
+    ///      hour instead of (1 + burnBps / 1e4), so the combined bound is that much shorter. Under 90% of it a hold
     ///      still loses, at every creator fee.
     function testFuzz_twoPacedPluginsStillLoseUnderTheCombinedBound(uint16 feeRaw, uint64 sizeRaw, uint32 holdRaw)
         public
     {
         uint16 c = uint16(bound(feeRaw, 0, 1000));
         uint256 size = bound(sizeRaw, 1e6, 50_000e6);
-        uint256 hold = bound(holdRaw, 0, ((25 + 2 * uint256(c)) * 48 * 9) / 10);
+        // The Combo's Deepen entry takes the default burn share, so the lift is (1e4 + 5e3) + 2e4 units.
+        uint256 hold = bound(holdRaw, 0, _underTheBound(c, 35_000));
         address token = _setUpComboToken(c, PLENTY);
         _graduate(token);
 
         int256 pnl = _attackInPool(token, size, _spread(hold == 0 ? 1 : hold, 8), true);
         assertLe(pnl, 0, "no profit under the combined bound");
         _assertLedger(token, PLENTY);
+    }
+
+    /// @dev And the point of the burn share: one plugin doing both jobs under one budget is strictly better protected
+    ///      than the two paced separately. At a 1% creator fee, a three-hour hold that profits against the pairing
+    ///      still loses against a single Deepen pool at the same mix.
+    function test_oneBudgetBeatsTwoPacedPlugins() public {
+        uint256 snap = vm.snapshotState();
+        address paired = _setUpComboToken(100, PLENTY);
+        _graduate(paired);
+        int256 together = _attackInPool(paired, 2_000e6, _spread(3 hours, 18), true);
+        assertGt(together, 0, "two paced plugins: three hours already pays");
+        vm.revertToState(snap);
+
+        address single = _setUpToken(100, 5_000, 0, PLENTY);
+        _graduate(single);
+        int256 alone = _attackInPool(single, 2_000e6, _spread(3 hours, 18));
+        assertLt(alone, 0, "one plugin, one budget: the same hold still loses");
     }
 }

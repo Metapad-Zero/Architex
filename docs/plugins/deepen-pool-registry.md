@@ -4,6 +4,11 @@ Everything the marketplace entry for the **Deepen pool** plugin needs, so the si
 (nothing here edits site code). The contract is `contracts/plugins/launch/DeepenPoolPlugin.sol`, the spec is
 V13-SPEC §2.3, and the deploy script is `contracts/script/DeployDeepenPool.s.sol`.
 
+The plugin does two jobs with a token's creator fees under one paced budget: it buys the token and burns it, and it
+buys the token and adds it to the launch pool with the rest, locking the new liquidity at the burn address. The
+creator picks the mix once, at launch: the **burn share**, `burnBps`, from 0 (all liquidity) to 10,000 (all burn),
+5,000 by default. Before graduation there is no pool to add to, so every run buys and burns.
+
 ## Registry entry (`src/content/plugins/registry.ts`)
 
 `ListedPlugin` fields, ready to paste:
@@ -12,9 +17,9 @@ V13-SPEC §2.3, and the deploy script is `contracts/script/DeployDeepenPool.s.so
 | --- | --- |
 | `kind` | `'deepen'` (add to `ListedPluginKind`) |
 | `name` | `Deepen pool` |
-| `tagline` | `Buys and burns, then grows the pool forever.` |
-| `description` | `Spends the fees buying the token and burning it while it is on the curve. Once it graduates, each run buys the token with about half the fees and adds it to the launch pool with the other half, locking the new liquidity at the burn address, so the pool only gets deeper. Anyone can run it; it spends at most 0.25% of the curve's or pool's USDC side per hour.` |
-| `config` | `'none'` (no configuration: `onLaunch` data must be empty) |
+| `tagline` | `Burns the token and grows its pool, in one.` |
+| `description` | `Spends the fees buying the token and burning it while it is on the curve. Once it graduates, every run splits: your burn share buys the token and burns it, and the rest buys the token and adds it to the launch pool, locking the new liquidity at the burn address. Anyone can run it; it spends at most 0.25% of the curve's or pool's USDC side per hour, whatever the mix.` |
+| `config` | `'burnShare'` (a new configuration kind: one number, see below) |
 | `suiteKey` | `'deepenPlugin'` |
 | `contractPath` | `contracts/plugins/launch/DeepenPoolPlugin.sol` |
 
@@ -26,21 +31,41 @@ Two supporting changes the entry needs:
 - `suiteKey`'s type in `ListedPlugin` is a `Pick<...>` of the four plugin keys today, so it takes
   `'deepenPlugin'` too.
 
-## Builder copy
+## The one configuration field
 
-- Picker line: `Deepen pool. Buys and burns, then grows the pool forever.`
-- Under the picker, when it is selected: `Before graduation every run buys the token and burns it. After
-  graduation each run buys with about half of what is waiting and adds it to the pool with the rest, and the new
-  liquidity is locked at the burn address, so nobody can take it out. Anyone can run it, at most 0.25% of the
-  pool's USDC side per hour.`
-- No configuration fields.
+| Field | Value |
+| --- | --- |
+| Label | `Burn share` |
+| Control | A slider or percentage input, 0% to 100%, default **50%** |
+| Encoding | `encodeAbiParameters([{ type: 'uint16' }], [burnBps])` where `burnBps = percent * 100`; the plugin also accepts empty data, which means 50% |
+| Help text | `How much of each run buys the token and burns it. The rest buys the token and adds it to the pool as liquidity nobody can take out. Locked forever either way.` |
+| Ends of the range | 0%: `Everything goes into the pool.` 100%: `Everything is burned (the same as Buyback & burn).` |
 
-## The warning worth showing (V13-SPEC §2.3)
+The choice is locked at launch, like the plugin itself. Anything above 100% is refused on chain
+(`InvalidBurnBps`), and so is data that is not exactly one `uint16` (`NonCanonicalData`).
 
-Deepen pool and Buyback & burn pace themselves separately. A Combo holding **both** spends twice as fast and
-roughly halves the time a trader has to hold before front-running the runs pays (for example at a 1% creator fee:
-5.1 h on the curve and 11.2 h in the pool with one of them, about 2.1 h and 3.1 h with both). The builder should
-**not offer both in the same Combo**; if it ever does, say plainly that pairing them weakens the protection.
+## What to tell creators about the mix (V13-SPEC §2.3)
+
+Burning takes tokens out of the pool and leaves the USDC in, so it moves the price about twice as far per USDC as
+adding liquidity does. That cuts both ways: a higher burn share moves the price faster, and a lower one makes
+front-running the runs take longer. The shortest hold at which front-running the runs starts to pay, in hours:
+
+| Burn share | 0% creator fee | 0.5% | 1% | 2% | 5% | 10% |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0% (all liquidity) | 3.0 | 7.1 | 11.2 | 19.5 | 45.6 | 93.0 |
+| 25% | 2.2 | 5.5 | 8.8 | 15.5 | 36.7 | 75.8 |
+| 50% (default) | 1.7 | 4.4 | 7.2 | 12.8 | 30.6 | 63.9 |
+| 75% | 1.3 | 3.6 | 6.0 | 10.9 | 26.3 | 55.2 |
+| 100% (all burn) | 1.0 | 3.1 | 5.1 | 9.4 | 23.0 | 48.6 |
+
+On the curve every run buys and burns, so the hours there are Buyback & burn's whatever the share.
+
+## The warning worth showing
+
+Deepen pool and Buyback & burn pace themselves separately. A Combo holding **both** spends twice as fast and cuts
+the hours above by about 2.4x (at a 1% creator fee and the default share: 7.2 h with this plugin alone, 2.5 h with
+Buyback & burn running beside it). The burn share makes the pairing pointless, so the builder should **not offer
+both in the same Combo**; if it ever does, say plainly that pairing them weakens the protection.
 
 ## Token page
 
@@ -48,13 +73,14 @@ The same shape as Buyback & burn's panel, with the pool side added. All views ar
 
 | What to show | Call |
 | --- | --- |
+| The token's burn share | `burnBpsOf(token)` (0 also means "not configured"; `isConfigured(token)` tells them apart) |
 | USDC waiting | `usdcHeld(token)` |
-| What a run would spend now, and where it would buy | `previewRun(token)` returns `(usdcOffered, graduated)`; 0 means no run right now |
-| How that offer splits | `previewSplit(token, usdcOffered)` returns `(usdcToBuy, usdcForLiquidity)`; on the curve the whole offer buys |
-| Burned so far | `totalTokensBurned(token)` |
+| What a run would spend now, and how it would divide | `previewRun(token)` returns `(usdcOffered, usdcToBurn, usdcToDeepen, graduated)`; 0 means no run right now |
+| The whole breakdown of an offer | `previewSplit(token, usdcOffered)` returns `(usdcToBurn, usdcToBuy, usdcForLiquidity)`, which sum to the offer |
+| Burned so far | `totalTokensBurned(token)` and `totalUsdcBurning(token)` (the USDC that bought them) |
 | Added to the pool so far | `totalUsdcAdded(token)` and `totalTokensAdded(token)` |
 | Liquidity locked at the burn address | `totalLiquidityLocked(token)` |
-| Spent in total (buys plus adds) | `totalUsdcSpent(token)` |
+| Spent in total (both buys plus the adds) | `totalUsdcSpent(token)` |
 | When it may run again | `nextRunBlock(token)`, `lastRunAt(token)`; the budget refills over `RUN_INTERVAL` (1 h) |
 | The Run button | `run(token)`, callable by anyone, returns `(usdcSpent, tokensBurned, liquidity)` |
 
@@ -63,10 +89,12 @@ One event per run, for the activity feed:
 ```solidity
 DeepenRun(
   address indexed token, address indexed caller, bool graduated,
-  uint256 usdcSpent, uint256 usdcAdded, uint256 tokensBought,
+  uint256 usdcSpent, uint256 usdcBurning, uint256 usdcAdded, uint256 tokensBought,
   uint256 tokensAdded, uint256 tokensBurned, uint256 liquidity
 )
 ```
+
+and one at launch: `BurnShareSet(address indexed token, uint16 burnBps)` (the view is authoritative, not the event).
 
 Reverts the button should handle: `NothingToBuy(token)` (nothing waiting, or the budget has not refilled to
 `MIN_RUN_USDC` = 3 units yet) and `AlreadyRanThisBlock(token)` (someone else ran it in this block).

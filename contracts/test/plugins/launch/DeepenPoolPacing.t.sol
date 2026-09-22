@@ -42,7 +42,7 @@ contract DeepenPoolPacingTest is DeepenPoolTestBase {
     }
 
     function _offered(MockLaunchToken t) internal view returns (uint256 offered) {
-        (offered,) = deepen.previewRun(address(t));
+        (offered,,,) = deepen.previewRun(address(t));
     }
 
     // ─── The budget ───────────────────────────────────────────────────────────
@@ -182,7 +182,7 @@ contract DeepenPoolPacingTest is DeepenPoolTestBase {
         assertEq(_offered(token), (reserveUsdc * 25 / 10_000) / 2, "half an hour: half the pool's cap");
         vm.prank(keeper);
         (uint256 spent,,) = deepen.run(address(token));
-        assertEq(poolRouter.buyCalls(), 1);
+        assertEq(poolRouter.buyCalls(), 2, "one buy per side of the split");
         (, uint256 grown) = _reservesOf(pair);
         assertGt(grown, reserveUsdc, "the run put USDC into the pool");
         _after(1 hours);
@@ -220,22 +220,26 @@ contract DeepenPoolPacingTest is DeepenPoolTestBase {
             uint256 expected = heldNow < budget ? heldNow : budget;
             if (expected < 3) expected = 0; // MIN_RUN_USDC
 
-            (uint256 offered, bool graduated) = deepen.previewRun(address(token));
+            (uint256 offered, uint256 toBurn, uint256 toDeepen, bool graduated) = deepen.previewRun(address(token));
             assertEq(graduated, inThePool);
             assertEq(offered, expected, "preview follows the budget");
+            assertEq(toBurn + toDeepen, offered, "and the two sides cover it");
             vm.prank(keeper);
             if (offered == 0) {
                 vm.expectRevert(abi.encodeWithSelector(IDeepenPoolPlugin.NothingToBuy.selector, address(token)));
                 deepen.run(address(token));
                 continue;
             }
-            uint256 expectedBuy = inThePool ? _splitOf(offered) : offered;
+            uint256 buysBefore = poolRouter.buyCalls();
+            (uint256 splitBurn, uint256 splitBuy,) = deepen.previewSplit(address(token), offered);
+            uint256 expectedBuys = (splitBurn == 0 ? 0 : 1) + (splitBuy == 0 ? 0 : 1);
             (uint256 spent,,) = deepen.run(address(token));
-            assertEq(
-                inThePool ? poolRouter.lastUsdcIn() : launchpad.lastBuyUsdcIn(),
-                expectedBuy,
-                "the run bought what the split says"
-            );
+            if (inThePool) {
+                assertEq(poolRouter.lastUsdcIn(), splitBuy == 0 ? splitBurn : splitBuy, "the last buy is the split's");
+                assertEq(poolRouter.buyCalls() - buysBefore, expectedBuys, "one buy per non-empty side");
+            } else {
+                assertEq(launchpad.lastBuyUsdcIn(), offered, "the curve run offers the whole budget");
+            }
             assertLe(spent, offered, "a run never spends more than it offers");
             assertLe(offered - spent, 4, "and leaves at most rounding behind");
             assertEq(deepen.lastRunAt(address(token)), vm.getBlockTimestamp());
@@ -261,7 +265,7 @@ contract DeepenPoolPacingTest is DeepenPoolTestBase {
             }
             _after((r >> 64) % 2 hours);
 
-            (uint256 offered,) = deepen.previewRun(address(token));
+            (uint256 offered,,,) = deepen.previewRun(address(token));
             if (offered == 0) {
                 vm.expectRevert(abi.encodeWithSelector(IDeepenPoolPlugin.NothingToBuy.selector, address(token)));
                 deepen.run(address(token));
@@ -292,7 +296,4 @@ contract DeepenPoolPacingTest is DeepenPoolTestBase {
         return reserveUsdc;
     }
 
-    function _splitOf(uint256 offered) internal view returns (uint256 toBuy) {
-        (toBuy,) = deepen.previewSplit(address(token), offered);
-    }
 }

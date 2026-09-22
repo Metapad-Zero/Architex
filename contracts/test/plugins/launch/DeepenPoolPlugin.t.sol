@@ -16,6 +16,7 @@ contract DeepenPoolPluginConformanceTest is PluginConformanceTest {
         return new DeepenPoolPlugin(launchpad_);
     }
 
+    /// @dev Empty data is valid here (the default burn share), which is what the conformance suite passes around.
     function _validData() internal pure override returns (bytes memory) {
         return "";
     }
@@ -32,16 +33,46 @@ contract DeepenPoolPluginTest is DeepenPoolTestBase {
 
     function setUp() public override {
         super.setUp();
-        (token, pair) = _launchDeepen();
+        (token, pair) = _launchDeepen(); // the default burn share
     }
 
-    // ─── Configuration and deliveries ─────────────────────────────────────────
+    // ─── Configuration ────────────────────────────────────────────────────────
 
-    function test_onLaunch_rejectsAnyData() public {
+    function test_onLaunch_emptyDataMeansTheDefaultBurnShare() public view {
+        assertEq(deepen.DEFAULT_BURN_BPS(), 5_000);
+        assertEq(deepen.burnBpsOf(address(token)), 5_000);
+        assertTrue(deepen.isConfigured(address(token)));
+    }
+
+    function test_onLaunch_takesTheCreatorsBurnShare() public {
+        uint16[4] memory shares = [uint16(0), 2_500, 7_500, 10_000];
+        for (uint256 i; i < shares.length; ++i) {
+            MockLaunchToken t = _newToken();
+            vm.expectEmit(true, false, false, true, address(deepen));
+            emit IDeepenPoolPlugin.BurnShareSet(address(t), shares[i]);
+            launchpad.launch(address(t), creator, address(deepen), address(0), abi.encode(shares[i]));
+            assertEq(deepen.burnBpsOf(address(t)), shares[i]);
+        }
+    }
+
+    function test_onLaunch_rejectsABurnShareAboveTotal() public {
         MockLaunchToken t = _newToken();
-        vm.expectRevert(ILaunchFeePlugin.DataNotEmpty.selector);
-        launchpad.launch(address(t), creator, address(deepen), address(0), hex"00");
+        vm.expectRevert(abi.encodeWithSelector(IDeepenPoolPlugin.InvalidBurnBps.selector, 10_001));
+        launchpad.launch(address(t), creator, address(deepen), address(0), abi.encode(uint16(10_001)));
         assertFalse(deepen.isConfigured(address(t)));
+    }
+
+    function test_onLaunch_rejectsNonCanonicalData() public {
+        MockLaunchToken t = _newToken();
+        vm.expectRevert(ILaunchFeePlugin.NonCanonicalData.selector);
+        launchpad.launch(address(t), creator, address(deepen), address(0), abi.encodePacked(abi.encode(uint16(1)), hex"01"));
+        assertFalse(deepen.isConfigured(address(t)));
+    }
+
+    function test_burnBpsOf_isZeroForAnUnconfiguredToken() public {
+        MockLaunchToken other = _launch(alice, ""); // a token whose fees go to a wallet
+        assertEq(deepen.burnBpsOf(address(other)), 0);
+        assertFalse(deepen.isConfigured(address(other)));
     }
 
     function test_constants() public view {
@@ -68,13 +99,15 @@ contract DeepenPoolPluginTest is DeepenPoolTestBase {
         assertEq(deepen.usdcHeld(address(token)), 0);
     }
 
-    // ─── Run on the curve (Buyback & burn's) ──────────────────────────────────
+    // ─── Run on the curve (Buyback & burn's, whatever the burn share) ─────────
 
     function test_run_onCurve_spendsTheCapAndBurnsEverything() public {
         _collect(token, 100e6);
         uint256 bought = DEFAULT_CAP * TOKENS_PER_UNIT;
         vm.expectEmit(true, true, false, true, address(deepen));
-        emit IDeepenPoolPlugin.DeepenRun(address(token), keeper, false, DEFAULT_CAP, 0, bought, 0, bought, 0);
+        emit IDeepenPoolPlugin.DeepenRun(
+            address(token), keeper, false, DEFAULT_CAP, DEFAULT_CAP, 0, bought, 0, bought, 0
+        );
         (uint256 spent, uint256 burned, uint256 liquidity) = _runAs(keeper, address(token));
 
         assertEq(spent, DEFAULT_CAP);
@@ -87,6 +120,7 @@ contract DeepenPoolPluginTest is DeepenPoolTestBase {
         assertEq(deepen.usdcHeld(address(token)), 100e6 - DEFAULT_CAP);
         assertEq(usdc.balanceOf(address(deepen)), 100e6 - DEFAULT_CAP);
         assertEq(deepen.totalUsdcSpent(address(token)), DEFAULT_CAP);
+        assertEq(deepen.totalUsdcBurning(address(token)), DEFAULT_CAP, "the whole curve spend buys tokens to burn");
         assertEq(deepen.totalTokensBurned(address(token)), burned);
         assertEq(deepen.totalUsdcAdded(address(token)) + deepen.totalTokensAdded(address(token)), 0);
         assertEq(deepen.totalLiquidityLocked(address(token)), 0);
@@ -97,6 +131,20 @@ contract DeepenPoolPluginTest is DeepenPoolTestBase {
         assertEq(token.totalSupply(), 0, "a true burn");
         assertEq(token.balanceOf(address(deepen)), 0);
         assertEq(poolRouter.buyCalls(), 0, "never the router before graduation");
+    }
+
+    /// @dev Even a token that never burns in its pool burns on the curve: there is nothing to add to yet.
+    function test_run_onCurve_burnsEvenWithNoBurnShare() public {
+        (MockLaunchToken t,) = _launchDeepen(uint16(0));
+        _collect(t, 100e6);
+        (uint256 offered, uint256 toBurn, uint256 toDeepen, bool graduated) = deepen.previewRun(address(t));
+        assertEq(toBurn, offered, "the whole offer buys and burns");
+        assertEq(toDeepen, 0);
+        assertFalse(graduated);
+        (uint256 spent, uint256 burned, uint256 liquidity) = _runAs(keeper, address(t));
+        assertEq(spent, offered);
+        assertEq(burned, spent * TOKENS_PER_UNIT);
+        assertEq(liquidity, 0);
     }
 
     function test_run_onCurve_spendsEverythingHeldBelowTheCap() public {
@@ -129,8 +177,8 @@ contract DeepenPoolPluginTest is DeepenPoolTestBase {
         assertEq(usdc.allowance(address(deepen), address(launchpad)), 0);
     }
 
-    /// @dev After the sell-out run the token is in its pool; the next run, paced from the sell-out run, deepens it.
-    function test_run_sellOutThenTheNextRunDeepensThePool() public {
+    /// @dev After the sell-out run the token is in its pool; the next run, paced from the sell-out run, splits.
+    function test_run_sellOutThenTheNextRunSplits() public {
         launchpad.setSellOutCost(address(token), 7e6);
         _collect(token, 1_000e6);
         _runAs(keeper, address(token));
@@ -141,15 +189,17 @@ contract DeepenPoolPluginTest is DeepenPoolTestBase {
 
         vm.roll(vm.getBlockNumber() + 1);
         vm.warp(vm.getBlockTimestamp() + 30 minutes);
-        (uint256 offered, bool graduated) = deepen.previewRun(address(token));
+        (uint256 offered, uint256 toBurn, uint256 toDeepen, bool graduated) = deepen.previewRun(address(token));
         assertTrue(graduated);
         assertEq(offered, POOL_CAP / 2, "half an hour: half the pool's cap");
+        assertEq(toBurn, offered / 2, "and half of that burns");
+        assertEq(toDeepen, offered - toBurn);
         uint256 deadBefore = pair.balanceOf(DEAD);
         (uint256 spent, uint256 burned, uint256 liquidity) = _runAs(keeper, address(token));
         assertLe(spent, offered);
         assertLe(offered - spent, 4, "only rounding stays behind");
-        assertEq(burned, 0);
-        assertGt(liquidity, 0);
+        assertGt(burned, 0, "the burn side burned");
+        assertGt(liquidity, 0, "and the deepen side added");
         assertEq(pair.balanceOf(DEAD), deadBefore + liquidity, "the LP went to the burn address");
         assertEq(deepen.usdcHeld(address(token)), 1_000e6 - 7e6 - spent);
     }
@@ -191,48 +241,56 @@ contract DeepenPoolPluginTest is DeepenPoolTestBase {
         assertEq(token.totalSupply(), 0);
     }
 
-    // ─── Run in the pool ──────────────────────────────────────────────────────
+    // ─── Run in the pool: the two sides ───────────────────────────────────────
 
-    /// @dev A full cap: about half buys through the router, the rest goes into the pool with every token bought, and
-    ///      the LP is minted straight to 0x…dEaD. The pool's token reserve ends where it was; its USDC reserve grows by
-    ///      the net buy and the add; the plugin keeps no token, no LP and no allowance.
-    function test_run_inPool_buysAboutHalfAndLocksTheAddAtDead() public {
+    /// @dev The default half and half: half the offer buys and burns, the rest buys and goes into the pool with the
+    ///      USDC left, the LP minted to 0x…dEaD. The pool's token reserve falls by exactly what was burned out of it;
+    ///      its USDC reserve grows by everything spent but the fees; the plugin keeps nothing.
+    function test_run_inPool_halfBurnsHalfDeepens() public {
         _graduate(token, pair, POOL_TOKENS, POOL_USDC);
         _collect(token, 1_000e6);
-        (uint256 toBuy, uint256 forLiquidity) = deepen.previewSplit(address(token), POOL_CAP);
-        assertEq(toBuy + forLiquidity, POOL_CAP);
-        assertApproxEqAbs(toBuy, _refRoot(POOL_CAP, POOL_USDC, FEE_BPS_TOTAL), 1, "the documented root");
-        assertGt(toBuy, POOL_CAP / 2, "a little over half buys: the buy pays the fees");
-        assertLt(toBuy, POOL_CAP * 51 / 100);
-        Sim memory s = _simulate(address(token), pair, POOL_CAP, toBuy, 0);
+        (uint256 usdcToBurn, uint256 usdcToBuy, uint256 usdcForLiquidity) = deepen.previewSplit(address(token), POOL_CAP);
+        assertEq(usdcToBurn, POOL_CAP / 2, "half burns");
+        assertEq(usdcToBurn + usdcToBuy + usdcForLiquidity, POOL_CAP, "the three sum to the offer");
+        assertGt(usdcToBuy * 2, POOL_CAP / 2, "a little over half of the deepen side buys");
+        Sim memory s = _simulateRun(address(token), pair, POOL_CAP, 0);
         uint256 deadBefore = pair.balanceOf(DEAD);
         uint256 supplyBefore = pair.totalSupply();
         (uint256 rt0, uint256 ru0) = _reservesOf(pair);
-        (uint256 platformFee, uint256 creatorFee) = _fees(toBuy);
+        uint256 tokenSupplyBefore = token.totalSupply();
 
         vm.expectEmit(true, true, false, true, address(deepen));
         emit IDeepenPoolPlugin.DeepenRun(
-            address(token), keeper, true, toBuy + s.usdcAdded, s.usdcAdded, s.tokensBought, s.tokensAdded, 0, s.liquidity
+            address(token),
+            keeper,
+            true,
+            s.spent,
+            s.usdcToBurn,
+            s.usdcAdded,
+            s.tokensBought,
+            s.tokensAdded,
+            s.burned,
+            s.liquidity
         );
-        vm.expectEmit(true, true, true, true, address(pair));
-        emit IERC20.Transfer(address(0), DEAD, s.liquidity);
         (uint256 spent, uint256 burned, uint256 liquidity) = _runAs(keeper, address(token));
 
-        assertEq(spent, toBuy + s.usdcAdded);
-        assertEq(burned, 0, "every token bought went into the pool");
-        assertEq(s.tokensAdded, s.tokensBought);
+        assertEq(spent, s.spent);
+        assertEq(burned, s.burned);
+        assertGt(burned, 0);
         assertEq(liquidity, s.liquidity);
         assertGt(liquidity, 0);
         assertLe(POOL_CAP - spent, 4, "at most 4 units stay for the next run");
-        assertEq(poolRouter.lastUsdcIn(), toBuy);
+        assertEq(poolRouter.buyCalls(), 2, "one buy per side");
         assertEq(poolRouter.lastMinOut(), 0, "no slippage bound, by design");
         assertEq(poolRouter.lastTo(), address(deepen));
-        assertEq(poolRouter.lastDeadline(), vm.getBlockTimestamp());
         assertEq(launchpad.buyCalls(), 0, "never the curve after graduation");
+        assertEq(token.totalSupply(), tokenSupplyBefore - burned, "a true burn");
 
         (uint256 rt1, uint256 ru1) = _reservesOf(pair);
-        assertEq(rt1, rt0, "the token reserve is back where it was");
-        assertEq(ru1, ru0 + (toBuy - platformFee - creatorFee) + s.usdcAdded, "net buy + add");
+        assertEq(rt1, s.reserveToken, "the pool's token side");
+        assertEq(ru1, s.reserveUsdc, "the pool's USDC side");
+        assertLt(rt1, rt0, "the burn side took tokens out of the pool");
+        assertGt(ru1, ru0);
         assertGt(rt1 * ru1, rt0 * ru0, "k grows");
         assertEq(pair.balanceOf(DEAD), deadBefore + liquidity, "the LP went to the burn address");
         assertEq(pair.totalSupply(), supplyBefore + liquidity);
@@ -240,15 +298,81 @@ contract DeepenPoolPluginTest is DeepenPoolTestBase {
         assertEq(token.balanceOf(address(deepen)), 0, "no token kept");
         assertEq(usdc.allowance(address(deepen), address(poolRouter)), 0);
         assertEq(usdc.balanceOf(address(pair)), ru1, "nothing left for anyone to skim");
-        assertEq(token.balanceOf(address(pair)), rt1);
 
         assertEq(deepen.usdcHeld(address(token)), 1_000e6 - spent);
-        assertEq(usdc.balanceOf(address(deepen)), 1_000e6 - spent);
         assertEq(deepen.totalUsdcSpent(address(token)), spent);
+        assertEq(deepen.totalUsdcBurning(address(token)), s.usdcToBurn);
         assertEq(deepen.totalUsdcAdded(address(token)), s.usdcAdded);
         assertEq(deepen.totalTokensAdded(address(token)), s.tokensAdded);
         assertEq(deepen.totalLiquidityLocked(address(token)), liquidity);
-        assertEq(deepen.totalTokensBurned(address(token)), 0);
+        assertEq(deepen.totalTokensBurned(address(token)), burned);
+    }
+
+    /// @dev burnBps = 0: nothing is burned in the pool, every token bought goes back in, so the token reserve ends
+    ///      where it was.
+    function test_run_inPool_pureDeepenAddsEverythingItBuys() public {
+        (MockLaunchToken t, LaunchPair p) = _launchDeepen(uint16(0));
+        _graduate(t, p, POOL_TOKENS, POOL_USDC);
+        _collect(t, 1_000e6);
+        (uint256 usdcToBurn,,) = deepen.previewSplit(address(t), POOL_CAP);
+        assertEq(usdcToBurn, 0);
+        (uint256 rt0,) = _reservesOf(p);
+        Sim memory s = _simulateRun(address(t), p, POOL_CAP, 0);
+        (uint256 spent, uint256 burned, uint256 liquidity) = _runAs(keeper, address(t));
+        assertEq(burned, 0, "nothing burned");
+        assertEq(spent, s.spent);
+        assertEq(liquidity, s.liquidity);
+        assertGt(liquidity, 0);
+        (uint256 rt1,) = _reservesOf(p);
+        assertEq(rt1, rt0, "the token reserve is back where it was");
+        assertEq(poolRouter.buyCalls(), 1, "one buy: the deepen side only");
+        assertEq(deepen.totalUsdcBurning(address(t)), 0);
+    }
+
+    /// @dev burnBps = 10,000: a pure buyback, no add at all, and the LP supply never moves.
+    function test_run_inPool_pureBurnNeverAdds() public {
+        (MockLaunchToken t, LaunchPair p) = _launchDeepen(uint16(10_000));
+        _graduate(t, p, POOL_TOKENS, POOL_USDC);
+        _collect(t, 1_000e6);
+        (uint256 usdcToBurn, uint256 usdcToBuy, uint256 usdcForLiquidity) = deepen.previewSplit(address(t), POOL_CAP);
+        assertEq(usdcToBurn, POOL_CAP);
+        assertEq(usdcToBuy + usdcForLiquidity, 0);
+        uint256 supplyBefore = p.totalSupply();
+        (uint256 rt0, uint256 ru0) = _reservesOf(p);
+        Sim memory s = _simulateRun(address(t), p, POOL_CAP, 0);
+        (uint256 spent, uint256 burned, uint256 liquidity) = _runAs(keeper, address(t));
+        assertEq(spent, POOL_CAP, "the whole offer");
+        assertEq(burned, s.tokensBought);
+        assertEq(liquidity, 0);
+        assertEq(p.totalSupply(), supplyBefore, "no LP minted");
+        (uint256 rt1, uint256 ru1) = _reservesOf(p);
+        assertLt(rt1, rt0);
+        assertGt(ru1, ru0);
+        assertEq(deepen.totalUsdcBurning(address(t)), POOL_CAP);
+        assertEq(deepen.totalUsdcAdded(address(t)), 0);
+    }
+
+    /// @dev Every burn share between the two: the sides follow burnBps, and the pool moves accordingly.
+    function test_run_inPool_everyBurnShare() public {
+        uint16[5] memory shares = [uint16(0), 2_500, 5_000, 7_500, 10_000];
+        uint256 heldAcross;
+        for (uint256 i; i < shares.length; ++i) {
+            (MockLaunchToken t, LaunchPair p) = _launchDeepen(shares[i]);
+            _graduate(t, p, POOL_TOKENS, POOL_USDC);
+            _collect(t, 1_000e6);
+            (uint256 usdcToBurn,,) = deepen.previewSplit(address(t), POOL_CAP);
+            assertEq(usdcToBurn, POOL_CAP * shares[i] / 10_000, "the burn side is the configured share");
+            Sim memory s = _simulateRun(address(t), p, POOL_CAP, 0);
+            (uint256 spent, uint256 burned, uint256 liquidity) = _runAs(keeper, address(t));
+            assertEq(spent, s.spent);
+            assertEq(burned, s.burned);
+            assertEq(liquidity, s.liquidity);
+            assertEq(deepen.totalUsdcBurning(address(t)), usdcToBurn);
+            assertEq(t.balanceOf(address(deepen)), 0);
+            assertEq(p.balanceOf(address(deepen)), 0);
+            heldAcross += deepen.usdcHeld(address(t));
+            assertEq(usdc.balanceOf(address(deepen)), heldAcross, "one pot per token, all of it in the plugin");
+        }
     }
 
     function test_run_inPool_routerIsReadLazily() public {
@@ -275,19 +399,19 @@ contract DeepenPoolPluginTest is DeepenPoolTestBase {
     /// @dev Accounting follows the USDC that actually left, never what was offered: a router that pulls less leaves
     ///      more for the add, which the tokens then limit; the rest stays held.
     function test_run_inPool_accountsWhatTheRouterActuallyPulled() public {
-        _graduate(token, pair, POOL_TOKENS, POOL_USDC);
-        _collect(token, 1_000e6);
-        (uint256 toBuy,) = deepen.previewSplit(address(token), POOL_CAP);
+        (MockLaunchToken t, LaunchPair p) = _launchDeepen(uint16(0));
+        _graduate(t, p, POOL_TOKENS, POOL_USDC);
+        _collect(t, 1_000e6);
+        (, uint256 usdcToBuy,) = deepen.previewSplit(address(t), POOL_CAP);
         poolRouter.setPullShortfall(1e6);
-        (uint256 spent,, uint256 liquidity) = _runAs(keeper, address(token));
-        uint256 added = deepen.totalUsdcAdded(address(token));
-        assertEq(spent, toBuy - 1e6 + added, "the pull plus the add");
+        (uint256 spent,, uint256 liquidity) = _runAs(keeper, address(t));
+        uint256 added = deepen.totalUsdcAdded(address(t));
+        assertEq(spent, usdcToBuy - 1e6 + added, "the pull plus the add");
         assertGt(POOL_CAP - spent, 1e6, "the tokens limit the add; the rest stays held");
         assertGt(liquidity, 0);
-        assertEq(deepen.usdcHeld(address(token)), 1_000e6 - spent);
-        assertEq(usdc.balanceOf(address(deepen)), 1_000e6 - spent);
+        assertEq(deepen.usdcHeld(address(t)), 1_000e6 - spent);
         assertEq(usdc.allowance(address(deepen), address(poolRouter)), 0, "the unused allowance is removed");
-        assertEq(token.balanceOf(address(deepen)), 0);
+        assertEq(t.balanceOf(address(deepen)), 0);
     }
 
     function test_run_inPool_revertsWhenTheRouterReportsMoreThanItDelivered() public {
@@ -311,15 +435,14 @@ contract DeepenPoolPluginTest is DeepenPoolTestBase {
     function test_run_inPool_revertsWhenThePairMintsOtherThanComputed() public {
         MockLaunchToken t = _newToken();
         SkewedMintPair skewed = new SkewedMintPair(address(t), address(usdc), address(poolRouter));
-        launchpad.launch(address(t), creator, address(deepen), address(skewed), "");
+        launchpad.launch(address(t), creator, address(deepen), address(skewed), abi.encode(uint16(0)));
         t.mint(address(skewed), POOL_TOKENS);
         usdc.mint(address(skewed), POOL_USDC);
         skewed.mint(DEAD);
         launchpad.setGraduated(address(t), true);
         _collect(t, 1_000e6);
 
-        (uint256 toBuy,) = deepen.previewSplit(address(t), POOL_CAP);
-        Sim memory s = _simulate(address(t), LaunchPair(address(skewed)), POOL_CAP, toBuy, 0);
+        Sim memory s = _simulateRun(address(t), LaunchPair(address(skewed)), POOL_CAP, 0);
         skewed.setMintSkew(1, false);
         vm.expectRevert(abi.encodeWithSelector(IDeepenPoolPlugin.LiquidityMismatch.selector, s.liquidity, s.liquidity + 1));
         _runAs(keeper, address(t));
@@ -331,60 +454,74 @@ contract DeepenPoolPluginTest is DeepenPoolTestBase {
         assertEq(liquidity, s.liquidity);
     }
 
-    /// @dev The minimum offer (3 units) is all buy: nothing is left to add, so everything bought is burned.
-    function test_run_inPool_minimumOfferIsBuyAndBurn() public {
+    // ─── The dust rule ────────────────────────────────────────────────────────
+
+    /// @dev A side that would be under the minimum gives way: the whole offer goes through the other one rather than
+    ///      wasting the run. The burn side gives way first, and an offer whose deepen side is dust is all burn.
+    function test_run_inPool_aSideTooSmallGivesWayToTheOther() public {
         _graduate(token, pair, POOL_TOKENS, POOL_USDC);
-        _payDirect(address(deepen), address(token), alice, 3);
-        (uint256 toBuy, uint256 forLiquidity) = deepen.previewSplit(address(token), 3);
-        assertEq(toBuy, 3);
-        assertEq(forLiquidity, 0);
-        (uint256 bought,,) = poolRouter.quoteBuy(address(token), 3);
-        uint256 supplyBefore = pair.totalSupply();
-        vm.expectEmit(true, true, false, true, address(deepen));
-        emit IDeepenPoolPlugin.DeepenRun(address(token), keeper, true, 3, 0, bought, 0, bought, 0);
-        (uint256 spent, uint256 burned, uint256 liquidity) = _runAs(keeper, address(token));
-        assertEq(spent, 3);
-        assertEq(burned, bought);
+        // 5 units at 50% would be 2 and 3: the burn side gives way and all 5 deepen.
+        _payDirect(address(deepen), address(token), alice, 5);
+        (uint256 usdcToBurn, uint256 usdcToBuy, uint256 usdcForLiquidity) = deepen.previewSplit(address(token), 5);
+        assertEq(usdcToBurn, 0, "the burn side gave way");
+        assertEq(usdcToBuy + usdcForLiquidity, 5);
+        (uint256 offered, uint256 toBurn, uint256 toDeepen,) = deepen.previewRun(address(token));
+        assertEq(offered, 5);
+        assertEq(toBurn, 0);
+        assertEq(toDeepen, 5);
+        _runAs(keeper, address(token));
+        assertEq(poolRouter.buyCalls(), 1);
+        assertEq(deepen.totalUsdcBurning(address(token)), 0);
+
+        // A 90% burn share of 5 units leaves 1 unit to deepen: that side gives way instead.
+        (MockLaunchToken t, LaunchPair p) = _launchDeepen(uint16(9_000));
+        _graduate(t, p, POOL_TOKENS, POOL_USDC);
+        _payDirect(address(deepen), address(t), alice, 5);
+        (usdcToBurn, usdcToBuy, usdcForLiquidity) = deepen.previewSplit(address(t), 5);
+        assertEq(usdcToBurn, 5, "all of it burns");
+        assertEq(usdcToBuy + usdcForLiquidity, 0);
+        (uint256 spent, uint256 burned, uint256 liquidity) = _runAs(keeper, address(t));
+        assertEq(spent, 5);
+        assertGt(burned, 0);
         assertEq(liquidity, 0);
-        assertEq(pair.totalSupply(), supplyBefore, "no LP minted");
-        assertEq(token.balanceOf(address(deepen)), 0);
+        assertEq(deepen.usdcHeld(address(t)), 0, "nothing wasted");
     }
 
-    /// @dev Offers of a few units: the buy is raised to 3 units, an add too small to mint LP is skipped (its tokens
-    ///      burned, its USDC kept), and nothing ever reverts or stays in the plugin but USDC.
+    /// @dev Offers of a few units at every burn share: the run never reverts, the plugin ends with no tokens, and
+    ///      what it could not use stays held.
     function test_run_inPool_dustOffersNeverRevert() public {
-        _graduate(token, pair, POOL_TOKENS, POOL_USDC);
-        for (uint256 held = 3; held < 12; ++held) {
-            uint256 snap = vm.snapshotState();
-            _payDirect(address(deepen), address(token), alice, held);
-            (uint256 toBuy,) = deepen.previewSplit(address(token), held);
-            assertGe(toBuy, 3);
-            Sim memory s = _simulate(address(token), pair, held, toBuy, 0);
-            (uint256 spent, uint256 burned, uint256 liquidity) = _runAs(keeper, address(token));
-            assertEq(spent, toBuy + s.usdcAdded);
-            assertEq(burned, s.burned);
-            assertEq(liquidity, s.liquidity);
-            assertEq(token.balanceOf(address(deepen)), 0);
-            assertEq(deepen.usdcHeld(address(token)), held - spent);
-            vm.revertToState(snap);
+        uint16[3] memory shares = [uint16(0), 5_000, 10_000];
+        for (uint256 i; i < shares.length; ++i) {
+            for (uint256 held = 3; held < 12; ++held) {
+                uint256 snap = vm.snapshotState();
+                (MockLaunchToken t, LaunchPair p) = _launchDeepen(shares[i]);
+                _graduate(t, p, POOL_TOKENS, POOL_USDC);
+                _payDirect(address(deepen), address(t), alice, held);
+                Sim memory s = _simulateRun(address(t), p, held, 0);
+                (uint256 spent, uint256 burned, uint256 liquidity) = _runAs(keeper, address(t));
+                assertEq(spent, s.spent);
+                assertEq(burned, s.burned);
+                assertEq(liquidity, s.liquidity);
+                assertEq(t.balanceOf(address(deepen)), 0);
+                assertEq(deepen.usdcHeld(address(t)), held - spent);
+                vm.revertToState(snap);
+            }
         }
     }
 
-    /// @dev Tokens sent to the plugin join the add: the USDC left then limits it, all of that USDC goes in, and the
-    ///      tokens it cannot pair are burned. The plugin ends with none.
-    function test_run_inPool_strayTokensAreAddedOrBurned() public {
+    // ─── Strays and donations ─────────────────────────────────────────────────
+
+    /// @dev Tokens sent to the plugin are burned by the next run: only the deepen side's own tokens go into the pool.
+    function test_run_inPool_strayTokensAreBurned() public {
         _graduate(token, pair, POOL_TOKENS, POOL_USDC);
         _collect(token, 1_000e6);
-        token.mint(address(deepen), 1_000_000e18); // ~125 USDC worth, more than the add can pair
-        (uint256 toBuy,) = deepen.previewSplit(address(token), POOL_CAP);
-        Sim memory s = _simulate(address(token), pair, POOL_CAP, toBuy, 1_000_000e18);
+        token.mint(address(deepen), 1_000_000e18);
+        Sim memory s = _simulateRun(address(token), pair, POOL_CAP, 1_000_000e18);
         (uint256 spent, uint256 burned, uint256 liquidity) = _runAs(keeper, address(token));
-        assertEq(spent, POOL_CAP, "all the USDC left went into the pool");
-        assertEq(s.leftover, 0);
+        assertEq(spent, s.spent);
         assertEq(burned, s.burned);
-        assertGt(burned, 0);
+        assertEq(burned, s.tokensBought + 1_000_000e18 - s.tokensAdded, "every token added or burned");
         assertEq(liquidity, s.liquidity);
-        assertEq(s.tokensAdded + burned, s.tokensBought + 1_000_000e18, "every token added or burned");
         assertEq(token.balanceOf(address(deepen)), 0);
     }
 
@@ -405,9 +542,8 @@ contract DeepenPoolPluginTest is DeepenPoolTestBase {
         assertEq(deepen.totalLiquidityLocked(address(token)), liquidity, "the books count only what the run minted");
     }
 
-    /// @dev USDC or tokens donated to the pair before a run (not synced) are absorbed into the reserves by the run's
-    ///      own buy, so the mint credits exactly the run's deposit; the plugin's check passes and nothing is left to
-    ///      skim afterwards.
+    /// @dev USDC or tokens donated to the pair before a run (not synced) are folded into the reserves by the run's own
+    ///      sync, so the split is computed on the pool the buys will trade against and nothing is left to skim.
     function test_run_inPool_aDonationBeforeTheRunIsAbsorbedNotSkimmable() public {
         _graduate(token, pair, POOL_TOKENS, POOL_USDC);
         _collect(token, 1_000e6);
@@ -416,13 +552,13 @@ contract DeepenPoolPluginTest is DeepenPoolTestBase {
         uint256 deadBefore = pair.balanceOf(DEAD);
         (uint256 spent, uint256 burned, uint256 liquidity) = _runAs(keeper, address(token));
         assertGt(liquidity, 0);
-        assertLe(spent, POOL_CAP);
+        assertGt(burned, 0);
+        assertLe(POOL_CAP - spent, 4, "the sync keeps the split honest");
         assertEq(pair.balanceOf(DEAD), deadBefore + liquidity);
         (uint256 rt, uint256 ru) = _reservesOf(pair);
         assertEq(usdc.balanceOf(address(pair)), ru);
         assertEq(token.balanceOf(address(pair)), rt);
         assertEq(token.balanceOf(address(deepen)), 0);
-        assertEq(deepen.totalTokensBurned(address(token)), burned);
         pair.skim(attacker);
         assertEq(usdc.balanceOf(attacker) + token.balanceOf(attacker), 0, "nothing to skim");
     }
@@ -434,8 +570,7 @@ contract DeepenPoolPluginTest is DeepenPoolTestBase {
         _runAs(keeper, address(token));
         vm.expectRevert(abi.encodeWithSelector(IDeepenPoolPlugin.AlreadyRanThisBlock.selector, address(token)));
         _runAs(keeper, address(token));
-        (uint256 offered,) = deepen.previewRun(address(token));
-        assertEq(offered, 0);
+        assertEq(_offeredFor(address(token)), 0);
         vm.roll(vm.getBlockNumber() + 1);
         vm.warp(vm.getBlockTimestamp() + 1 hours);
         (uint256 spent,,) = _runAs(keeper, address(token));
@@ -467,33 +602,44 @@ contract DeepenPoolPluginTest is DeepenPoolTestBase {
     // ─── Views and isolation ──────────────────────────────────────────────────
 
     function test_previewRun() public {
-        (uint256 offered, bool graduated) = deepen.previewRun(address(token));
-        assertEq(offered, 0);
+        (uint256 offered, uint256 toBurn, uint256 toDeepen, bool graduated) = deepen.previewRun(address(token));
+        assertEq(offered + toBurn + toDeepen, 0);
         assertFalse(graduated);
         _collect(token, 100e6);
-        (offered, graduated) = deepen.previewRun(address(token));
+        (offered, toBurn, toDeepen, graduated) = deepen.previewRun(address(token));
         assertEq(offered, DEFAULT_CAP);
+        assertEq(toBurn, offered, "on the curve the whole offer burns");
+        assertEq(toDeepen, 0);
         _graduate(token, pair, POOL_TOKENS, 1_000e6);
-        (offered, graduated) = deepen.previewRun(address(token));
+        (offered, toBurn, toDeepen, graduated) = deepen.previewRun(address(token));
         assertEq(offered, 2.5e6);
+        assertEq(toBurn, 1.25e6);
+        assertEq(toDeepen, 1.25e6);
         assertTrue(graduated);
         MockLaunchToken unconfigured = _launch(alice, "");
-        (offered,) = deepen.previewRun(address(unconfigured));
+        (offered,,,) = deepen.previewRun(address(unconfigured));
         assertEq(offered, 0);
     }
 
     function test_previewSplit() public {
-        (uint256 toBuy, uint256 forLiquidity) = deepen.previewSplit(address(token), 50e6);
-        assertEq(toBuy, 50e6, "on the curve the whole offer buys");
-        assertEq(forLiquidity, 0);
-        _graduate(token, pair, POOL_TOKENS, POOL_USDC);
-        (toBuy, forLiquidity) = deepen.previewSplit(address(token), 0);
+        (uint256 toBurn, uint256 toBuy, uint256 forLiquidity) = deepen.previewSplit(address(token), 50e6);
+        assertEq(toBurn, 50e6, "on the curve the whole offer buys and burns");
         assertEq(toBuy + forLiquidity, 0);
-        (toBuy, forLiquidity) = deepen.previewSplit(address(token), 2);
+        _graduate(token, pair, POOL_TOKENS, POOL_USDC);
+        (toBurn, toBuy, forLiquidity) = deepen.previewSplit(address(token), 0);
+        assertEq(toBurn + toBuy + forLiquidity, 0);
+        (toBurn, toBuy, forLiquidity) = deepen.previewSplit(address(token), 2);
+        assertEq(toBurn, 0, "the burn side gives way");
         assertEq(toBuy, 2, "never more than offered");
-        (toBuy, forLiquidity) = deepen.previewSplit(address(token), 50e6);
-        assertEq(toBuy + forLiquidity, 50e6);
-        assertApproxEqAbs(toBuy, _refRoot(50e6, POOL_USDC, FEE_BPS_TOTAL), 1);
+        (toBurn, toBuy, forLiquidity) = deepen.previewSplit(address(token), 50e6);
+        assertEq(toBurn + toBuy + forLiquidity, 50e6);
+        assertEq(toBurn, 25e6);
+        // The deepen side splits against the reserve the burn side's buy leaves.
+        (, uint256 ru) = _reservesOf(pair);
+        (, uint256 net) = _quoteAt(1, ru, 25e6);
+        net; // silence the unused warning: only the USDC side matters below
+        (uint256 platformFee, uint256 creatorFee) = _fees(25e6);
+        assertApproxEqAbs(toBuy, _refRoot(25e6, ru + 25e6 - platformFee - creatorFee, FEE_BPS_TOTAL), 1);
     }
 
     /// @dev A run spends only the running token's USDC, even when the plugin holds much more for other tokens.
@@ -507,9 +653,7 @@ contract DeepenPoolPluginTest is DeepenPoolTestBase {
         assertEq(deepen.usdcHeld(address(token)), 100e6);
         (uint256 spent,,) = _runAs(keeper, address(token));
         assertEq(spent, DEFAULT_CAP);
-        assertEq(
-            usdc.balanceOf(address(deepen)), deepen.usdcHeld(address(token)) + deepen.usdcHeld(address(other))
-        );
+        assertEq(usdc.balanceOf(address(deepen)), deepen.usdcHeld(address(token)) + deepen.usdcHeld(address(other)));
         assertEq(pair.totalSupply(), 0, "the curve token's pool was never touched");
     }
 
@@ -530,66 +674,60 @@ contract DeepenPoolPluginTest is DeepenPoolTestBase {
         assertEq(burned, spent * TOKENS_PER_UNIT);
         assertEq(liquidity, 0);
         assertEq(deepen.usdcHeld(address(token)), held - spent);
-        assertEq(usdc.balanceOf(address(deepen)), held - spent);
         assertEq(usdc.allowance(address(deepen), address(launchpad)), 0);
         assertEq(launchpad.isGraduated(address(token)), offer >= sellOut);
         assertEq(token.totalSupply(), 0);
     }
 
-    /// @dev Any pool (reserves from 1,000 to 100M USDC against 1M to 1B tokens, optionally with third-party
-    ///      liquidity) and any pot: the offer is min(held, cap), the buy is the documented root (to a unit, raised to
-    ///      the minimum), the add takes every token bought, at most 4 units of the offer stay held, the LP goes to
-    ///      0x…dEaD exactly, and the plugin keeps nothing.
-    function testFuzz_run_inPool(uint64 heldRaw, uint112 reserveUsdcRaw, uint112 reserveTokenRaw, bool thirdPartyLp)
+    /// @dev Any pool, any pot and any burn share: the sides follow burnBps and the dust rule, the deepen side buys the
+    ///      documented root, its add takes every token it bought beyond dust, at most 4 units of the offer stay held,
+    ///      the LP goes to 0x…dEaD exactly, and the plugin keeps nothing.
+    function testFuzz_run_inPool(uint64 heldRaw, uint112 reserveUsdcRaw, uint112 reserveTokenRaw, uint16 burnRaw)
         public
     {
+        uint16 burnBps = uint16(bound(burnRaw, 0, 10_000));
+        (MockLaunchToken t, LaunchPair p) = _launchDeepen(burnBps);
         uint256 ru0 = bound(reserveUsdcRaw, 1e9, 1e14);
         uint256 rt0 = bound(reserveTokenRaw, 1e24, 1e27);
-        _graduate(token, pair, rt0, ru0);
-        if (thirdPartyLp) {
-            token.mint(address(pair), rt0 / 3);
-            usdc.mint(address(pair), ru0 / 3);
-            pair.mint(alice);
-            (rt0, ru0) = _reservesOf(pair);
-        }
+        _graduate(t, p, rt0, ru0);
         uint256 held = bound(heldRaw, 3, 1e13);
-        _collect(token, held);
+        _collect(t, held);
         uint256 cap = ru0 * 25 / 10_000;
         uint256 offer = held < cap ? held : cap;
-        vm.assume(offer >= 3);
 
-        (uint256 offered, bool graduated) = deepen.previewRun(address(token));
+        (uint256 offered, uint256 toBurn, uint256 toDeepen, bool graduated) = deepen.previewRun(address(t));
         assertTrue(graduated);
         assertEq(offered, offer, "previewRun = min(held, cap)");
-        (uint256 toBuy,) = deepen.previewSplit(address(token), offer);
-        uint256 root = _refRoot(offer, ru0, FEE_BPS_TOTAL);
-        if (root >= 4 && root < offer) assertApproxEqAbs(toBuy, root, 1, "the documented root");
-        Sim memory s = _simulate(address(token), pair, offer, toBuy, 0);
-        uint256 deadBefore = pair.balanceOf(DEAD);
-        uint256 aliceLp = pair.balanceOf(alice);
+        (uint256 refBurn, uint256 refDeepen) = _sidesRef(offer, burnBps);
+        assertEq(toBurn, refBurn, "the burn side follows burnBps and the dust rule");
+        assertEq(toDeepen, refDeepen);
+        (uint256 splitBurn, uint256 splitBuy, uint256 splitAdd) = deepen.previewSplit(address(t), offer);
+        assertEq(splitBurn + splitBuy + splitAdd, offer, "the split covers the offer");
+        assertEq(splitBurn, refBurn);
 
-        (uint256 spent, uint256 burned, uint256 liquidity) = _runAs(keeper, address(token));
-        assertEq(spent, toBuy + s.usdcAdded);
+        Sim memory s = _simulate(p, offer, splitBurn, splitBuy, 0);
+        uint256 deadBefore = p.balanceOf(DEAD);
+        (uint256 spent, uint256 burned, uint256 liquidity) = _runAs(keeper, address(t));
+
+        assertEq(spent, s.spent);
         assertEq(burned, s.burned);
         assertEq(liquidity, s.liquidity);
         assertLe(offer - spent, 4, "at most 4 units stay held");
-        (uint256 rt1, uint256 ru1) = _reservesOf(pair);
-        // Tokens that did not fit are burned: worth about 2 units at most at the pool's price.
-        assertLe(burned * ru1, 2 * rt1 + rt1 / 1e6, "at most ~2 units' worth burned");
-        if (offer >= 1_000) {
-            assertEq(burned, 0, "beyond dust, every token bought goes back into the pool");
-            assertGt(liquidity, 0);
-            assertEq(rt1, rt0, "the token reserve is back where it was");
-        }
+        (uint256 rt1, uint256 ru1) = _reservesOf(p);
+        assertEq(rt1, s.reserveToken);
+        assertEq(ru1, s.reserveUsdc);
         assertGe(rt1 * ru1, rt0 * ru0, "k never falls");
-        assertEq(pair.balanceOf(DEAD), deadBefore + liquidity);
-        assertEq(pair.balanceOf(alice), aliceLp, "a third party's LP is untouched");
-        assertEq(pair.balanceOf(address(deepen)), 0);
-        assertEq(token.balanceOf(address(deepen)), 0);
+        assertEq(p.balanceOf(DEAD), deadBefore + liquidity);
+        assertEq(p.balanceOf(address(deepen)), 0);
+        assertEq(t.balanceOf(address(deepen)), 0);
         assertEq(usdc.allowance(address(deepen), address(poolRouter)), 0);
-        assertEq(deepen.usdcHeld(address(token)), held - spent);
-        assertEq(usdc.balanceOf(address(deepen)), held - spent);
-        assertEq(deepen.totalUsdcSpent(address(token)), spent);
-        assertEq(deepen.totalLiquidityLocked(address(token)), liquidity);
+        assertEq(deepen.usdcHeld(address(t)), held - spent);
+        assertEq(deepen.totalUsdcSpent(address(t)), spent);
+        assertEq(deepen.totalUsdcBurning(address(t)), splitBurn);
+        assertEq(deepen.totalLiquidityLocked(address(t)), liquidity);
+        if (refDeepen >= 1_000) {
+            assertEq(liquidity > 0, true, "beyond dust the deepen side always adds");
+            assertEq(burned, s.tokensBought - s.tokensAdded);
+        }
     }
 }

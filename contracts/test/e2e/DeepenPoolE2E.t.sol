@@ -4,8 +4,8 @@ pragma solidity ^0.8.28;
 import "./DeepenE2EBase.sol";
 
 /// @notice Deepen pool against the real launchpad, curve, launch pool and router (V13-SPEC §2.3): runs burn on the
-///         curve, add liquidity locked at the burn address in the pool, and leave the plugin holding nothing but the
-///         USDC its books say. Every run is checked by _runDeepen; every step ends with whole-system conservation.
+///         curve; in the pool each run splits one paced offer between burning the token and adding liquidity locked at
+///         the burn address. Every run is checked by _runDeepen; every step ends with whole-system conservation.
 contract DeepenPoolE2ETest is DeepenE2EBase {
     // ─── On the curve ─────────────────────────────────────────────────────────
 
@@ -25,6 +25,7 @@ contract DeepenPoolE2ETest is DeepenE2EBase {
         (uint256 spent, uint256 burned, uint256 liquidity) = _runDeepen(token);
         assertEq(spent, cap, "a full cap, no slippage bound, the block's own time as deadline");
         assertEq(liquidity, 0, "nothing to add before graduation");
+        assertEq(deepen.totalUsdcBurning(token), spent, "the whole curve spend bought tokens to burn");
         assertEq(IERC20(token).totalSupply(), supply - burned);
         assertEq(_pairOf(token).totalSupply(), 0, "the pool stays empty until graduation");
 
@@ -44,7 +45,7 @@ contract DeepenPoolE2ETest is DeepenE2EBase {
 
     /// @dev A run whose offer covers the rest of the curve makes the sell-out buy: the launchpad takes only what the
     ///      last tokens cost, graduates the token inside the run and seeds the pool; the rest of the offer stays held,
-    ///      and the next run, paced from this one, deepens the pool.
+    ///      and the next run, paced from this one, splits between burning and deepening.
     function test_deepen_runThatCrossesGraduation() public {
         address token = _launchDeepen(500);
         (,,, uint256 fullCost,) = _expCurveBuy(token, 1e15);
@@ -63,7 +64,7 @@ contract DeepenPoolE2ETest is DeepenE2EBase {
         assertEq(IERC20(token).balanceOf(DEAD), 0, "burned, not parked at the burn address");
         assertEq(deepen.usdcHeld(token), heldBefore - spent, "the rest of the offer stays held");
 
-        (uint256 offered,) = deepen.previewRun(token);
+        (uint256 offered,,,) = deepen.previewRun(token);
         assertEq(offered, 0, "already ran this block");
         vm.prank(mallory);
         vm.expectRevert(abi.encodeWithSelector(IDeepenPoolPlugin.AlreadyRanThisBlock.selector, token));
@@ -71,17 +72,18 @@ contract DeepenPoolE2ETest is DeepenE2EBase {
 
         _collectDeepen(token); // includes the creator fee of the sell-out buy
         _warp(10 minutes);
-        (,, uint256 liquidity) = _runDeepen(token); // now in the pool, a sixth of the pool's cap
+        (, uint256 burnedInPool, uint256 liquidity) = _runDeepen(token); // now in the pool, a sixth of its cap
         assertGt(liquidity, 0, "the first pool run adds liquidity");
+        assertGt(burnedInPool, 0, "and burns its burn share");
         _assertDeepenSystem();
     }
 
     // ─── In the pool ──────────────────────────────────────────────────────────
 
-    /// @dev The pool run: about half buys through the router, the rest goes in with every token bought, the LP is
-    ///      locked at the burn address, the pool's token reserve ends where it was and its USDC reserve grows, so k
-    ///      and the price both rise; nothing sticks in the plugin.
-    function test_deepen_afterGraduation_addsLiquidityWithLpToDead() public {
+    /// @dev The default half and half: half the offer buys and burns (the pool's token reserve falls by that much),
+    ///      the rest buys and goes back in with the USDC left, the LP locked at the burn address. k and the price both
+    ///      rise; nothing sticks in the plugin.
+    function test_deepen_afterGraduation_burnsHalfAndAddsHalf() public {
         address token = _launchDeepen(700);
         _curveBuy(bob, token, 6_000e6);
         _graduateVia(carol, token);
@@ -93,30 +95,58 @@ contract DeepenPoolE2ETest is DeepenE2EBase {
         uint256 lpBefore = pair.balanceOf(DEAD);
         assertEq(lpBefore, pair.totalSupply(), "at graduation every LP token is locked");
 
-        (uint256 toBuy,) = deepen.previewSplit(token, cap);
-        assertGt(toBuy * 2, cap, "a little over half buys: the buy pays the fees");
-        assertLt(toBuy * 100, cap * 53, "and never much over half (1 / (2 - fee), at most 52.8%)");
-        vm.expectCall(address(router), abi.encodeCall(ILaunchRouter.buy, (token, toBuy, 0, address(deepen), _now())));
+        (uint256 toBurn, uint256 toBuy, uint256 forLiquidity) = deepen.previewSplit(token, cap);
+        assertEq(toBurn, cap / 2, "half the offer burns");
+        assertEq(toBurn + toBuy + forLiquidity, cap);
+        assertGt(toBuy * 2, cap / 2, "a little over half of the deepen side buys: the buy pays the fees");
+        assertLt(toBuy * 100, (cap / 2) * 53, "and never much over half");
         (uint256 spent, uint256 burned, uint256 liquidity) = _runDeepen(token);
 
-        assertEq(burned, 0, "every token bought went back into the pool");
-        assertGt(liquidity, 0);
+        assertGt(burned, 0, "the burn side burned");
+        assertGt(liquidity, 0, "the deepen side added");
         assertLe(cap - spent, 4, "at most the split's rounding stays held");
         (uint256 rtAfter, uint256 ruAfter) = _reserves(token);
-        assertEq(rtAfter, rt, "the token reserve is back where it was");
-        assertGt(ruAfter, ru, "and the USDC reserve grew");
+        assertLt(rtAfter, rt, "the burn side took tokens out of the pool");
+        assertGt(ruAfter, ru, "and every spent unit but the fees went in");
         assertGt(rtAfter * ruAfter, rt * ru, "k grows");
         assertEq(pair.balanceOf(DEAD), lpBefore + liquidity, "the LP is locked forever");
         assertEq(pair.totalSupply(), lpBefore + liquidity, "nobody else holds LP");
-        assertEq(pair.balanceOf(address(deepen)), 0);
+        assertEq(deepen.totalUsdcBurning(token), toBurn);
 
-        // And again an hour later, after the creator fee of its own buy comes back.
+        // And again an hour later, after the creator fee of its own buys comes back.
         _collectDeepen(token);
         _warp(RUN_INTERVAL);
         (,, uint256 more) = _runDeepen(token);
         assertGt(more, 0);
         _poolSell(carol, token, IERC20(token).balanceOf(carol) / 2);
         _poolBuy(dave, token, 3_000e6);
+        _assertDeepenSystem();
+    }
+
+    /// @dev burnBps = 0 is pure deepening: every token a pool run buys goes back into the pool, so its token reserve
+    ///      ends where it was. burnBps = 10,000 is a pure buyback: nothing is ever added.
+    function test_deepen_theTwoEndsOfTheBurnShare() public {
+        address pureDeepen = _launchDeepenBurning(700, 0);
+        address pureBurn = _launchDeepenBurning(700, 10_000);
+        _graduateVia(carol, pureDeepen);
+        _graduateVia(carol, pureBurn);
+        _collectDeepen(pureDeepen);
+        _collectDeepen(pureBurn);
+
+        (uint256 rt,) = _reserves(pureDeepen);
+        (, uint256 burnedD, uint256 liquidityD) = _runDeepen(pureDeepen);
+        (uint256 rtAfter,) = _reserves(pureDeepen);
+        assertEq(burnedD, 0, "nothing burned");
+        assertGt(liquidityD, 0);
+        assertEq(rtAfter, rt, "the token reserve is back where it was");
+        assertEq(deepen.totalUsdcBurning(pureDeepen), 0);
+
+        uint256 lpBefore = _pairOf(pureBurn).totalSupply();
+        (uint256 spentB, uint256 burnedB, uint256 liquidityB) = _runDeepen(pureBurn);
+        assertGt(burnedB, 0);
+        assertEq(liquidityB, 0, "nothing added");
+        assertEq(_pairOf(pureBurn).totalSupply(), lpBefore, "no LP minted");
+        assertEq(deepen.totalUsdcBurning(pureBurn), spentB, "the whole offer bought tokens to burn");
         _assertDeepenSystem();
     }
 
@@ -170,23 +200,25 @@ contract DeepenPoolE2ETest is DeepenE2EBase {
         assertEq(liquidity, 0, "still on the curve: bought and burned");
         _graduateVia(carol, token);
         _warp(RUN_INTERVAL);
-        (,, liquidity) = _runDeepen(token);
-        assertGt(liquidity, 0, "in the pool the top-up deepens the pool");
+        (, uint256 burned, uint256 added) = _runDeepen(token);
+        assertGt(added, 0, "in the pool the top-up deepens the pool");
+        assertGt(burned, 0, "and burns its share");
         _assertDeepenSystem();
     }
 
-    // ─── As a Combo entry, next to Buyback & burn ─────────────────────────────
+    // ─── One plugin instead of two ────────────────────────────────────────────
 
-    /// @dev Half the creator fee to Buyback & burn, half to Deepen pool. Both are configured through the Combo at
-    ///      launch, each collection gives each exactly its slice, and each keeps its own pacing clock: they run in the
-    ///      same blocks and never touch each other's USDC. The creator fee of each plugin's own buys comes back
-    ///      through the Combo and is split again.
+    /// @dev A Combo of Deepen pool and Buyback & burn still works, and is still checked here, but it is what the burn
+    ///      share replaces: the two pace separately, so the token spends two caps an hour instead of one (V13-SPEC
+    ///      §2.3). A single Deepen pool at burnBps = 5,000 does the same two jobs under one budget.
     function test_deepen_comboEntryNextToBuybackFiftyFifty() public {
-        bytes memory data =
-            abi.encode(_addrs(address(deepen), address(buyback)), _u16s(5000, 5000), _datas("", ""));
+        bytes memory data = abi.encode(
+            _addrs(address(deepen), address(buyback)), _u16s(5000, 5000), _datas(abi.encode(uint16(0)), "")
+        );
         address token = _launchWith(alice, 1000, address(combo), data, 0);
         _trackDeepenToken(token);
         assertTrue(deepen.isConfigured(token) && buyback.isConfigured(token));
+        assertEq(deepen.burnBpsOf(token), 0, "the Combo passed the creator's configuration through");
 
         _curveBuy(bob, token, 9_000e6);
         uint256 owed = pad.pendingCreatorFees(token);
@@ -195,12 +227,11 @@ contract DeepenPoolE2ETest is DeepenE2EBase {
         assertEq(buyback.usdcHeld(token), owed - owed / 2);
         assertEq(usdc.balanceOf(address(combo)), 0, "the Combo keeps nothing");
 
-        // Both plugins run in the same block, each with its own budget and its own USDC.
+        // Both plugins run in the same block, each with its own budget and its own USDC: two caps an hour, which is
+        // exactly what a single plugin with a burn share avoids.
         uint256 supply = IERC20(token).totalSupply();
         (uint256 deepenSpent,,) = _runDeepen(token);
         (uint256 buybackSpent,) = _run(token);
-        // Each takes a full cap of the reserve it reads, from its own pot: two paced plugins spend twice the pace
-        // of one (V13-SPEC §2.3, "Two paced plugins on one token").
         assertGt(deepenSpent, 0);
         assertGe(buybackSpent, deepenSpent, "the second run reads the reserve the first one raised");
         assertLe(buybackSpent * 100, deepenSpent * 101, "both are one cap of the same curve");
@@ -208,7 +239,6 @@ contract DeepenPoolE2ETest is DeepenE2EBase {
         assertEq(usdc.balanceOf(address(deepen)), deepen.usdcHeld(token));
         assertEq(usdc.balanceOf(address(buyback)), buyback.usdcHeld(token));
 
-        // The creator fee of both runs comes back through the Combo and is split again.
         uint256 back = pad.pendingCreatorFees(token);
         assertGt(back, 0);
         _collectDeepen(token);
@@ -227,7 +257,8 @@ contract DeepenPoolE2ETest is DeepenE2EBase {
     // ─── Pacing on the real suite ─────────────────────────────────────────────
 
     /// @dev The budget refills in proportion to the time since the last run, fully after an hour, never beyond one
-    ///      cap; a second block in the same second has nothing to buy; another token has its own clock.
+    ///      cap; a second block in the same second has nothing to buy; another token has its own clock. Burning and
+    ///      deepening share that one budget.
     function test_deepen_pacing_onTheRealCurveAndPool() public {
         address a = _launchDeepen(500);
         address b = _launchDeepen(500);
@@ -238,7 +269,7 @@ contract DeepenPoolE2ETest is DeepenE2EBase {
 
         _runDeepen(a); // a full cap
         vm.roll(vm.getBlockNumber() + 1); // the next block, same second
-        (uint256 offer,) = deepen.previewRun(a);
+        (uint256 offer,,,) = deepen.previewRun(a);
         assertEq(offer, 0, "no time has passed: no budget");
         vm.prank(keeper);
         vm.expectRevert(abi.encodeWithSelector(IDeepenPoolPlugin.NothingToBuy.selector, a));
@@ -261,15 +292,16 @@ contract DeepenPoolE2ETest is DeepenE2EBase {
         (, uint256 ru) = _reserves(a);
         assertEq(cap, ru * CAP_BPS / BPS, "in the pool the cap follows the pool's USDC reserve");
         assertEq(budget, cap / 2);
-        _runDeepen(a);
+        (uint256 spent,,) = _runDeepen(a);
+        assertLe(spent, budget, "one budget for both jobs");
         _assertDeepenSystem();
     }
 
     // ─── Dust ─────────────────────────────────────────────────────────────────
 
     /// @dev Below MIN_RUN_USDC (3 units) previewRun is 0 and run reverts NothingToBuy, at 0% and 10% creator fees, on
-    ///      the curve and in the pool; exactly 3 units run, buy at least a token wei and burn it (nothing is left to
-    ///      add).
+    ///      the curve and in the pool; exactly 3 units run, and with the default burn share the burn side gives way so
+    ///      the whole 3 units go through one side rather than wasting the run.
     function test_deepen_dustBelowTheMinimum_previewZeroNothingToBuy() public {
         uint16[2] memory fees = [uint16(0), 1000];
         for (uint256 i; i < 2; ++i) {
@@ -284,7 +316,7 @@ contract DeepenPoolE2ETest is DeepenE2EBase {
                         _topUp(token, frank, 1);
                         continue;
                     }
-                    (uint256 offer,) = deepen.previewRun(token);
+                    (uint256 offer,,,) = deepen.previewRun(token);
                     assertEq(offer, 0, "below the minimum: previewRun 0");
                     vm.prank(keeper);
                     vm.expectRevert(abi.encodeWithSelector(IDeepenPoolPlugin.NothingToBuy.selector, token));
@@ -292,6 +324,9 @@ contract DeepenPoolE2ETest is DeepenE2EBase {
                     _topUp(token, frank, 1);
                 }
                 assertEq(deepen.usdcHeld(token), MIN_RUN_USDC);
+                (uint256 offered, uint256 toBurn, uint256 toDeepen,) = deepen.previewRun(token);
+                assertEq(offered, MIN_RUN_USDC);
+                assertEq(toBurn + toDeepen, MIN_RUN_USDC, "one side gives way, nothing is wasted");
                 (uint256 spent, uint256 burned, uint256 liquidity) = _runDeepen(token);
                 assertEq(spent, MIN_RUN_USDC);
                 assertGt(burned, 0, "the minimum buys and burns at least a token wei");
@@ -303,8 +338,8 @@ contract DeepenPoolE2ETest is DeepenE2EBase {
     }
 
     /// @dev The creator fee a run pays flows back to the plugin, which spends it, and so on: each round returns ~10%
-    ///      (at a 10% creator fee) of the buy half, so it converges, on the curve and in the pool, and never loops.
-    ///      What remains is under MIN_RUN_USDC.
+    ///      (at a 10% creator fee) of what it bought with, so it converges, on the curve and in the pool, and never
+    ///      loops. What remains is under MIN_RUN_USDC.
     function test_deepen_creatorFeeLoopConverges_onCurveAndInPool() public {
         address token = _launchDeepen(1000);
         _curveBuy(bob, token, 300e6);
@@ -325,7 +360,7 @@ contract DeepenPoolE2ETest is DeepenE2EBase {
         (uint256 cap0,) = _deepenBudget(token);
         uint256 maxRounds = deepen.usdcHeld(token) * 10 / (9 * cap0) + 40;
         while (true) {
-            (uint256 offer,) = deepen.previewRun(token);
+            (uint256 offer,,,) = deepen.previewRun(token);
             if (offer == 0) {
                 assertLt(deepen.usdcHeld(token), MIN_RUN_USDC, "only dust under the minimum is left");
                 vm.prank(keeper);
@@ -343,15 +378,20 @@ contract DeepenPoolE2ETest is DeepenE2EBase {
 
     // ─── Fuzz ─────────────────────────────────────────────────────────────────
 
-    /// @dev Any creator fee, any pool state (random trades first) and any pot: a pool run buys the documented share,
-    ///      adds every token it bought at the pool's ratio, locks the LP at the burn address, leaves at most 4 units
-    ///      behind and keeps nothing.
+    /// @dev Any creator fee, any burn share, any pool state (random trades first) and any pot: the run splits its one
+    ///      offer as burnBps says, burns what it burns out of the pool, adds every token the deepen side bought beyond
+    ///      dust, locks the LP at the burn address, leaves at most 4 units behind and keeps nothing.
     /// forge-config: default.fuzz.runs = 128
-    function testFuzz_deepen_poolRunAddsEverythingItBuys(uint16 bpsRaw, uint64 tradeRaw, uint64 potRaw, bool sellFirst)
-        public
-    {
+    function testFuzz_deepen_poolRunSplitsBurningAndDeepening(
+        uint16 bpsRaw,
+        uint16 burnRaw,
+        uint64 tradeRaw,
+        uint64 potRaw,
+        bool sellFirst
+    ) public {
         uint16 bps = uint16(bound(bpsRaw, 0, 1000));
-        address token = _launchDeepen(bps);
+        uint16 burnBps = uint16(bound(burnRaw, 0, 10_000));
+        address token = _launchDeepenBurning(bps, burnBps);
         _graduateVia(carol, token);
         if (sellFirst) _poolSell(carol, token, IERC20(token).balanceOf(carol) / 3);
         _poolBuy(bob, token, bound(tradeRaw, 1e6, 200_000e6));
@@ -361,7 +401,7 @@ contract DeepenPoolE2ETest is DeepenE2EBase {
         (uint256 rt, uint256 ru) = _reserves(token);
         LaunchPair pair = _pairOf(token);
         uint256 lpDead = pair.balanceOf(DEAD);
-        (uint256 offer,) = deepen.previewRun(token);
+        (uint256 offer, uint256 toBurn, uint256 toDeepen,) = deepen.previewRun(token);
         (uint256 spent, uint256 burned, uint256 liquidity) = _runDeepen(token);
 
         (uint256 rtAfter, uint256 ruAfter) = _reserves(token);
@@ -369,12 +409,16 @@ contract DeepenPoolE2ETest is DeepenE2EBase {
         assertGt(ruAfter, ru, "the pool's USDC side grew");
         assertGe(rtAfter * ruAfter, rt * ru, "k never falls");
         assertEq(pair.balanceOf(DEAD), lpDead + liquidity);
-        // Tokens that did not fit the add are burned: at most about 2 units' worth.
-        assertLe(burned * ruAfter, 2 * rtAfter + rtAfter / 1e6, "at most ~2 units' worth burned");
-        if (offer >= 1_000) {
-            assertEq(burned, 0, "beyond dust every token bought goes into the pool");
-            assertEq(rtAfter, rt, "so the token reserve is unchanged");
-            assertGt(liquidity, 0);
+        if (toBurn == 0) {
+            assertEq(deepen.totalUsdcBurning(token), 0, "nothing burns when the burn side is empty");
+            if (toDeepen >= 1_000) {
+                assertEq(burned, 0, "beyond dust every token bought goes into the pool");
+                assertEq(rtAfter, rt, "so the token reserve is unchanged");
+                assertGt(liquidity, 0);
+            }
+        } else {
+            assertGt(burned, 0, "the burn side burned");
+            assertLt(rtAfter, rt, "and its tokens came out of the pool");
         }
         _assertDeepenSystem();
     }

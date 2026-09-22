@@ -32,8 +32,10 @@ a plugin isn't listed.
    or adds liquidity in a separate, permissionless function, as Buyback & burn's and Deepen pool's `run` do. If
    anyone can trigger it, pace it by time, not by block: a trader can hold across blocks, and on Arc blocks come
    faster than one a second (V13-SPEC §2.2, §2.3). Work out, and write down, how long a trader has to hold before
-   front-running your runs pays, and remember that the pacing is per plugin: a Combo holding two paced plugins
-   spends twice as fast and halves that time (V13-SPEC §2.3).
+   front-running your runs pays. The pacing is per plugin, so two paced plugins on one token spend twice as fast and
+   roughly halve that time: if your plugin does two things with a token's fees, do them under **one** budget and one
+   clock, as Deepen pool does with its burn share, rather than asking creators to pair two plugins in a Combo
+   (V13-SPEC §2.3).
 6. **Pay out by pull, not push.** One bad recipient must never block the others.
 7. **A broken plugin strands fees.** If `onFees` reverts, that token's fees stay with the launchpad forever
    (owner decision D10). Test like it.
@@ -54,6 +56,9 @@ balances, not on what you tell it:
   transfer sitting in a pair can be skimmed by anyone.
 - Compute the LP the pair's formula owes your deposit and check what you were minted against it, and send the LP
   somewhere it can never come back from (Deepen pool mints it to `0x…dEaD`).
+- Say what each part of a run does to the price. Buying and burning takes tokens out of the pool and leaves the USDC
+  in, so it moves the price about twice as far per USDC as buying and adding does, which is why Deepen pool's
+  front-running bound depends on its burn share (V13-SPEC §2.3).
 
 ## Checklist
 

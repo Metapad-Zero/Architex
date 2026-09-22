@@ -32,6 +32,7 @@ contract DeepenInvariantHandler is Test {
     mapping(address token => uint256) public ghostLockedByRuns; // LP the runs minted to the burn address
     mapping(address token => uint256) public ghostStrayLpLocked; // stray LP the runs passed on
     uint256 public violations;
+    uint256 public lastViolation; // which rule broke, for diagnosis
     // Coverage
     uint256 public runs;
     uint256 public poolRuns;
@@ -143,15 +144,21 @@ contract DeepenInvariantHandler is Test {
 
     function run(uint256 w, bool tryAgain) external {
         address t = _token(w);
-        (uint256 offered, bool graduated) = deepen.previewRun(t);
+        (uint256 offered, uint256 toBurn, uint256 toDeepen, bool graduated) = deepen.previewRun(t);
         if (offered == 0) return;
+        if (toBurn + toDeepen != offered) { violations += 1; lastViolation = 1; }
         ILaunchPair pair = ILaunchPair(pad.pairOf(t));
         uint256 heldBefore = deepen.usdcHeld(t);
         uint256 cap = (graduated ? _reserveUsdc(pair) : pad.virtualUsdcOf(t)) * 25 / 10_000;
         uint256 deadBefore = pair.balanceOf(DEAD);
-        uint256 kBefore = _k(pair);
+        // Baselines from the pair's balances, which is what the run's own sync sets its reserves to (a donation sitting
+        // in the pair is folded in there, not taken from anyone).
+        uint256 tokenBaseline = IERC20(t).balanceOf(address(pair));
+        uint256 kBefore = tokenBaseline * usdc.balanceOf(address(pair));
         uint256 strayLp = ghostStrayLp[t];
-        if (ghostStrayTokens[t] != 0 || strayLp != 0) strayRuns += 1;
+        uint256 strayTokens = ghostStrayTokens[t];
+        if (strayTokens != 0 || strayLp != 0) strayRuns += 1;
+        uint256 burningBefore = deepen.totalUsdcBurning(t);
 
         (uint256 spent, uint256 burned, uint256 liquidity) = deepen.run(t);
         runs += 1;
@@ -159,16 +166,23 @@ contract DeepenInvariantHandler is Test {
         else if (spent < offered) sellOutRuns += 1;
 
         // Per-run properties. Any failure is counted here so a handler revert can never hide it.
-        if (spent > offered || spent > cap || spent > heldBefore) violations += 1;
-        if (graduated && offered - spent > 4) violations += 1;
-        if (IERC20(t).balanceOf(address(deepen)) != 0) violations += 1;
-        if (pair.balanceOf(address(deepen)) != 0) violations += 1;
-        if (usdc.allowance(address(deepen), address(pad)) != 0) violations += 1;
-        if (usdc.allowance(address(deepen), address(router)) != 0) violations += 1;
-        if (pair.balanceOf(DEAD) != deadBefore + liquidity + (graduated ? strayLp : 0)) violations += 1;
-        if (graduated && _k(pair) < kBefore) violations += 1;
-        if (!graduated && (liquidity != 0 || burned == 0)) violations += 1;
-        if (deepen.usdcHeld(t) != heldBefore - spent) violations += 1;
+        if (spent > offered || spent > cap || spent > heldBefore) { violations += 1; lastViolation = 2; }
+        if (graduated && offered - spent > 4) { violations += 1; lastViolation = 3; }
+        if (IERC20(t).balanceOf(address(deepen)) != 0) { violations += 1; lastViolation = 4; }
+        if (pair.balanceOf(address(deepen)) != 0) { violations += 1; lastViolation = 5; }
+        if (usdc.allowance(address(deepen), address(pad)) != 0) { violations += 1; lastViolation = 6; }
+        if (usdc.allowance(address(deepen), address(router)) != 0) { violations += 1; lastViolation = 7; }
+        if (pair.balanceOf(DEAD) != deadBefore + liquidity + (graduated ? strayLp : 0)) { violations += 1; lastViolation = 8; }
+        if (graduated && _k(pair) < kBefore) { violations += 1; lastViolation = 9; }
+        if (!graduated && (liquidity != 0 || burned == 0)) { violations += 1; lastViolation = 10; }
+        if (deepen.usdcHeld(t) != heldBefore - spent) { violations += 1; lastViolation = 11; }
+        // The burn side is what burnBps says, and only it takes tokens out of the pool for good.
+        if (deepen.totalUsdcBurning(t) - burningBefore != (graduated ? toBurn : spent)) { violations += 1; lastViolation = 12; }
+        // Every token a run burns came out of the pool, except what was sent to the plugin directly: the pool's token
+        // reserve falls by exactly that much (and not at all when the add takes everything the deepen side bought).
+        if (graduated && _reserveToken(pair) + burned != tokenBaseline + strayTokens) { violations += 1; lastViolation = 13; }
+        if (graduated && toBurn != 0 && burned == 0) { violations += 1; lastViolation = 14; }
+        if (graduated && toDeepen == 0 && liquidity != 0) { violations += 1; lastViolation = 15; }
 
         ghostStrayTokens[t] = 0;
         ghostLockedByRuns[t] += liquidity;
@@ -179,7 +193,7 @@ contract DeepenInvariantHandler is Test {
 
         if (tryAgain) {
             try deepen.run(t) {
-                violations += 1; // a second run in the same block must fail
+                { violations += 1; lastViolation = 16; } // a second run in the same block must fail
             } catch {}
         }
     }
@@ -273,6 +287,11 @@ contract DeepenInvariantHandler is Test {
         ILaunchPair(pad.pairOf(t)).skim(_actor(a));
     }
 
+    function _reserveToken(ILaunchPair pair) internal view returns (uint256) {
+        (uint112 rt,,) = pair.getReserves();
+        return rt;
+    }
+
     function _reserveUsdc(ILaunchPair pair) internal view returns (uint256) {
         (, uint112 ru,) = pair.getReserves();
         return ru;
@@ -293,10 +312,15 @@ contract DeepenPoolInvariantTest is LaunchpadV13Base {
         super.setUp();
         deepen = new DeepenPoolPlugin(address(pad));
 
+        // Three creator fees and three burn shares: pure deepening, the default half and half, and pure burning.
         vm.startPrank(alice);
-        tokenList.push(pad.createToken("Zero", "ZERO", "", 0, address(deepen), "", 0, 0, type(uint256).max));
+        tokenList.push(
+            pad.createToken("Zero", "ZERO", "", 0, address(deepen), abi.encode(uint16(0)), 0, 0, type(uint256).max)
+        );
         tokenList.push(pad.createToken("One", "ONE", "", 100, address(deepen), "", 0, 0, type(uint256).max));
-        tokenList.push(pad.createToken("Ten", "TEN", "", 1000, address(deepen), "", 0, 0, type(uint256).max));
+        tokenList.push(
+            pad.createToken("Ten", "TEN", "", 1000, address(deepen), abi.encode(uint16(10_000)), 0, 0, type(uint256).max)
+        );
         vm.stopPrank();
         // One token starts graduated, so pool runs happen from the first call.
         _graduate(tokenList[2]);
@@ -331,6 +355,13 @@ contract DeepenPoolInvariantTest is LaunchpadV13Base {
         }
     }
 
+    /// @dev The burn shares the creators chose are what the plugin uses, for good.
+    function invariant_burnSharesAreFixed() public view {
+        assertEq(deepen.burnBpsOf(tokenList[0]), 0);
+        assertEq(deepen.burnBpsOf(tokenList[1]), deepen.DEFAULT_BURN_BPS());
+        assertEq(deepen.burnBpsOf(tokenList[2]), 10_000);
+    }
+
     /// @dev Every LP token the runs minted, and every stray LP they passed on, is at the burn address; the plugin's
     ///      books agree.
     function invariant_everyLpTokenIsLocked() public view {
@@ -346,7 +377,7 @@ contract DeepenPoolInvariantTest is LaunchpadV13Base {
     }
 
     function invariant_perRunPropertiesHold() public view {
-        assertEq(handler.violations(), 0, "a run broke one of its own rules");
+        assertEq(handler.violations(), 0, string.concat("a run broke rule ", vm.toString(handler.lastViolation())));
     }
 
     /// @dev V13-SPEC §6.1: the launchpad is still solvent to the unit through all of it.

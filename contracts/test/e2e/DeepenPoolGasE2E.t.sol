@@ -81,10 +81,20 @@ contract DeepenPoolGasE2ETest is DeepenE2EBase {
         // Pool runs: the first one for this token, then a later one (warm-ish slots, a fresh LP mint each time).
         _collectDeepen(x);
         _warp(RUN_INTERVAL);
-        _gasRun("Deepen.run (pool, buy + add + LP to dead)", x);
+        _gasRun("Deepen.run (pool, default burn share: two buys + add + LP to dead)", x);
         _collectDeepen(x);
         _warp(RUN_INTERVAL);
         _gasRun("Deepen.run (pool, later run)", x);
+
+        // The two ends of the burn share: a pure buyback (one buy, no add) and pure deepening (one buy, an add).
+        address pureBurn = _launchDeepenBurning(1000, 10_000);
+        _curveBuy(bob, pureBurn, 1_000_000e6);
+        _collectDeepen(pureBurn);
+        _gasRun("Deepen.run (pool, burnBps 10,000: buy and burn)", pureBurn);
+        address pureDeepen = _launchDeepenBurning(1000, 0);
+        _curveBuy(bob, pureDeepen, 1_000_000e6);
+        _collectDeepen(pureDeepen);
+        _gasRun("Deepen.run (pool, burnBps 0: buy and add)", pureDeepen);
 
         // A pool run with tokens and LP sent to the plugin: the add, a burn and the stray LP forwarded.
         _poolBuy(dave, x, 2_000e6);
