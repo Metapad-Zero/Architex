@@ -4,7 +4,7 @@ export function DocsFees() {
       <p>
         Every launch token carries a creator fee: a percentage, from 0% to 10%, taken from every
         buy and every sell of that token. The creator picks it when they launch, and it's locked
-        for good from then on — nobody can raise it, lower it, or switch it off, the creator
+        for good from then on: nobody can raise it, lower it, or switch it off, the creator
         included. The fee applies on the curve and keeps applying in the token's launch pool
         after it graduates. The creator's own first buy pays it too.
       </p>
@@ -31,7 +31,7 @@ export function DocsFees() {
       </p>
       <p>
         Fees don't move during a trade. They wait in the launchpad, counted separately for each
-        token, until someone collects them — and anyone can, at any time, with the Collect
+        token, until someone collects them. Anyone can, at any time, with the Collect
         creator fees button on the token's page. Collecting sends them to the token's destination
         and nowhere else. Because a trade never touches the destination, no plugin can slow down
         or block trading, whatever it does.
@@ -51,8 +51,8 @@ export function DocsFees() {
         (or of the launch pool, after graduation) per hour, the budget building back up over the
         hour after each run. A run takes no price limit on purpose. Because of the pacing, a
         trader who buys ahead of the buybacks to sell into them pays both fees coming and going
-        and has to hold for hours before that pays off — about three hours at a 0.5% creator fee,
-        about two days at 10% — and by then they're just a holder.
+        and has to hold for hours before that pays off (about three hours at a 0.5% creator fee,
+        about two days at 10%), and by then they're just a holder.
       </p>
       <p>
         Burning lowers the total supply, but it doesn't raise anyone's share of holder dividends:
@@ -88,8 +88,8 @@ export function DocsFees() {
 
       <h3 className="mt-6 text-base font-semibold text-ink">When a destination breaks</h3>
       <p>
-        If collecting to a token's destination fails — a plugin with a bug, an address USDC
-        refuses to pay — the collection is undone and the fees stay in the launchpad. Trading
+        If collecting to a token's destination fails (a plugin with a bug, an address USDC
+        refuses to pay), the collection is undone and the fees stay in the launchpad. Trading
         carries on exactly as before, and nobody, Architex included, can send those fees anywhere
         else. That's the cost of a destination nobody can change: a broken one keeps its fees.
       </p>

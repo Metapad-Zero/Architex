@@ -6,7 +6,7 @@ import { listedPluginAt } from '../content/plugins/registry'
 import { useConnectSheet } from '../hooks/useConnectSheet'
 import { useCreatorFees, type CreatorFeeAction } from '../hooks/useCreatorFees'
 import { useSwitchToArc } from '../hooks/useSwitchToArc'
-import { formatAmount, formatPct, shortAddress } from '../lib/format'
+import { GHOST, formatAmount, formatPct, shortAddress } from '../lib/format'
 import type { LaunchRecord } from '../lib/launch'
 import { destinationLabel, destinationName, feeDestination } from '../lib/plugins/destination'
 import { dividendStatus, roughly } from '../lib/plugins/holders'
@@ -15,8 +15,6 @@ import { FeeGauge } from './FeeGauge'
 import { GhostButton } from './GhostButton'
 import { ExternalLinkIcon } from './Icons'
 import { TxStatus } from './TxStatus'
-
-const GHOST = '—'
 
 function usdc(value: bigint): string {
   return `${formatAmount(value, 6)} USDC`
@@ -215,7 +213,7 @@ function HoldersPanel({ holders, symbol, busy, status, run, claim, connected }: 
           <div>
             <dt>Rate</dt>
             <dd className={stream.kind === 'paused' ? 'text-g500' : ''}>
-              {stream.kind === 'paused' ? 'Paused — no holders yet' : perHourText(stream.perHour)}
+              {stream.kind === 'paused' ? 'Paused (no holders yet)' : perHourText(stream.perHour)}
             </dd>
           </div>
         )}

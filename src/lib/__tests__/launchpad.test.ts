@@ -55,8 +55,8 @@ describe('launchpad copy and validation', () => {
   })
 
   test('explains the review’s new refusals', () => {
-    expect(explainRevert('Expired')).toBe('Took too long — the deadline passed before it confirmed. Try again.')
-    expect(explainRevert('DataForNonPlugin')).toBe('That address isn’t a plugin, so it can’t take settings — clear them or pick a listed plugin.')
+    expect(explainRevert('Expired')).toBe('Took too long: the deadline passed before it confirmed. Try again.')
+    expect(explainRevert('DataForNonPlugin')).toBe('That address isn’t a plugin, so it can’t take settings. Clear them or pick a listed plugin.')
     expect(explainRevert('InvalidPlugin')).toContain('a launch token or a launch pool')
     expect(explainRevert('InvalidRecipient')).toContain('the launch router or pair factory')
   })

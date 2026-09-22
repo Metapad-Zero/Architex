@@ -22,11 +22,11 @@ export function DocsRisks() {
         language it wouldn't choose itself.
       </p>
       <p>
-        That stance has limits. Architex will remove content that's genuinely heinous — illegal
-        material, not merely distasteful — and will act against programs abusing the platform
+        That stance has limits. Architex will remove content that's genuinely heinous (illegal
+        material, not merely distasteful) and will act against programs abusing the platform
         mechanically, such as bots spamming launches. If a risk score for a token ever appears on
         this site, it will come from an independent third party, not from a judgment Architex
-        makes itself — the platform reviewing its own listings for "riskiness" is exactly the kind
+        makes itself. The platform reviewing its own listings for "riskiness" is exactly the kind
         of gatekeeping it's trying to avoid. None of this amounts to due diligence on any specific
         token. Treat every launch as unverified until you've checked it yourself.
       </p>
@@ -36,7 +36,7 @@ export function DocsRisks() {
         One address, held on a hardware wallet, can redirect where the platform's own trading and
         launch fees go and change the flat launch fee (capped, so it can never be raised past a
         small ceiling, and never above the fee a creator's launch agreed to). That's the entire
-        admin surface — no pause, no upgrade, no access to any curve's funds, and no power over
+        admin surface. There's no pause, no upgrade, no access to any curve's funds, and no power over
         any token's creator fee, its destination, its curve or its pool. It only ever moves where
         the protocol's own fee revenue lands, never anyone's trade, deposit, holdings or creator
         fees.
@@ -96,7 +96,7 @@ export function DocsRisks() {
 
       <h3 className="mt-6 text-base font-semibold text-ink">Curves can stall, and graduation isn't a promise of anything</h3>
       <p>
-        A curve only advances when people buy. If buying stops, the curve just sits there — there
+        A curve only advances when people buy. If buying stops, the curve just sits there. There
         is no deadline, no refund, and no mechanism that forces it forward. Graduating to a real
         pool is a statement about how much USDC has gone into the curve, not a judgment about the
         token's quality, and it doesn't guarantee that trading interest continues afterward.

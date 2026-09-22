@@ -1,7 +1,7 @@
 import { useId, useRef } from 'react'
 import type { Address } from 'viem'
 import { LISTED_PLUGINS, isPluginDeployed, listedPlugin, type ListedPluginKind } from '../content/plugins/registry'
-import { formatPct, shortAddress } from '../lib/format'
+import { GHOST, formatPct, shortAddress } from '../lib/format'
 import {
   MAX_COMBO_ENTRIES,
   MAX_PAYEES,
@@ -140,7 +140,7 @@ function PayeeList({ idPrefix, payees, onChange, errors, prefix, showErrors }: P
         const addressKey = `${prefix}payee:${row.id}:address`
         const shareKey = `${prefix}payee:${row.id}:share`
         const share = shares[index] ?? 0n
-        const percent = total > 0n && share > 0n ? formatPct((share * 10_000n) / total) : '—'
+        const percent = total > 0n && share > 0n ? formatPct((share * 10_000n) / total) : GHOST
         const rowErrors = [addressKey, shareKey].filter((key) => showErrors && errors[key]).map((key) => `${idPrefix}-${key}`)
         return (
           <div key={row.id} className="payee-row">

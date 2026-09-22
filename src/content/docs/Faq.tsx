@@ -4,7 +4,7 @@ export function DocsFaq() {
       <div className="space-y-2">
         <h3 className="text-base font-semibold text-ink">Can I get my tokens back if I change my mind about a buy?</h3>
         <p>
-          Sell them back into the curve, same as any other trade — there's no cooldown or lockup.
+          Sell them back into the curve, same as any other trade. There's no cooldown or lockup.
           You'll get back less than you paid if the price has moved against you since, the same
           as selling into any market.
         </p>
@@ -21,7 +21,7 @@ export function DocsFaq() {
         <h3 className="text-base font-semibold text-ink">Can a creator change their fee later, or where it goes?</h3>
         <p>
           No. Both are set when the token is created and locked for good. Nobody can raise the
-          fee, lower it, or point it somewhere else — not the creator, not Architex.
+          fee, lower it, or point it somewhere else: not the creator, not Architex.
         </p>
       </div>
       <div className="space-y-2">
@@ -56,8 +56,8 @@ export function DocsFaq() {
           <div>
             <dt className="font-semibold text-ink">Bonding curve</dt>
             <dd className="text-g700">
-              A formula that prices a token from two reserve numbers instead of an order book —
-              see <span className="font-semibold">How the curve works</span>.
+              A formula that prices a token from two reserve numbers instead of an order book.
+              See <span className="font-semibold">How the curve works</span>.
             </dd>
           </div>
           <div>
@@ -70,7 +70,7 @@ export function DocsFaq() {
           <div>
             <dt className="font-semibold text-ink">Market cap (pre-graduation)</dt>
             <dd className="text-g700">
-              The curve's current price multiplied by the token's full supply — a size figure,
+              The curve's current price multiplied by the token's full supply. It's a size figure,
               not a claim about real USDC raised.
             </dd>
           </div>
@@ -78,7 +78,7 @@ export function DocsFaq() {
             <dt className="font-semibold text-ink">Graduation</dt>
             <dd className="text-g700">
               The one-way move from curve to the token's launch pool once the curve's 800 million
-              tokens sell out — see <span className="font-semibold">Graduation</span>.
+              tokens sell out. See <span className="font-semibold">Graduation</span>.
             </dd>
           </div>
           <div>
@@ -92,7 +92,7 @@ export function DocsFaq() {
             <dt className="font-semibold text-ink">Plugin</dt>
             <dd className="text-g700">
               A contract a token's creator fees can be sent to, which does something with them:
-              splits them, buys the token back and burns it, or pays holders — see{' '}
+              splits them, buys the token back and burns it, or pays holders. See{' '}
               <span className="font-semibold">Creator fees &amp; plugins</span>.
             </dd>
           </div>

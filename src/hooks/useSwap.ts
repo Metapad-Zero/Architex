@@ -103,7 +103,7 @@ export function useSwap({
       case 'approving':
         return `Approving ${tokenIn?.symbol ?? 'token'}…`
       case 'quoteMoved':
-        return 'Quote moved — review'
+        return 'Review new quote'
       case 'pending':
         return 'Swapping…'
       case 'ready':
@@ -217,9 +217,9 @@ export function useSwap({
   // One quiet line under the button that says where the user is in a two-step approve→swap.
   const hint = useMemo(() => {
     const symbol = tokenIn?.symbol ?? 'token'
-    if (buttonState === 'needsApproval') return `Step 1 of 2 — approve ${symbol} once, then swap.`
-    if (buttonState === 'approving') return `Step 1 of 2 — waiting for the ${symbol} approval to confirm.`
-    if (buttonState === 'ready' && approvedThisSession) return 'Step 2 of 2 — approved. Swap when you are ready.'
+    if (buttonState === 'needsApproval') return `Step 1 of 2: approve ${symbol} once, then swap.`
+    if (buttonState === 'approving') return `Step 1 of 2: waiting for the ${symbol} approval to confirm.`
+    if (buttonState === 'ready' && approvedThisSession) return 'Step 2 of 2: approved. Swap when you are ready.'
     if (buttonState === 'quoteMoved') return 'The pool moved while you were reading. Check the new amounts, then swap again.'
     return undefined
   }, [approvedThisSession, buttonState, tokenIn])

@@ -4,7 +4,7 @@ import { useAccount, useBalance, useConfig, useConnect, useConnectors, useDiscon
 import { connect as connectWith } from 'wagmi/actions'
 import { activeChain, addressExplorerUrl } from '../chain'
 import { isUserRejection } from '../lib/errors'
-import { formatAmount, shortAddress } from '../lib/format'
+import { GHOST, formatAmount, shortAddress } from '../lib/format'
 import { isPasskeyKind, passkeysAvailable, UnlockCancelledError, type KeystoreKind } from '../lib/keystore'
 import {
   createLocalWallet,
@@ -385,7 +385,7 @@ function ConnectSheetBody({ notice, onPhoneWallet }: ConnectSheetBodyProps) {
             </div>
             <div>
               <dt>USDC balance</dt>
-              <dd>{balance ? formatAmount(balance.value, balance.decimals) : '—'}</dd>
+              <dd>{balance ? formatAmount(balance.value, balance.decimals) : GHOST}</dd>
             </div>
             {usingLocal && local.protection && (
               <div>
@@ -399,7 +399,7 @@ function ConnectSheetBody({ notice, onPhoneWallet }: ConnectSheetBodyProps) {
               <p className="text-sm leading-6 text-g700">{custodySentence(local.protection)}</p>
               {revealedKey ? (
                 <div className="mt-3">
-                  <p className="text-sm leading-6 text-g700">Private key — never share it. Anyone holding it controls the wallet.</p>
+                  <p className="text-sm leading-6 text-g700">Never share this private key. Anyone holding it controls the wallet.</p>
                   <p className="mt-1 break-all text-sm font-semibold leading-snug">{revealedKey}</p>
                   <GhostButton className="mt-3" onClick={() => void copy(revealedKey, 'key')}>{copied === 'key' ? 'Copied' : 'Copy key'}</GhostButton>
                 </div>

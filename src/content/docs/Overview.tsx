@@ -14,7 +14,7 @@ export function DocsOverview() {
         and burns it, or pays it to holders. Both are chosen at launch and locked for good.
       </p>
       <p>
-        That's the whole idea. Everything past this page is detail — how the price actually
+        That's the whole idea. Everything past this page is detail: how the price actually
         moves, what a creator commits to permanently, what changes the moment a token graduates
         into Architex's regular AMM, and what you're accepting by putting real USDC into
         something that started an hour ago with no track record.
@@ -22,7 +22,7 @@ export function DocsOverview() {
       <p>
         Two things worth knowing before any of that: Architex's contracts have not been
         audited by a third party, and nobody at Architex reviews a launch before it goes live.
-        Both of those are load-bearing design choices, not oversights — see{' '}
+        Both of those are load-bearing design choices, not oversights. See{' '}
         <span className="font-semibold">Risks</span> for why.
       </p>
     </div>

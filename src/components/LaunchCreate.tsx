@@ -9,7 +9,7 @@ import { useLaunch } from '../hooks/useLaunch'
 import { useSettings } from '../hooks/useSettings'
 import { parseOptionalAmount, sanitizeAmount } from '../lib/amountInput'
 import { deployment, launchSuite } from '../lib/deployment'
-import { formatAmount, formatPct } from '../lib/format'
+import { GHOST, formatAmount, formatPct } from '../lib/format'
 import { metadataStatus } from '../lib/ipfs'
 import { NAME_MAX_BYTES, SYMBOL_MAX_BYTES, utf8ByteLength } from '../lib/launch'
 import { MAX_CREATOR_FEE_BPS, parsePercentBps, planFeePlugin, type FeePlan } from '../lib/plugins/plan'
@@ -27,8 +27,6 @@ import { useSwitchToArc } from '../hooks/useSwitchToArc'
 interface LaunchCreateProps {
   onCreated: (token: Address) => void
 }
-
-const GHOST = '—'
 
 export function LaunchCreate({ onCreated }: LaunchCreateProps) {
   const { address } = useAccount()

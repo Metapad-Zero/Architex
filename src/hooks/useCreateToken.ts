@@ -235,9 +235,9 @@ export function useCreateToken({
   ])
 
   const hint = useMemo(() => {
-    if (buttonState === 'needsApproval') return 'Step 1 of 2 — approve USDC once, then create.'
-    if (buttonState === 'approving') return 'Step 1 of 2 — waiting for the USDC approval to confirm.'
-    if (buttonState === 'ready' && approvedThisSession) return 'Step 2 of 2 — approved. Create when you are ready.'
+    if (buttonState === 'needsApproval') return 'Step 1 of 2: approve USDC once, then create.'
+    if (buttonState === 'approving') return 'Step 1 of 2: waiting for the USDC approval to confirm.'
+    if (buttonState === 'ready' && approvedThisSession) return 'Step 2 of 2: approved. Create when you are ready.'
     return undefined
   }, [approvedThisSession, buttonState])
 

@@ -6,7 +6,7 @@ export function DocsCurve() {
         that answers "what does the next unit cost" using only two numbers, a USDC side and a
         token side, multiplied together to a constant. Buy tokens and the USDC side goes up while
         the token side goes down; sell and it runs the other way. The product of the two never
-        changes except when a fee is added to it. That's the entire mechanism — everything else
+        changes except when a fee is added to it. That's the entire mechanism. Everything else
         in this section is what falls out of it.
       </p>
 
@@ -14,7 +14,7 @@ export function DocsCurve() {
       <p>
         A curve that opened at literally nothing on one side would either divide by zero or hand
         its whole supply to the first buyer for free. So every curve starts with virtual
-        reserves — Architex pretends there's already USDC and tokens sitting against each other,
+        reserves: Architex pretends there's already USDC and tokens sitting against each other,
         even though no one has deposited either. That imaginary starting point is what makes the
         first token cost a sane, low amount instead of nothing, and it's why a launch has a market
         cap (currently a little over $6,250) before a single person has bought in. As real USDC
@@ -25,11 +25,11 @@ export function DocsCurve() {
       <h3 className="mt-6 text-base font-semibold text-ink">What buying actually costs</h3>
       <p>
         Because the two sides multiply to a constant, price rises with every purchase, and it
-        rises faster the further along the curve you are — the same way a $100 order moves a
+        rises faster the further along the curve you are, the same way a $100 order moves a
         thin order book more than a $100,000 order moves a deep one. Concretely: the first $100
         put into a fresh curve buys around 1.26% of everything that will ever be sold on it. A
         $1,000 buy on the curve at its current size moves the price by roughly 4.3%. Put twice as
-        much in and you don't get twice the tokens — you get less than that, because you're
+        much in and you don't get twice the tokens. You get less than that, because you're
         paying a rising price the whole way, not one fixed price. The app shows you the exact
         quote, including how much the price will move, before you confirm anything.
       </p>
@@ -39,7 +39,7 @@ export function DocsCurve() {
         Every buy and every sell on the curve carries two fees, both in USDC: the platform's 0.5%,
         and the token's own creator fee, anywhere from 0% to 10%, set by its creator at launch and
         fixed for good. Neither goes back into the curve. The creator fee goes where the creator
-        chose — see <span className="font-semibold">Creator fees &amp; plugins</span> — and the
+        chose (see <span className="font-semibold">Creator fees &amp; plugins</span>), and the
         platform fee to the protocol's fee address.
       </p>
       <p>
@@ -50,11 +50,11 @@ export function DocsCurve() {
 
       <h3 className="mt-6 text-base font-semibold text-ink">What ends it</h3>
       <p>
-        A curve sells a fixed pool of tokens — 800 million of the token's 1 billion total supply.
+        A curve sells a fixed pool of tokens: 800 million of the token's 1 billion total supply.
         Once all 800 million are sold, the curve is done and the token graduates into its own
         launch pool; see <span className="font-semibold">Graduation</span>. Nothing else stops a curve
-        early. If buying just stops, the curve stops too, sitting wherever it was — there's no
-        deadline and no penalty for that, it just doesn't graduate.
+        early. If buying just stops, the curve stops too, sitting wherever it was. There's no
+        deadline and no penalty for that; it just doesn't graduate.
       </p>
     </div>
   )

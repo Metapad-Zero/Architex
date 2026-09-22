@@ -2,7 +2,7 @@ import { useState } from 'react'
 import type { Address } from 'viem'
 import { useConnectSheet } from '../hooks/useConnectSheet'
 import { useBridge } from '../hooks/useBridge'
-import { formatAmount } from '../lib/format'
+import { GHOST, formatAmount } from '../lib/format'
 import type { BridgeSide, ForeignChain } from '../lib/cctp'
 import type { Token } from '../lib/tokens'
 import { AmountField } from './AmountField'
@@ -10,8 +10,6 @@ import { FlipIcon } from './Icons'
 import { GhostButton } from './GhostButton'
 import { PrimaryButton } from './PrimaryButton'
 import { TxStatus } from './TxStatus'
-
-const GHOST = '—'
 
 function usdcToken(address: string): Token {
   return { address: address as Address, symbol: 'USDC', name: 'USD Coin', decimals: 6, faucet: false }

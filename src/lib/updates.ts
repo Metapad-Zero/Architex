@@ -33,7 +33,7 @@ export const PRODUCT_UPDATES: readonly ProductUpdate[] = [
   {
     id: 'docs',
     title: 'How the curve works',
-    body: 'The docs cover the curve, launching, graduation, and the risks — including that the contracts have not been audited by a third party, and that nobody reviews a launch before it goes live.',
+    body: 'The docs cover the curve, launching, graduation, and the risks, including that the contracts have not been audited by a third party and that nobody reviews a launch before it goes live.',
     action: { label: 'Open Docs', view: 'docs' },
     figure: 'docs',
   },

@@ -2,8 +2,8 @@ export function DocsTrading() {
   return (
     <div className="space-y-4">
       <p>
-        Buying and selling a launch token works like any other trade in the app — enter an amount,
-        review the quote, confirm — on the token's own page. Before graduation you trade on its
+        Buying and selling a launch token works like any other trade in the app, on the token's
+        own page: enter an amount, review the quote, confirm. Before graduation you trade on its
         curve; after, in its launch pool. A few things behave differently from trading a regular
         pool, all worth knowing before you place a large order.
       </p>
@@ -21,7 +21,7 @@ export function DocsTrading() {
       <h3 className="mt-6 text-base font-semibold text-ink">Price impact is built in, not incidental</h3>
       <p>
         On a regular pool, a trade that's small relative to the pool's depth barely moves the
-        price. On a curve, every trade moves the price, by construction — that's how the curve
+        price. On a curve, every trade moves the price, by construction. That's how the curve
         sets a price at all before a real pool exists. The interface shows the expected move
         before you confirm, the same receipt you'd see on a swap. A quote can also go stale
         between the moment you review it and the moment you confirm, if someone else trades
@@ -39,7 +39,7 @@ export function DocsTrading() {
       <p>
         Selling a normal ERC-20 into a pool is a two-step dance: approve the contract to move
         your tokens, then swap. A launch token skips the first step, on the curve and in its
-        launch pool alike — it lets the launchpad and the launch router pull tokens only from
+        launch pool alike: it lets the launchpad and the launch router pull tokens only from
         whoever is calling the sell, and only into the curve or the pool. One transaction, one
         signature. Buying still needs a USDC approval the first time, for the launchpad on the
         curve and for the launch router after graduation.
@@ -48,7 +48,7 @@ export function DocsTrading() {
       <h3 className="mt-6 text-base font-semibold text-ink">Before graduation, the token only moves through the curve</h3>
       <p>
         Until a token graduates, its contract refuses to let tokens move into its future pool
-        address. That's not a bug — it's what stops the token from being pushed into a fake,
+        address. That's not a bug. It's what stops the token from being pushed into a fake,
         unfunded pool before the real one exists. Once graduation happens, that restriction
         lifts for good.
       </p>

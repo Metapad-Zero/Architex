@@ -59,6 +59,12 @@ export function formatLp(value: bigint): string {
   return `0.${fraction.slice(0, first + 6).replace(/0+$/, '')}`
 }
 
+/**
+ * What an empty slot shows (a receipt value, a table cell) until there is a figure for it, so rows keep
+ * their place instead of collapsing. One glyph for the whole app; copy never uses an em dash.
+ */
+export const GHOST = '…'
+
 export function formatUsd(value: bigint, decimals = 6): string {
   const amount = formatAmount(value, decimals)
   return amount.startsWith('<') ? `$${amount}` : `$${amount}`

@@ -111,7 +111,7 @@ export function useLaunchTrade({
       case 'approving':
         return 'Approving USDC…'
       case 'quoteMoved':
-        return 'Quote moved — review'
+        return 'Review new quote'
       case 'pending':
         return side === 'buy' ? 'Buying…' : 'Selling…'
       case 'ready':
@@ -243,9 +243,9 @@ export function useLaunchTrade({
   ])
 
   const hint = useMemo(() => {
-    if (buttonState === 'needsApproval') return 'Step 1 of 2 — approve USDC once, then buy.'
-    if (buttonState === 'approving') return 'Step 1 of 2 — waiting for the USDC approval to confirm.'
-    if (buttonState === 'ready' && approvedThisSession && side === 'buy') return 'Step 2 of 2 — approved. Buy when you are ready.'
+    if (buttonState === 'needsApproval') return 'Step 1 of 2: approve USDC once, then buy.'
+    if (buttonState === 'approving') return 'Step 1 of 2: waiting for the USDC approval to confirm.'
+    if (buttonState === 'ready' && approvedThisSession && side === 'buy') return 'Step 2 of 2: approved. Buy when you are ready.'
     if (buttonState === 'quoteMoved') {
       return venue === 'curve'
         ? 'The curve moved while you were reading. Check the new amounts, then try again.'

@@ -3,7 +3,7 @@ import { useConnectSheet } from '../hooks/useConnectSheet'
 import type { LaunchAllowances } from '../hooks/useLaunch'
 import { useLaunchTrade, type LaunchSide } from '../hooks/useLaunchTrade'
 import { useSettings } from '../hooks/useSettings'
-import { formatAmount, formatPct, parseAmount } from '../lib/format'
+import { GHOST, formatAmount, formatPct, parseAmount } from '../lib/format'
 import type { LaunchRecord } from '../lib/launch'
 import { destinationLabel, feeDestination } from '../lib/plugins/destination'
 import type { Token } from '../lib/tokens'
@@ -24,8 +24,6 @@ interface LaunchTradeSheetProps {
   initialSide?: LaunchSide
   onConfirmed: () => void | Promise<void>
 }
-
-const GHOST = '—'
 
 export function LaunchTradeSheet({
   launch,

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { formatAmount, formatPct, shortAddress } from '../lib/format'
+import { GHOST, formatAmount, formatPct, shortAddress } from '../lib/format'
 import type { QuoteMode } from '../lib/amm'
 import type { LocalQuote } from '../hooks/useQuote'
 import type { Token } from '../lib/tokens'
@@ -12,11 +12,9 @@ interface ReceiptLinesProps {
   tokens: readonly Token[]
 }
 
-const GHOST = '—'
-
 /**
  * The receipt block is a fixed set of slots: it renders the same five rows whether or not
- * a quote exists, so the sheet never reflows while the user types. Empty slots show a ghost dash.
+ * a quote exists, so the sheet never reflows while the user types. Empty slots show the GHOST.
  */
 export function ReceiptLines({ quote, mode, tokenIn, tokenOut, tokens }: ReceiptLinesProps) {
   const [reverseRate, setReverseRate] = useState(false)

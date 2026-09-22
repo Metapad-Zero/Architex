@@ -5,7 +5,7 @@ import { useLaunch } from '../hooks/useLaunch'
 import { useLaunchTrades } from '../hooks/useLaunchTrades'
 import { usePriceHistory } from '../hooks/usePriceHistory'
 import { useTokenMetadata } from '../hooks/useTokenMetadata'
-import { formatAmount, shortAddress } from '../lib/format'
+import { GHOST, formatAmount, shortAddress } from '../lib/format'
 import { INITIAL_CURVE, marketCap, poolMarketCap } from '../lib/curve'
 import { GRADUATES_AT_USD, launchFacts, tradeUsdc } from '../lib/launch'
 import { destinationLabel, destinationName, feeDestination } from '../lib/plugins/destination'
@@ -130,13 +130,13 @@ export function LaunchDetail({ token, onBack, side }: LaunchDetailProps) {
             loading={tradesLoading}
             partial={!historyComplete || Boolean(tradesError)}
             loadingText="Reading the trades…"
-            emptyText="No trades yet — the first buy starts the chart."
+            emptyText="No trades yet. The first buy starts the chart."
             partialText={tradesError ? 'The trades could not be loaded.' : 'No recent trades. Older history could not be loaded.'}
           />
         </div>
         <dl className="receipt-lines launch-facts">
-          <div><dt>Price</dt><dd>{graduated && !launch.pool ? '—' : facts.price}</dd></div>
-          <div><dt>Market cap</dt><dd>{graduated && !launch.pool ? '—' : facts.cap}</dd></div>
+          <div><dt>Price</dt><dd>{graduated && !launch.pool ? GHOST : facts.price}</dd></div>
+          <div><dt>Market cap</dt><dd>{graduated && !launch.pool ? GHOST : facts.cap}</dd></div>
           <div>
             <dt>Sold</dt>
             <dd>
@@ -144,7 +144,7 @@ export function LaunchDetail({ token, onBack, side }: LaunchDetailProps) {
             </dd>
           </div>
           {graduated ? (
-            <div><dt>Launch pool</dt><dd>{facts.pooled ?? '—'}</dd></div>
+            <div><dt>Launch pool</dt><dd>{facts.pooled ?? GHOST}</dd></div>
           ) : (
             <>
               <div><dt>Raised</dt><dd>{facts.raised}</dd></div>

@@ -84,7 +84,7 @@ function shareLines(addresses: readonly Address[], weights: readonly bigint[], l
   const total = weights.reduce((sum, weight) => sum + weight, 0n)
   return addresses.map((address, index) => ({
     label: label(address),
-    value: total > 0n ? formatPct(((weights[index] ?? 0n) * 10_000n) / total) : '—',
+    value: total > 0n ? formatPct(((weights[index] ?? 0n) * 10_000n) / total) : 'None',
   }))
 }
 
@@ -164,8 +164,8 @@ export function describeLaunchpadCall(data: Hex, from: string | undefined, token
       return {
         title: 'Create token',
         lines: [
-          { label: 'Name', value: name || '—' },
-          { label: 'Symbol', value: tokenSymbol || '—' },
+          { label: 'Name', value: name || 'None' },
+          { label: 'Symbol', value: tokenSymbol || 'None' },
           { label: 'Creator fee', value: `${formatPct(creatorFeeBps)} of every trade` },
           { label: 'Fees go to', value: destination(plugin, from, suite) },
           ...pluginDataLines(plugin, pluginData, suite),

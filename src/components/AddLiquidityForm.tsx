@@ -130,7 +130,7 @@ export function AddLiquidityForm({ pair: fixedPair, pairs, tokens, balances, all
   return (
     <div className="inline-form">
       {pending && <span className="rule-sweep" aria-hidden="true" />}
-      {!pair && <p className="mb-6 text-sm leading-6 text-g700">You are creating this pool — the ratio you enter sets the initial price. Match the market rate: if it's off, arbitrageurs trade the difference out of your deposit.</p>}
+      {!pair && <p className="mb-6 text-sm leading-6 text-g700">You are creating this pool. The ratio you enter sets the initial price. Match the market rate: if it's off, arbitrageurs trade the difference out of your deposit.</p>}
       <div className="grid gap-8 sm:grid-cols-2">
         <AmountField
           id={`liquidity-a${formId}`}

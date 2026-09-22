@@ -78,7 +78,7 @@ export function PriceHistory({
   loading = false,
   partial = false,
   loadingText = "Reading the pool's history…",
-  emptyText = 'No trades yet — the first swap starts the price history.',
+  emptyText = 'No trades yet. The first swap starts the price history.',
   partialText = 'No recent swaps. Older price history could not be loaded.',
 }: PriceHistoryProps) {
   const hostRef = useRef<HTMLDivElement>(null)

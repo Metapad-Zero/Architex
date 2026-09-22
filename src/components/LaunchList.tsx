@@ -4,7 +4,7 @@ import { launchFacts, type LaunchRecord } from '../lib/launch'
 import { parseLaunchAddress } from '../lib/launchPages'
 import { destinationLabel, feeDestination } from '../lib/plugins/destination'
 import { relativeTime } from '../lib/recent'
-import { shortAddress } from '../lib/format'
+import { GHOST, shortAddress } from '../lib/format'
 import { useLaunches } from '../hooks/useLaunches'
 import { FeeGauge } from './FeeGauge'
 import { GhostButton } from './GhostButton'
@@ -127,7 +127,7 @@ function LaunchRow({ launch, now, onOpen }: { launch: LaunchRecord; now: number;
           </span>
         </button>
       </th>
-      <td data-label="Market cap">{launch.graduated && !launch.pool ? '—' : facts.cap}</td>
+      <td data-label="Market cap">{launch.graduated && !launch.pool ? GHOST : facts.cap}</td>
       <td data-label="Creator fee">
         <span className="launch-fee">
           <FeeGauge bps={launch.creatorFeeBps} label={`${launch.symbol} creator fee`} />

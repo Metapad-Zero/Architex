@@ -1,7 +1,7 @@
 import { useMemo } from 'react'
 import { activeChain, addressExplorerUrl } from '../chain'
 import { quote as ratioQuote, reservesFor, type AmmPair } from '../lib/amm'
-import { formatAmount, formatLp, formatPct, shortAddress } from '../lib/format'
+import { GHOST, formatAmount, formatLp, formatPct, shortAddress } from '../lib/format'
 import type { Token } from '../lib/tokens'
 import { usePriceHistory } from '../hooks/usePriceHistory'
 import { ExternalLinkIcon } from './Icons'
@@ -43,7 +43,7 @@ export function PoolDetail({ pair, token0, token1, lpBalance = 0n }: PoolDetailP
             </a>
           </dd>
         </div>
-        <div><dt>Price</dt><dd>{spot > 0n ? `1 ${base.symbol} = ${formatAmount(spot, quote.decimals)} ${quote.symbol}` : '—'}</dd></div>
+        <div><dt>Price</dt><dd>{spot > 0n ? `1 ${base.symbol} = ${formatAmount(spot, quote.decimals)} ${quote.symbol}` : GHOST}</dd></div>
         <div><dt>LP supply</dt><dd>{formatLp(pair.totalSupply)} LP</dd></div>
         <div>
           <dt>Your share</dt>

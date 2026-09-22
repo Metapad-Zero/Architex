@@ -5,7 +5,7 @@ import { BaseError, ContractFunctionRevertedError } from 'viem'
  * problem and the way out. Anything unknown falls back to the neutral "Transaction reverted".
  */
 const REVERTS: Record<string, string> = {
-  Expired: 'Took too long — the deadline passed before it confirmed. Try again.',
+  Expired: 'Took too long: the deadline passed before it confirmed. Try again.',
   InsufficientOutputAmount: 'The price moved past your slippage limit. Try again or raise slippage in settings.',
   ExcessiveInputAmount: 'The price moved past your slippage limit. Try again or raise slippage in settings.',
   InsufficientAAmount: 'The pool ratio moved past your slippage limit. Try again or raise slippage in settings.',
@@ -36,7 +36,7 @@ const REVERTS: Record<string, string> = {
   CreatorFeeTooHigh: 'The creator fee can be at most 10%.',
   InvalidPlugin:
     'Creator fees cannot go to that address: it could never pass them on (the zero address, the launchpad, USDC, the launch router or pair factory, a launch token or a launch pool). Choose another destination.',
-  DataForNonPlugin: 'That address isn’t a plugin, so it can’t take settings — clear them or pick a listed plugin.',
+  DataForNonPlugin: 'That address isn’t a plugin, so it can’t take settings. Clear them or pick a listed plugin.',
   NotInitialized: 'The launchpad is not set up yet. Try again later.',
   PluginPullMismatch: 'This token’s plugin did not take its fees as it must, so they stay with the launchpad.',
   OnlyLaunchpad: 'Only the launchpad can do that.',
