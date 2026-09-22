@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import { useEffect, useRef, type ReactNode } from 'react'
 import { activeChain } from '../chain'
 import type { AppRoute } from '../hooks/useHashRoute'
 import { isLaunchViewAvailable } from '../lib/deployment'
@@ -14,6 +14,12 @@ interface AppShellProps {
 }
 
 export function AppShell({ route, onRoute, children }: AppShellProps) {
+  // On a phone the nav scrolls sideways (five tabs do not fit), so keep the current tab in view.
+  const navRef = useRef<HTMLElement>(null)
+  useEffect(() => {
+    navRef.current?.querySelector('[data-active="true"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  }, [route.view])
+
   return (
     <div className="min-h-dvh overflow-x-hidden bg-paper text-ink">
       <header className="masthead">
@@ -26,7 +32,7 @@ export function AppShell({ route, onRoute, children }: AppShellProps) {
             <span className="wordmark-text">Architex</span>
           </button>
           <span className="testnet-chip">{activeChain.isTestnet ? 'Testnet' : 'Beta'}</span>
-          <nav className="ml-1 flex h-14 items-stretch sm:ml-4" aria-label="Primary">
+          <nav ref={navRef} className="ml-1 flex h-14 items-stretch sm:ml-4" aria-label="Primary">
             {(['swap', 'pools', ...(isLaunchViewAvailable ? (['launch'] as const) : []), 'bridge', 'docs'] as const).map((view) => (
               <button
                 key={view}
