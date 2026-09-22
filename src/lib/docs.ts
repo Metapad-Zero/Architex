@@ -1,4 +1,4 @@
-export type DocSection = 'overview' | 'curve' | 'launching' | 'fees' | 'trading' | 'graduation' | 'metadata' | 'risks' | 'faq'
+export type DocSection = 'overview' | 'curve' | 'launching' | 'fees' | 'trading' | 'graduation' | 'metadata' | 'risks' | 'faq' | 'integrate'
 
 export const DEFAULT_DOC_SECTION: DocSection = 'overview'
 
@@ -12,6 +12,7 @@ export const DOC_SECTIONS: ReadonlyArray<{ slug: DocSection; title: string }> = 
   { slug: 'metadata', title: 'Token details & trust' },
   { slug: 'risks', title: 'Risks' },
   { slug: 'faq', title: 'FAQ & glossary' },
+  { slug: 'integrate', title: 'Listing & integration' },
 ]
 
 export function isDocSection(value: string): value is DocSection {
