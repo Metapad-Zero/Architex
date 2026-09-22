@@ -4,6 +4,7 @@ import { DocsCurve } from '../content/docs/Curve'
 import { DocsFaq } from '../content/docs/Faq'
 import { DocsFees } from '../content/docs/Fees'
 import { DocsGraduation } from '../content/docs/Graduation'
+import { DocsIntegrate } from '../content/docs/Integrate'
 import { DocsLaunching } from '../content/docs/Launching'
 import { DocsMetadata } from '../content/docs/Metadata'
 import { DocsOverview } from '../content/docs/Overview'
@@ -20,6 +21,7 @@ const CONTENT: Record<DocSection, ComponentType> = {
   metadata: DocsMetadata,
   risks: DocsRisks,
   faq: DocsFaq,
+  integrate: DocsIntegrate,
 }
 
 interface DocsViewProps {
@@ -40,7 +42,7 @@ export function DocsView({ section = DEFAULT_DOC_SECTION, onSection }: DocsViewP
       <p className="mt-2 max-w-[640px] text-g700">How Architex's launchpad works, what's permanent, and what to check before you use it.</p>
 
       <div className="mt-8 grid gap-6 sm:grid-cols-[200px_minmax(0,1fr)] sm:gap-10">
-        <nav aria-label="Documentation sections" className="border-b border-g300 sm:border-b-0">
+        <nav aria-label="Documentation sections" className="min-w-0 border-b border-g300 sm:border-b-0">
           <ul className="flex gap-1 overflow-x-auto sm:flex-col sm:gap-0 sm:overflow-visible">
             {DOC_SECTIONS.map((entry) => (
               <li key={entry.slug} className="shrink-0 sm:shrink">

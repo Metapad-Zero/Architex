@@ -16,6 +16,8 @@ const FOLDERS = ['src/content', 'src/components', 'src/hooks']
 const FILES = [
   'index.html',
   'public/site.webmanifest',
+  'server/listing/service.ts',
+  'server/listing/tokenlist.ts',
   'server/metadataService.ts',
   'src/App.tsx',
   'src/index.css',

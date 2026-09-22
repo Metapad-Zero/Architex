@@ -1,6 +1,10 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "vite",
+  "functions": {
+    "api/v1/*.ts": { "maxDuration": 60 }
+  },
+  "rewrites": [{ "source": "/tokenlist.json", "destination": "/api/v1/tokenlist" }],
   "headers": [
     {
       "source": "/(.*)",
