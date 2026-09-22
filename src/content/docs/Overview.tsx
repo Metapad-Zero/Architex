@@ -16,7 +16,7 @@ export function DocsOverview() {
       <p>
         That's the whole idea. Everything past this page is detail: how the price actually
         moves, what a creator commits to permanently, what changes the moment a token graduates
-        into Architex's regular AMM, and what you're accepting by putting real USDC into
+        into its own launch pool, and what you're accepting by putting real USDC into
         something that started an hour ago with no track record.
       </p>
       <p>
