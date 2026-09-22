@@ -17,7 +17,9 @@ export function AppShell({ route, onRoute, children }: AppShellProps) {
   // On a phone the nav scrolls sideways (five tabs do not fit), so keep the current tab in view.
   const navRef = useRef<HTMLElement>(null)
   useEffect(() => {
-    navRef.current?.querySelector('[data-active="true"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+    // Centre it rather than nudging it to the edge: the wallet button's width settles late, and an edge-aligned
+    // tab ended up a few pixels short. No requestAnimationFrame here, it does not fire in a hidden tab.
+    navRef.current?.querySelector('[data-active="true"]')?.scrollIntoView({ block: 'nearest', inline: 'center' })
   }, [route.view])
 
   return (
