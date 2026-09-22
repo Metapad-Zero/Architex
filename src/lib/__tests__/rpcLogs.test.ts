@@ -1,5 +1,7 @@
-import { describe, expect, test } from 'bun:test'
-import { blockTimes, readLogWindows } from '../rpcLogs'
+import { beforeEach, describe, expect, test } from 'bun:test'
+import { blockTimes, readLogWindows, resetBlockTimeCache } from '../rpcLogs'
+
+beforeEach(() => resetBlockTimeCache())
 
 const HEAD = 1_000_000n
 

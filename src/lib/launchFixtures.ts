@@ -599,10 +599,15 @@ function creatorFees(token: Address, owner: Address | undefined): CreatorFeeStat
     },
     holders: holders && {
       undistributed: undistributed(token, holders, nowSeconds()),
-      streamRate: holders.rate / MAGNITUDE,
-      streamEnd: BigInt(holders.end),
+      // LaunchToken's views: the rate reads 0 while nothing pays (ended or paused), and a paused stream's end moves
+      // out with the clock.
+      streamRate: nowSeconds() >= holders.end || eligibleSupply(token, holders) === 0n ? 0n : holders.rate / MAGNITUDE,
+      streamEnd: BigInt(
+        holders.lastAccrual < holders.end && eligibleSupply(token, holders) === 0n ? holders.end + (nowSeconds() - holders.lastAccrual) : holders.end,
+      ),
       totalDistributed: holders.distributed,
       eligibleSupply: eligibleSupply(token, holders),
+      readAt: BigInt(nowSeconds()),
       you: owner ? { balance: fixtureBalance(owner, token), claimable: holderClaimable(holders, owner, token, nowSeconds()) } : undefined,
       // The fixture keeps a dividend book only for tokens whose fees go to Distribute to holders.
       fromFees: true,

@@ -80,6 +80,7 @@ async function readHolders(client: PublicClient, token: Address, account: Addres
     streamEnd,
     totalDistributed,
     eligibleSupply,
+    readAt: BigInt(Math.floor(Date.now() / 1_000)),
     you: you ? { balance: you[0], claimable: you[1] } : undefined,
   }
 }

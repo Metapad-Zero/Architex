@@ -7,7 +7,8 @@ import { deployment, isLaunchpadDeployed } from '../lib/deployment'
 import { fetchLogHistory } from '../lib/explorerLogs'
 import type { LaunchTrade, TradeVenue } from '../lib/launch'
 import { launchFixtureApi } from '../lib/launchFixtureApi'
-import { blockTimes, readLogWindows } from '../lib/rpcLogs'
+import { fetchIndexedHead, fillTimes, fromRpcLog, withRpcTail } from '../lib/logTail'
+import { blockTime, blockTimes, readLogWindows } from '../lib/rpcLogs'
 
 export type { LaunchTrade }
 
@@ -60,28 +61,54 @@ function decodeTrade(venue: TradeVenue, data: Hex, topics: Hex[]): Omit<LaunchTr
   return { ...args, venue }
 }
 
-async function fromExplorer(feed: Feed, token: Address, createdAt: number | undefined, signal: AbortSignal | undefined) {
+/**
+ * Whether a block is older than the token, so no trade of it can be there or below. Strictly older: blocks come
+ * faster than one a second, so the creation block can share its second with the blocks after it.
+ */
+function beforeCreation(client: PublicClient, createdAt: number | undefined) {
+  return createdAt === undefined ? undefined : async (fromBlock: bigint) => (await blockTime(client, fromBlock)) < createdAt
+}
+
+/** The explorer's history of one feed, with the blocks it has not indexed yet read from the RPC (lib/logTail.ts). */
+async function fromExplorer(client: PublicClient, feed: Feed, token: Address, createdAt: number | undefined, signal: AbortSignal | undefined) {
   const tokenTopic = pad(token, { size: 32 }).toLowerCase()
-  const history = await fetchLogHistory({
-    explorerBase: activeChain.explorerBase,
-    address: feed.address,
-    topic0: toEventSelector(feed.venue === 'curve' ? CURVE_TRADE : POOL_TRADE),
-    maxPages: EXPLORER_PAGES,
-    keep: (log) => log.topics[1]?.toLowerCase() === tokenTopic,
+  const event = feed.venue === 'curve' ? CURVE_TRADE : POOL_TRADE
+  const topic0 = toEventSelector(event)
+  const [history, indexedHead, head] = await Promise.all([
+    fetchLogHistory({
+      explorerBase: activeChain.explorerBase,
+      address: feed.address,
+      topic0,
+      maxPages: EXPLORER_PAGES,
+      keep: (log) => log.topics[1]?.toLowerCase() === tokenTopic,
+      limit: MAX_TRADES,
+      notBefore: createdAt,
+      cacheKey: token,
+      signal,
+    }),
+    fetchIndexedHead(activeChain.explorerBase),
+    client.getBlockNumber(),
+  ])
+  const merged = await withRpcTail({
+    key: `${feed.address}|${topic0}|${token}`.toLowerCase(),
+    history,
+    indexedHead,
+    head,
+    read: async (fromBlock, toBlock) =>
+      (await client.getLogs({ address: feed.address, event, args: { token }, fromBlock, toBlock })).flatMap((log) => fromRpcLog(log) ?? []),
+    reachedStart: beforeCreation(client, createdAt),
     limit: MAX_TRADES,
-    notBefore: createdAt,
-    cacheKey: token,
-    signal,
   })
+  const logs = merged.tail ? await fillTimes(client, merged.logs.slice(0, MAX_TRADES), MAX_TRADES) : merged.logs
   const trades: LaunchTrade[] = []
-  for (const log of history.logs) {
+  for (const log of logs) {
     try {
       trades.push({ ...decodeTrade(feed.venue, log.data, log.topics), time: log.time, txHash: log.txHash, block: log.block, logIndex: log.logIndex })
     } catch {
       // skip undecodable explorer rows
     }
   }
-  return { trades, complete: history.complete }
+  return { trades, complete: merged.complete }
 }
 
 async function fromRpc(client: PublicClient, feed: Feed, token: Address, createdAt: number | undefined) {
@@ -90,8 +117,7 @@ async function fromRpc(client: PublicClient, feed: Feed, token: Address, created
     windows: RPC_WINDOWS,
     read: (fromBlock, toBlock) =>
       client.getLogs({ address: feed.address, event: feed.venue === 'curve' ? CURVE_TRADE : POOL_TRADE, args: { token }, fromBlock, toBlock }),
-    reachedStart:
-      createdAt === undefined ? undefined : async (fromBlock) => Number((await client.getBlock({ blockNumber: fromBlock })).timestamp) <= createdAt,
+    reachedStart: beforeCreation(client, createdAt),
   })
   const trades: LaunchTrade[] = []
   for (const log of logs) {
@@ -108,9 +134,10 @@ async function fromRpc(client: PublicClient, feed: Feed, token: Address, created
 /**
  * A launch token's trades, newest first: on its curve (the launchpad's Trade events) and, once it has graduated,
  * in its launch pool (the launch router's PoolTrade events). `createdAt` (unix seconds, from the curve) bounds the
- * search: no trade can be older than its token.
+ * search: no trade can be older than its token. `traded` is the curve's own word that trades exist (tokens sold, or
+ * graduated): an empty history is then never complete, whatever the sources said.
  */
-export function useLaunchTrades(token: Address | undefined, createdAt: number | undefined, graduated = false) {
+export function useLaunchTrades(token: Address | undefined, createdAt: number | undefined, graduated = false, traded = false) {
   const publicClient = usePublicClient()
   const api = launchFixtureApi()
   const fixtureVersion = useSyncExternalStore(api ? api.subscribe : noopSubscribe, api ? api.version : zero, zero)
@@ -131,9 +158,13 @@ export function useLaunchTrades(token: Address | undefined, createdAt: number | 
         return { trades: trades.slice(0, MAX_TRADES), complete: parts.every((part) => part.complete) || trades.length >= MAX_TRADES }
       }
       try {
-        const parts = await Promise.all(feeds.map((feed) => fromExplorer(feed, token, createdAt, signal)))
+        if (!publicClient) throw new Error('No RPC client')
+        const parts = await Promise.all(feeds.map((feed) => fromExplorer(publicClient, feed, token, createdAt, signal)))
         return { ...combine(parts), source: 'explorer' }
-      } catch {
+      } catch (error) {
+        // A cancelled read (the page went away) is not an unreachable explorer: no RPC reads for it.
+        if (signal?.aborted) throw error
+        // The explorer (or its newest indexed block) could not be read: a few RPC windows from the head, as before.
         if (!publicClient) return { trades: [], complete: false, source: 'rpc' }
         const parts = await Promise.all(feeds.map((feed) => fromRpc(publicClient, feed, token, createdAt)))
         const { trades, complete } = combine(parts)
@@ -152,7 +183,8 @@ export function useLaunchTrades(token: Address | undefined, createdAt: number | 
   }
 
   const trades = query.data?.trades ?? []
-  const historyComplete = query.data?.complete ?? false
+  // The curve says it has traded, so an empty history is a source that has not caught up, never "No trades yet".
+  const historyComplete = (query.data?.complete ?? false) && !(traded && trades.length === 0)
   // With no data yet, every refetch puts the query back to pending and clears its error; errorUpdatedAt survives,
   // so a failed first read keeps showing as failed instead of flipping back to "Reading the trades…" each poll.
   const failedFirstRead = !query.data && query.errorUpdatedAt > 0

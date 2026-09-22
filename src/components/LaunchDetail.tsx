@@ -40,6 +40,7 @@ export function LaunchDetail({ token, onBack, side }: LaunchDetailProps) {
     token,
     launch ? Number(launch.createdAt) : undefined,
     graduated,
+    Boolean(launch && (launch.tokensSold > 0n || launch.graduated)),
   )
   // After graduation the launch pool's reserve history carries the chart on: its Sync event has the core pair's shape.
   const poolHistory = usePriceHistory(graduated ? launch?.pair : undefined, !fixtureOn && graduated)

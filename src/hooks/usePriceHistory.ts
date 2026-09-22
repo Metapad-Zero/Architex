@@ -1,8 +1,9 @@
 import { useQuery } from '@tanstack/react-query'
-import { decodeAbiParameters, parseAbiItem, type Address, type Hex } from 'viem'
+import { decodeAbiParameters, parseAbiItem, type Address, type Hex, type PublicClient } from 'viem'
 import { usePublicClient } from 'wagmi'
 import { activeChain } from '../chain'
 import { fetchLogHistory } from '../lib/explorerLogs'
+import { fetchIndexedHead, fillTimes, fromRpcLog, withRpcTail } from '../lib/logTail'
 import { blockTimes, readLogWindows } from '../lib/rpcLogs'
 
 export interface PricePoint {
@@ -46,11 +47,24 @@ function oldestFirst(a: PricePoint, b: PricePoint): number {
   return a.block - b.block
 }
 
-async function fromExplorer(pair: Address, signal: AbortSignal | undefined): Promise<PriceHistoryData> {
-  const history = await fetchLogHistory({ explorerBase: activeChain.explorerBase, address: pair, topic0: SYNC_TOPIC, maxPages: EXPLORER_PAGES, signal })
+/** The explorer's reserve history, with the blocks it has not indexed yet read from the RPC (lib/logTail.ts). */
+async function fromExplorer(client: PublicClient, pair: Address, signal: AbortSignal | undefined): Promise<PriceHistoryData> {
+  const [history, indexedHead, head] = await Promise.all([
+    fetchLogHistory({ explorerBase: activeChain.explorerBase, address: pair, topic0: SYNC_TOPIC, maxPages: EXPLORER_PAGES, signal }),
+    fetchIndexedHead(activeChain.explorerBase),
+    client.getBlockNumber(),
+  ])
+  const merged = await withRpcTail({
+    key: `${pair}|${SYNC_TOPIC}`.toLowerCase(),
+    history,
+    indexedHead,
+    head,
+    read: async (fromBlock, toBlock) => (await client.getLogs({ address: pair, event: SYNC_EVENT, fromBlock, toBlock })).flatMap((log) => fromRpcLog(log) ?? []),
+  })
+  const logs = merged.tail ? await fillTimes(client, merged.logs) : merged.logs
   const points: PricePoint[] = []
-  // Newest first from the explorer; reversing keeps the order of several syncs inside one block.
-  for (const log of [...history.logs].reverse()) {
+  // Newest first; reversing keeps the order of several syncs inside one block.
+  for (const log of [...logs].reverse()) {
     try {
       const [reserve0, reserve1] = decodeSync(log.data)
       points.push({ block: log.block, time: log.time, reserve0, reserve1 })
@@ -58,7 +72,7 @@ async function fromExplorer(pair: Address, signal: AbortSignal | undefined): Pro
       // skip undecodable explorer rows
     }
   }
-  return { points: thin(points, MAX_POINTS), complete: history.complete, source: 'explorer' }
+  return { points: thin(points, MAX_POINTS), complete: merged.complete, source: 'explorer' }
 }
 
 export function usePriceHistory(pair: Address | undefined, enabled = true) {
@@ -72,10 +86,13 @@ export function usePriceHistory(pair: Address | undefined, enabled = true) {
     placeholderData: (previous) => previous,
     queryFn: async ({ signal }): Promise<PriceHistoryData> => {
       if (!pair) return { points: [], complete: true, source: 'explorer' }
+      if (!publicClient) return { points: [], complete: false, source: 'rpc' }
       try {
-        return await fromExplorer(pair, signal)
-      } catch {
-        if (!publicClient) return { points: [], complete: false, source: 'rpc' }
+        return await fromExplorer(publicClient, pair, signal)
+      } catch (error) {
+        // A cancelled read (the chart went away) is not an unreachable explorer: no RPC reads for it.
+        if (signal?.aborted) throw error
+        // The explorer (or its newest indexed block) could not be read: a few RPC windows from the head, as before.
         const { logs, complete } = await readLogWindows({
           head: await publicClient.getBlockNumber(),
           windows: RPC_WINDOWS,

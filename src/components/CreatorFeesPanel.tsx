@@ -9,7 +9,7 @@ import { useSwitchToArc } from '../hooks/useSwitchToArc'
 import { formatAmount, formatPct, shortAddress } from '../lib/format'
 import type { LaunchRecord } from '../lib/launch'
 import { destinationLabel, destinationName, feeDestination } from '../lib/plugins/destination'
-import { dividendStatus } from '../lib/plugins/holders'
+import { dividendStatus, roughly } from '../lib/plugins/holders'
 import { BUYBACK_MIN_RUN_USDC, BUYBACK_RUN_INTERVAL, type BuybackState, type ComboEntryState, type HolderState, type SplitState } from '../lib/plugins/state'
 import { FeeGauge } from './FeeGauge'
 import { GhostButton } from './GhostButton'
@@ -175,6 +175,11 @@ function BuybackPanel({ buyback, symbol, graduated, alsoPaysHolders, busy, statu
   )
 }
 
+/** A running stream's rate, to three significant figures; never a bare 0, since a running stream always pays something. */
+function perHourText(perHour: bigint): string {
+  return perHour === 0n ? 'Under 0.000001 USDC/hour to all holders' : `≈ ${usdc(roughly(perHour))}/hour to all holders`
+}
+
 function HoldersPanel({ holders, symbol, busy, status, run, claim, connected }: {
   holders: HolderState
   symbol: string
@@ -210,7 +215,7 @@ function HoldersPanel({ holders, symbol, busy, status, run, claim, connected }: 
           <div>
             <dt>Rate</dt>
             <dd className={stream.kind === 'paused' ? 'text-g500' : ''}>
-              {stream.kind === 'paused' ? 'Paused — no holders yet' : `≈ ${usdc(stream.perHour)}/hour to all holders`}
+              {stream.kind === 'paused' ? 'Paused — no holders yet' : perHourText(stream.perHour)}
             </dd>
           </div>
         )}

@@ -36,7 +36,10 @@ export interface ArchitexDeployment {
   buybackPlugin: Address
   holderPlugin: Address
   comboPlugin: Address
-  /** Launchpads the site no longer points at (v1.2 and earlier). Only scripts read them, to find what their tokens name. */
+  /**
+   * Launchpads the site no longer points at: v1.2, and v1.3 deployments replaced since (testnet rehearsals). Only
+   * scripts read them, to find what their tokens name; scripts/metadata-cleanup.ts tells the two versions apart.
+   */
   retiredLaunchpads: Address[]
   deployer: Address
   tokens: DeploymentToken[]

@@ -24,14 +24,20 @@ export const holderPluginAbi = parseAbi([
 export interface HolderDividends {
   /** What the running stream still owes all holders from now on; 0 when none runs. */
   undistributed: bigint
-  /** The stream's current payout to all eligible holders together, in USDC units per second (rounded down). */
+  /**
+   * The stream's payout to all eligible holders together, in whole USDC units per second (rounded down, so 0 for a
+   * stream under 0.0036 USDC an hour). 0 while nothing pays; before c7ea280 it kept its last value once a stream
+   * ended or paused.
+   */
   streamRate: bigint
-  /** When the running stream ends, unless it pauses or more is distributed; 0 if nothing was ever distributed. */
+  /** When the running stream ends if nothing changes; 0 if nothing was ever distributed. */
   streamEnd: bigint
   /** All USDC ever distributed to holders, streamed out or not. */
   totalDistributed: bigint
   /** 0 below one whole eligible token, where the stream pauses. */
   eligibleSupply: bigint
+  /** Unix seconds (this device's clock) when these were read: the rate is worked out against it. */
+  readAt: bigint
   you?: {
     balance: bigint
     /** Everything the wallet has earned up to the second it was read, less what it claimed. */
@@ -70,13 +76,37 @@ export type DividendStatus =
   | { kind: 'streaming'; left: bigint; endsAt: bigint; perHour: bigint }
 
 /**
- * What the stream is doing, for the token page. `streamRate` keeps its last value after a stream ends, so a stream
- * counts as running only while it still owes something (the token's `undistributed()` is 0 once it has ended).
+ * What the running stream pays all holders together per hour, in USDC units. `streamRate()` is whole units a second,
+ * rounded down, so on its own it reads 0 for any stream under 0.0036 USDC an hour. What the stream still owes, over
+ * the seconds it has left, gives the rate to the unit; the result is held inside what `streamRate()` guarantees (at
+ * least streamRate and under streamRate + 1 units a second), so a device clock that is off cannot move it further.
  */
-export function dividendStatus(dividends: Pick<HolderDividends, 'undistributed' | 'streamRate' | 'streamEnd' | 'eligibleSupply'>): DividendStatus {
+export function hourlyRate(dividends: Pick<HolderDividends, 'undistributed' | 'streamRate' | 'streamEnd' | 'readAt'>): bigint {
+  const floor = dividends.streamRate * 3_600n
+  const ceiling = floor + 3_599n
+  const left = dividends.streamEnd > dividends.readAt ? dividends.streamEnd - dividends.readAt : 1n
+  const estimate = (dividends.undistributed * 3_600n) / left
+  return estimate < floor ? floor : estimate > ceiling ? ceiling : estimate
+}
+
+/**
+ * What the stream is doing, for the token page. A stream counts as running only while it still owes something (the
+ * token's `undistributed()` is 0 once it has ended), which holds on every deployment, including those whose
+ * `streamRate()` kept its last value after a stream ended.
+ */
+export function dividendStatus(dividends: Pick<HolderDividends, 'undistributed' | 'streamRate' | 'streamEnd' | 'eligibleSupply' | 'readAt'>): DividendStatus {
   if (dividends.undistributed === 0n) return { kind: 'none' }
   if (dividends.eligibleSupply === 0n) return { kind: 'paused', left: dividends.undistributed }
-  return { kind: 'streaming', left: dividends.undistributed, endsAt: dividends.streamEnd, perHour: dividends.streamRate * 3_600n }
+  return { kind: 'streaming', left: dividends.undistributed, endsAt: dividends.streamEnd, perHour: hourlyRate(dividends) }
+}
+
+/** A rate or amount to `digits` significant figures, rounded half up: "≈" figures should not look more exact than they are. */
+export function roughly(value: bigint, digits = 3): bigint {
+  if (value <= 0n) return value
+  const length = value.toString().length
+  if (length <= digits) return value
+  const unit = 10n ** BigInt(length - digits)
+  return ((value + unit / 2n) / unit) * unit
 }
 
 /** Whether the token page should show holder dividends: the token pays them, or someone paid it some. */

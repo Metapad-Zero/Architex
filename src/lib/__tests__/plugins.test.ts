@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { decodeAbiParameters, getAddress, zeroAddress, type Address, type Hex } from 'viem'
 import type { LaunchSuite } from '../deployment'
 import { destinationLabel, destinationName, feeDestination } from '../plugins/destination'
-import { dividendStatus, hasDividends } from '../plugins/holders'
+import { dividendStatus, hasDividends, hourlyRate, roughly } from '../plugins/holders'
 import {
   bpsToPercentText,
   encodeSplitData,
@@ -254,17 +254,48 @@ describe('where a token’s fees go', () => {
 })
 
 describe('holder dividends, streamed inside the token', () => {
-  const running = { undistributed: 282_669_000n, streamRate: 3_272n, streamEnd: 1_790_100_000n, eligibleSupply: 620_000_000n * 10n ** 18n }
+  // A stream paying 3,272.5 units a second with 86,000 seconds left: the token's streamRate() rounds it down to 3,272.
+  const running = {
+    undistributed: 281_435_000n,
+    streamRate: 3_272n,
+    streamEnd: 1_790_100_000n,
+    eligibleSupply: 620_000_000n * 10n ** 18n,
+    readAt: 1_790_100_000n - 86_000n,
+  }
 
-  test('a running stream: what it still owes, when it ends, and about how much an hour it pays all holders', () => {
-    expect(dividendStatus(running)).toEqual({ kind: 'streaming', left: 282_669_000n, endsAt: 1_790_100_000n, perHour: 3_272n * 3_600n })
+  test('a running stream: what it still owes, when it ends, and how much an hour it pays all holders', () => {
+    expect(dividendStatus(running)).toEqual({ kind: 'streaming', left: 281_435_000n, endsAt: 1_790_100_000n, perHour: 11_781_000n })
+  })
+
+  test('a small stream is never shown as paying 0 an hour, although streamRate() rounds it down to 0', () => {
+    // RCOMBO on the rehearsal: 0.041 USDC over a day.
+    const small = { ...running, undistributed: 41_000n, streamRate: 0n, readAt: running.streamEnd - 86_400n }
+    expect(hourlyRate(small)).toBe(1_708n)
+    expect(roughly(hourlyRate(small))).toBe(1_710n) // ≈ 0.00171 USDC an hour
+  })
+
+  test('a device clock that is off cannot move the rate outside what streamRate() guarantees', () => {
+    // Ten seconds left by this clock, a day by the chain's: held under streamRate + 1 units a second.
+    expect(hourlyRate({ ...running, readAt: running.streamEnd - 10n })).toBe(3_272n * 3_600n + 3_599n)
+    // A clock past the end.
+    expect(hourlyRate({ ...running, readAt: running.streamEnd + 5n })).toBe(3_272n * 3_600n + 3_599n)
+    // A clock far behind: never under streamRate.
+    expect(hourlyRate({ ...running, readAt: running.streamEnd - 10_000_000n })).toBe(3_272n * 3_600n)
+  })
+
+  test('rates are shown to three significant figures', () => {
+    expect(roughly(11_781_000n)).toBe(11_800_000n)
+    expect(roughly(13_431_600n)).toBe(13_400_000n)
+    expect(roughly(1_705n)).toBe(1_710n)
+    expect(roughly(999n)).toBe(999n)
+    expect(roughly(0n)).toBe(0n)
   })
 
   test('paused while under one whole token is eligible, with what it still owes', () => {
-    expect(dividendStatus({ ...running, eligibleSupply: 0n })).toEqual({ kind: 'paused', left: 282_669_000n })
+    expect(dividendStatus({ ...running, eligibleSupply: 0n })).toEqual({ kind: 'paused', left: 281_435_000n })
   })
 
-  test('nothing streaming once the stream owes nothing, even though the token keeps its last rate', () => {
+  test('nothing streaming once the stream owes nothing, even where the token keeps its last rate (before c7ea280)', () => {
     expect(dividendStatus({ ...running, undistributed: 0n })).toEqual({ kind: 'none' })
     expect(dividendStatus({ ...running, undistributed: 0n, eligibleSupply: 0n })).toEqual({ kind: 'none' })
   })
