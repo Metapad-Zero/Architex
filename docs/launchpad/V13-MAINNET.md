@@ -22,6 +22,27 @@ testnet rehearsals, the second on the reviewed contracts; the only change since 
 - [x] Gas: about 12M gas for both scripts ≈ 0.25–0.35 USDC at ~20 gwei (checked 2026-09-21); the deployer
       `0xc387…9cf60` holds 3.93 USDC.
 
+## Deployed 2026-09-21
+
+| Contract | Address |
+| --- | --- |
+| `ArchitexLaunchpad` | `0xC4Edce6e3751a91dc9094f140D217aCE23221327` |
+| `LaunchPairFactory` | `0xAE59776B7B3B23AcD6784cA0f9E5256C82d2f41a` |
+| `LaunchRouter` | `0x4B179cD28c4e6014a7b311df3db1B6284dF2b808` |
+| `SplitPlugin` | `0x39d34Ef3Bf6279fA430f71eb8A19da257573e6E7` |
+| `BuybackBurnPlugin` | `0xB9Be42e021194e33866a0C43b36Ffb357369944D` |
+| `HolderDistributionPlugin` | `0x11278F83eb85fFB8987C59A62C316aB4E27CF012` |
+| `ComboPlugin` | `0x6f265D785191e7F13357940a2D4A94C35e54df9D` |
+
+Deployed by the owner from `0xc387…9cf60` (`feeTo` = `feeToSetter` = that wallet, launch fee 1 USDC). Gas: 7,528,131
+(0.171 USDC) for the launchpad suite, 4,152,048 (0.091 USDC) for the plugins. All seven match the local build byte
+for byte (`scripts/verify-bytecode.ts`, immutables and metadata masked), and the wiring reads back correctly on
+chain. Records: `broadcast/DeployLaunchpad.s.sol/5042/`, `broadcast/DeployLaunchPlugins.s.sol/5042/`.
+
+Two things the deploy ran into, for next time: a terminal opened before Foundry was on the PATH needs
+`~/.foundry/bin/forge`; and Arc's RPC once answered Forge's EIP-1559 fee lookup with "request beyond head block"
+(nothing was sent) — passing `--with-gas-price 30gwei --priority-gas-price 2gwei` skips that lookup.
+
 ## 1. Deploy (owner, in your own terminal)
 
 ```bash
@@ -56,11 +77,11 @@ refuse to run with a non-Arc USDC on mainnet.
 
 ## 2. Verify and switch the site (Claude)
 
-- [ ] Every address's code equals the local build: `bun run scripts/verify-bytecode.ts <address> <Contract> https://rpc.mainnet.arc.io`
+- [x] Every address's code equals the local build: `bun run scripts/verify-bytecode.ts <address> <Contract> https://rpc.mainnet.arc.io`
       for the launchpad, pair factory, router and the four plugins.
-- [ ] Read-only wiring: launchpad `usdc`/`pairFactory`/`router`/`feeTo`/`feeToSetter`/`launchFee`/`FEE_BPS`/
+- [x] Read-only wiring: launchpad `usdc`/`pairFactory`/`router`/`feeTo`/`feeToSetter`/`launchFee`/`FEE_BPS`/
       `MAX_CREATOR_FEE_BPS`; each plugin's `launchpad()` and `usdc()`.
-- [ ] Fill `src/deployments/arc-mainnet.json` (`launchpad`, `launchPairFactory`, `launchRouter`, `splitPlugin`,
+- [x] Fill `src/deployments/arc-mainnet.json` (`launchpad`, `launchPairFactory`, `launchRouter`, `splitPlugin`,
       `buybackPlugin`, `holderPlugin`, `comboPlugin`, `txs.launchpad`) and the plugin registry addresses; commit the
       broadcast records under `broadcast/*/5042/`.
 - [ ] Deploy the site from a clean worktree of `main` (never the working tree): the Launch tab reappears.

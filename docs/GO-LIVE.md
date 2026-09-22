@@ -125,8 +125,9 @@ Passkeys made on `localhost` or a `*.vercel.app` preview do not exist on the rea
       reviewed (commits through `963d6e2`). Still not done from the testnet "Before mainnet" list: a
       full graduation rehearsal — each piece is proven, including against the pair bytecode now on
       mainnet, but no token has graduated end to end.
-- [ ] **Launchpad v1.3 on mainnet** — reviewed, rehearsed twice on testnet, merged. Runbook:
-      `docs/launchpad/V13-MAINNET.md` (you deploy from your terminal; Claude verifies bytecode and switches the site).
+- [x] **Launchpad v1.3 on mainnet** 2026-09-21 — launchpad `0xC4Edce6e3751a91dc9094f140D217aCE23221327` plus
+      launch pools and four plugins, deployed by the owner, bytecode-verified; addresses and records in
+      `docs/launchpad/V13-MAINNET.md`. Its `feeTo`/`feeToSetter` = the hot wallet → **hand to the Ledger** too.
 - [x] Pre-audit tooling: Slither + Aderyn + Solhint on every push/PR (`.github/workflows/contracts-security.yml`),
       Echidna property fuzzing alongside the existing Foundry invariants, Mythril symbolic execution
       run manually before mainnet moves. See `SECURITY.md` — baseline run 2026-09-20, 0 high/critical.
