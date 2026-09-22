@@ -99,6 +99,8 @@ interface IArchitexFeePlugin is IERC165 {
 | **Distribute to holders** | Passes each collection straight to the token's `distribute`, which **streams it to holders over 24 hours with continuous accrual** (§3) **[D15]**: a holder earns only for the seconds it holds, so a bot that buys, collects, claims and sells in one transaction earns exactly 0 **[D21]**. The plugin holds nothing; holders claim on the token page (`claim` / `claimFor` on the token). |
 | **Combo** | Splits a token's fees across up to 5 plugins by basis points summing to 10,000, forwarding `onLaunch` data to each. An entry that isn't a plugin must have empty data, which catches a mistyped plugin address **[built]**. Entries follow Split's payee rules. A Combo inside a Combo can't configure listed plugins. |
 
+A fifth listed plugin, **Deepen pool**, was added after this sign-off and is specified in §2.3.
+
 **Buyback & burn pacing [review]**: a run offers min(held, budget). The cap is **0.25% of the USDC-side
 reserve** (the curve's `virtualUsdc`, or the pool's USDC reserve). The budget is the cap prorated by the
 time since the token's last run, `cap × min(now − lastRunAt, 1 h) / 1 h` rounded down, and a full cap for
@@ -120,6 +122,99 @@ buys at least one token wei, on the curve and in the pool. At most 2 units per t
   run in each of the next blocks and sell once, paying the fees once for many caps. That paid after 3 runs
   at c = 0%, 7 at 1%, 24 at 5% and 50 at 10%, and Arc makes more than a block a second; at 1% with
   1,000 USDC waiting, it took 44% of the pile.
+
+### 2.3 Addendum: Deepen pool (added after sign-off, 2026-09-22)
+
+A fifth reference plugin, listed like the others and changing nothing already deployed: it works against the
+launchpad, launch router and launch pairs exactly as they are on mainnet. Contract
+`contracts/plugins/launch/DeepenPoolPlugin.sol`, interface `contracts/interfaces/plugins/IDeepenPoolPlugin.sol`,
+deploy script `contracts/script/DeployDeepenPool.s.sol`.
+
+| Plugin | Behaviour |
+| --- | --- |
+| **Deepen pool** | "A launch pool that burns the entire way, past the curve and everything" (owner). Anyone can run it. Before graduation each run is Buyback & burn's: it buys the token with the whole offer through the launchpad and **burns** it. After graduation each run buys the token with about half the offer through the launch router and **adds** it to the token's launch pool with the rest of the USDC, minting the LP straight to `0x…dEaD`, locked forever. Tokens that do not fit the add are burned; USDC that does not fit stays for the next run. |
+
+- **Configuration**: none. `onLaunch` data must be empty, and it is authenticated as every listed plugin's is
+  (§2.1), so it works directly or as a Combo entry.
+- **Deliveries**: `onFees(token, amount)` pulls exactly `amount` and credits it to that token. **Anyone may
+  deliver fees for a configured token**, not only the launchpad's collection: Architex's own fee wallet can top a
+  token's pot up out of the platform fees it collected, and so can the creator or a keeper. A delivery is a gift;
+  nothing ever pays it back, and a token with a 0% creator fee can be fed this way alone.
+- **Pacing**: Buyback & burn's, with the same constants (`CAP_BPS` 25, `RUN_INTERVAL` 1 h, `MIN_RUN_USDC` 3): a run
+  offers `min(held, cap × min(now − lastRunAt, 1 h) / 1 h)`, a full cap for a token's first run, at most once per
+  token per block, and `previewRun` is exactly what `run` offers. Each plugin keeps its own clock.
+- **The split.** With the pool's USDC reserve `R`, an offer `U` and `q = 10,000 − (50 + c)` bps (what a buy leaves
+  after both fees), a buy of `b` puts `n = b·q/10⁴` into the pool and takes out tokens that pair, at the price that
+  buy leaves, with `n·(R + n)/R` USDC. The add takes all of them when `b + n + n²/R = U`, so
+  `b = 2·10⁴·U·R / ((10⁴ + q)·R + √((10⁴ + q)²·R² + 4·q²·U·R))`, rounded down, at least `MIN_RUN_USDC` and at most
+  `U` (`previewSplit`). That is a little over half of the offer (1 / (2 − fee), 50.1% to 52.8%). The run **syncs the
+  pair first**, so the split reads the same pool the buy trades against: anything donated into a pair and not yet
+  synced would otherwise be folded in by the run's own swap, between the split's reading and the add's. The budget is
+  still taken from the reserves `previewRun` read, so the offer never changes.
+- **The add.** After the buy the run reads the pool again and pairs the tokens it holds with what is left of the
+  offer at the pool's own ratio (the Uniswap V2 router's optimal amounts): all the tokens with
+  `tokens × reserveUsdc / reserveToken` USDC, or, if that is more than is left, all the USDC left with the tokens it
+  matches. It transfers both into the pair and mints in the same call, with nothing in between that anyone else can
+  use: `LaunchPair.mint` credits balances minus reserves, and a plain transfer into a pair can be skimmed by anyone.
+  The LP is minted to `0x…dEaD`, and the run checks the amount against its own reading of the pair's formula
+  (`LiquidityMismatch`). Rounding leaves **at most 4 units of an offer held** for the next run and burns at most about
+  **2 units' worth of tokens**. An add too small to mint any LP is skipped (only for offers of a few units): those
+  tokens are burned and the USDC waits.
+- **Every token it holds is burned or added in the same run**, including anything sent to it directly, and it never
+  keeps LP: LP someone sends it is passed to `0x…dEaD` by the next pool run. `run` emits `DeepenRun` with what was
+  bought, added, burned and locked.
+- **A run that sells out the curve** is handled as Buyback & burn handles it: the launchpad takes only what the last
+  tokens cost, graduates the token and seeds the pool inside the run, the tokens bought are burned, and the rest of
+  the offer stays held for the next run, which deepens the pool.
+
+**Security (tests: `DeepenPoolPlugin.t.sol`, `DeepenPoolPacing.t.sol`, `DeepenPoolFrontRun.t.sol`,
+`DeepenPoolInvariant.t.sol`, `e2e/DeepenPoolE2E.t.sol`, `e2e/DeepenPoolGasE2E.t.sol`)**
+
+- **Every token a pool run buys goes back into the pool** (all but the rounding), so a run leaves the pool's
+  **token reserve where it was**
+  and raises its USDC reserve by the net buy plus the add: a full cap lifts the price by about **0.25%**, half of
+  what Buyback & burn's full cap lifts it, and `k` grows. Because the token reserve does not move, a round trip
+  around the runs returns the same **share** of the position at every size: sandwiching gains nothing from trading
+  bigger.
+- **Sandwiching one run always loses**, at any size and any creator fee: one cap lifts the price about 0.25% while
+  the round trip costs 2 × (0.5% + c) ≥ 1%.
+- **Front-running the paced runs** means holding. On the curve the runs are Buyback & burn's, with its bounds
+  (§2.2: 3.1 h at 0.5%, 5.2 h at 1%, 9.4 h at 2%, 23 h at 5%, 48.6 h at 10%, and 1.0 h at c = 0). In the pool the bound is
+  about **(2 × (0.5% + c) / 0.25% − 1) hours**; the exact-integer model (a run every second, the first a full cap,
+  positions of 1 to 20,000 USDC, a pot that never limits a run) puts the shortest profitable hold at **3.0 h for
+  c = 0, 7.1 h for 0.5%, 11.2 h for 1%, 19.5 h for 2%, 45.6 h for 5% and 93.0 h for 10%**, about twice Buyback &
+  burn's. Past it the trader is a holder collecting what the runs give every holder, at the market's risk. A trader
+  paid part of the creator fee (the creator, through a Combo) faces a smaller c.
+  `DeepenPoolFrontRun.t.sol` reproduces the model to the unit.
+- **Two paced plugins on one token [accepted limit].** A Combo may hold both Deepen pool and Buyback & burn. They
+  pace separately, so the token spends up to two caps an hour and its price is lifted about twice as fast, which
+  roughly **halves the bounds above**: on the curve about `c / 50` hours with c in basis points (0 at c = 0, 1.0 h
+  at 0.5%, 2.1 h at 1%, 4.2 h at 2%, 11.0 h at 5%, 23.8 h at 10%), in the pool about `(25 + 2c) / 75` hours (0.3 h at c = 0, 1.7 h at
+  0.5%, 3.1 h at 1%, 5.9 h at 2%, 14.8 h at 5%, 31.5 h at 10%). Nothing on-chain can stop it (a creator can pair any
+  two plugins through a Combo, or through a plugin of their own), so the **builder should not offer both in one
+  Combo**, and the marketplace copy says what pairing them costs.
+- **Liquidity is anyone's.** The cap follows the pool's USDC reserve, so a large liquidity provider raises it and the
+  pot spends faster; each run's price move, as a share of the reserve, is unchanged, so the bounds hold. A
+  pre-existing LP gains from a run exactly what holding the same tokens and USDC would, to rounding: the add is at
+  the pool's own ratio, and the LP it mints goes to the burn address.
+- **The creator fee of the run's own buy** comes back to the token's plugin: straight into this pot, or, through a
+  Combo, partly to its other entries. The loop converges (each round returns at most c of the buy half) and ends
+  under `MIN_RUN_USDC`.
+- **Reentrancy**: every state-changing entry point is `nonReentrant`; the only external callees are the launchpad,
+  its launch router, the token's launch pair, the token and USDC. `onFees` never trades, so it is safe inside the
+  launchpad's non-reentrant collection.
+- **What anyone can take from the pot**: nothing directly. USDC leaves only through a run, to the launchpad (both
+  fees), the pair (the buy and the add) and the token's `burn`. There is no owner, no admin, no sweep and no upgrade,
+  the LP only ever goes to `0x…dEaD`, and a run pays its caller nothing. The rest of §9 applies unchanged: USDC sent
+  straight to the plugin is credited to no token, and a blocklisted plugin or token strands its fees **[D10]**.
+
+**Cost and tooling.** Measured end to end with cooled storage (`e2e/DeepenPoolGasE2E.t.sol`): a run costs about
+265k gas on the curve (188k for a later one), 412k for the run that sells the curve out and graduates the token, and
+332k in the pool (281k for a later one, 297k when it also burns tokens sent to the plugin); `createToken` with this
+plugin costs about 3.28M and a collection into it 139k. Solhint is clean (one `gas-strict-inequalities` warning, the
+class `LaunchToken` already carries); Slither finds 0 High and only the classes the other plugins already report
+(`incorrect-equality` on `== 0` checks of computed amounts, `reentrancy-no-eth` for state written after a call to the
+launchpad or the router inside `nonReentrant`, `unused-return` on `getReserves`, `timestamp`).
 
 ## 3. Launch tokens (v2)
 

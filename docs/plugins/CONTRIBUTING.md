@@ -29,9 +29,11 @@ a plugin isn't listed.
 4. **Account per token.** One deployment serves every token that picks it. Never treat your USDC balance as
    one token's balance.
 5. **Don't trade inside a hook.** Hooks run under the launchpad's reentrancy guard. Do anything that buys, sells
-   or adds liquidity in a separate, permissionless function, as Buyback & burn's `run` does. If anyone can
-   trigger it, pace it by time, not by block: a trader can hold across blocks, and on Arc blocks come faster
-   than one a second (V13-SPEC §2.2).
+   or adds liquidity in a separate, permissionless function, as Buyback & burn's and Deepen pool's `run` do. If
+   anyone can trigger it, pace it by time, not by block: a trader can hold across blocks, and on Arc blocks come
+   faster than one a second (V13-SPEC §2.2, §2.3). Work out, and write down, how long a trader has to hold before
+   front-running your runs pays, and remember that the pacing is per plugin: a Combo holding two paced plugins
+   spends twice as fast and halves that time (V13-SPEC §2.3).
 6. **Pay out by pull, not push.** One bad recipient must never block the others.
 7. **A broken plugin strands fees.** If `onFees` reverts, that token's fees stay with the launchpad forever
    (owner decision D10). Test like it.
@@ -42,6 +44,16 @@ a plugin isn't listed.
 
 The reference plugins in `contracts/plugins/launch/` share these rules through `LaunchFeePluginBase.sol`.
 Inherit from it.
+
+**Moving liquidity** (Deepen pool, V13-SPEC §2.3) adds three rules of its own, because a launch pair pays out on
+balances, not on what you tell it:
+
+- `sync()` the pair before you read its reserves, so what you compute from them is what your own swap will trade
+  against; anything donated into the pair and not yet synced is folded in by that swap otherwise.
+- Transfer both sides in and `mint` in the same call, with no call in between that anyone else could use: a plain
+  transfer sitting in a pair can be skimmed by anyone.
+- Compute the LP the pair's formula owes your deposit and check what you were minted against it, and send the LP
+  somewhere it can never come back from (Deepen pool mints it to `0x…dEaD`).
 
 ## Checklist
 
