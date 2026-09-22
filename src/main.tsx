@@ -18,6 +18,7 @@ if (import.meta.env.DEV) {
 
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
+import { SpeedInsights } from '@vercel/speed-insights/react'
 import { WagmiProvider } from 'wagmi'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { config } from './config'
@@ -43,6 +44,7 @@ createRoot(document.getElementById('root')!).render(
             <UnlockSheet />
             <UpdatesSheet />
             <IntroSplash />
+            <SpeedInsights />
           </ConnectSheetProvider>
         </QueryClientProvider>
       </WagmiProvider>
