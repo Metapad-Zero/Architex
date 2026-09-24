@@ -1,6 +1,6 @@
 import { useId, useRef } from 'react'
 import type { Address } from 'viem'
-import { LISTED_PLUGINS, isPluginDeployed, listedPlugin, type ListedPluginKind } from '../content/plugins/registry'
+import { LISTED_PLUGINS, isPluginOffered, listedPlugin, type ListedPluginKind } from '../content/plugins/registry'
 import { GHOST, formatPct, shortAddress } from '../lib/format'
 import {
   MAX_COMBO_ENTRIES,
@@ -35,7 +35,12 @@ function isListedKind(kind: string): kind is ListedPluginKind {
 }
 
 function available(kind: FeePlanKind): boolean {
-  return !isListedKind(kind) || isPluginDeployed(listedPlugin(kind))
+  return !isListedKind(kind) || isPluginOffered(listedPlugin(kind))
+}
+
+/** Why a listed plugin is not offered: paused for new launches, or not deployed on this network. */
+function unavailableReason(kind: FeePlanKind): string {
+  return (isListedKind(kind) && listedPlugin(kind).paused) || 'Not deployed on this network yet.'
 }
 
 function kindName(kind: FeePlanKind): string {
@@ -45,7 +50,7 @@ function kindName(kind: FeePlanKind): string {
 /** A new plan of `kind`, as the picker shows it when that kind is chosen. */
 export function initialPlan(kind: FeePlanKind, creator?: Address): FeePlan {
   if (kind !== 'combo') return emptyTarget(kind, creator)
-  const second: SimpleTarget['kind'] = available('buyback') ? 'buyback' : 'custom'
+  const second: SimpleTarget['kind'] = available('buyback') ? 'buyback' : available('holders') ? 'holders' : 'custom'
   return {
     kind: 'combo',
     entries: [
@@ -440,7 +445,7 @@ export function FeeDestinationPicker({ plan, onPlan, errors, showErrors, account
                 onChange={() => choose(option.kind)}
               />
               <span className="fee-option-name">{option.name}</span>
-              <span className="fee-option-tagline">{open ? option.tagline : 'Not deployed on this network yet.'}</span>
+              <span className="fee-option-tagline">{open ? option.tagline : unavailableReason(option.kind)}</span>
             </label>
           )
         })}

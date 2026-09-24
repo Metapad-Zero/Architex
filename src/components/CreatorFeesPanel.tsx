@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import type { Address } from 'viem'
 import { useAccount } from 'wagmi'
 import { activeChain, addressExplorerUrl } from '../chain'
-import { listedPluginAt } from '../content/plugins/registry'
+import { listedPlugin, listedPluginAt } from '../content/plugins/registry'
 import { useConnectSheet } from '../hooks/useConnectSheet'
 import { useCreatorFees, type CreatorFeeAction } from '../hooks/useCreatorFees'
 import { useSwitchToArc } from '../hooks/useSwitchToArc'
@@ -168,6 +168,7 @@ function BuybackPanel({ buyback, symbol, graduated, alsoPaysHolders, busy, statu
       <p className="fee-plugin-note">
         Anyone can run it. It spends at most 0.25% of the {side} USDC side per hour and burns every token it buys, so the supply only goes down.
         {alsoPaysHolders && ' It doesn’t raise anyone’s share of holder dividends: the tokens it buys come from the curve or the pool, which earn none.'}
+        {listedPlugin('buyback').paused && ' This version is paused for new launches, and an updated one is coming.'}
       </p>
     </section>
   )

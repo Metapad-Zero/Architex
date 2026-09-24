@@ -55,6 +55,10 @@ export function DocsFees() {
         about two days at 10%), and by then they're just a holder.
       </p>
       <p>
+        Buyback &amp; burn is paused for new launches while an updated version is prepared. Tokens
+        that already use it keep it, and anyone can still run their buybacks.
+      </p>
+      <p>
         Burning lowers the total supply, but it doesn't raise anyone's share of holder dividends:
         the tokens a buyback buys come from the curve or the launch pool, which earn none, and are
         burned straight away.

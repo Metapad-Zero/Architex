@@ -22,6 +22,12 @@ export interface ListedPlugin {
   suiteKey: keyof Pick<LaunchSuite, 'splitPlugin' | 'buybackPlugin' | 'holderPlugin' | 'comboPlugin'>
   /** Path from the repo root to the contract's source. */
   contractPath: string
+  /**
+   * Set while the plugin is closed to new launches: one short line, shown where the builder would offer it. The
+   * builder stops offering it, on its own and as a Combo entry; tokens that already chose it still show it and can
+   * still run it.
+   */
+  paused?: string
 }
 
 export const LISTED_PLUGINS: readonly ListedPlugin[] = [
@@ -44,6 +50,7 @@ export const LISTED_PLUGINS: readonly ListedPlugin[] = [
     config: 'none',
     suiteKey: 'buybackPlugin',
     contractPath: 'contracts/plugins/launch/BuybackBurnPlugin.sol',
+    paused: 'Paused for new launches. An updated version is coming.',
   },
   {
     kind: 'holders',
@@ -79,6 +86,11 @@ export function pluginAddress(plugin: ListedPlugin, suite: LaunchSuite = launchS
 
 export function isPluginDeployed(plugin: ListedPlugin, suite: LaunchSuite = launchSuite): boolean {
   return pluginAddress(plugin, suite) !== zeroAddress
+}
+
+/** Whether the builder offers the plugin for a new launch: deployed on this network and not paused. */
+export function isPluginOffered(plugin: ListedPlugin, suite: LaunchSuite = launchSuite): boolean {
+  return isPluginDeployed(plugin, suite) && !plugin.paused
 }
 
 /** The listed plugin deployed at `address`, if any. */

@@ -147,6 +147,7 @@ function refuse(address: Address, role: Recipient, ctx: PlanContext): string | u
   }
   const listed = listedPluginAt(address, ctx.suite)
   if (listed) {
+    if (listed.paused && role !== 'payee') return `That is the ${listed.name} plugin, which is paused for new launches.`
     if (role === 'payee') return `That is the ${listed.name} plugin. USDC a Split pays it is credited to no token and is lost.`
     if (role === 'entry') {
       return listed.kind === 'combo' ? 'A Combo cannot include itself.' : `That is the ${listed.name} plugin. Add it as its own destination so it is set up.`
@@ -229,6 +230,10 @@ function listedAddress(kind: ListedPluginKind, key: string, ctx: PlanContext, er
   const address = pluginAddress(plugin, ctx.suite)
   if (address === zeroAddress) {
     errors[key] = `${plugin.name} is not deployed on this network yet.`
+    return undefined
+  }
+  if (plugin.paused) {
+    errors[key] = `${plugin.name} is paused for new launches.`
     return undefined
   }
   return address
