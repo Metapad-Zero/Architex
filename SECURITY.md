@@ -172,6 +172,21 @@ test USDC and with real test USDC; five tokens (one per plugin) taken through gr
 collections, buybacks and claims; the books checked after every transaction. Second run on the reviewed
 contracts: 90 transactions, 1,424 checks, 0 failures; deployed bytecode equal to the local build.
 
+## 3c. Deepen pool: round-5 review record (2026-09-23)
+
+Deepen pool (V13-SPEC §2.3) had an independent Claude review, which writes proof-of-concept tests, and Grok #5.
+Grok cleared it. The Claude review found one High that also applies to the Buyback & burn plugin already on
+mainnet:
+- **H1: one transaction could make a run spend the whole pot at a pushed price.** Both plugins took their pool cap
+  from the pool's whole USDC reserve, and `LaunchPair` charges nothing to add or remove liquidity. Push, park the bag
+  as liquidity, run, unpark, sell: +153,179 USDC (Deepen pool) and +154,893 USDC (Buyback & burn v1) on a 200,000 USDC
+  pot, zero blocks held, all fees paid. **Fixed in Deepen pool** before its deploy: the cap is 0.25% of the locked
+  part of the pool, the share owned by LP at `0x…dEaD`, which adding or removing liquidity does not move. **Buyback &
+  burn v1 is immutable**; no mainnet token uses it, and the builder has paused it for new launches. Its tests keep
+  asserting that it pays, so it is not listed again by accident.
+- The review's other notes were documentation (an existing LP loses about `n²/R` against holding per run, not
+  nothing) and three informational checks that held.
+
 ## 4. Third-party scanners — after mainnet deploy + Etherscan-equivalent verification
 
 These need a **deployed, verified contract address** and most need an account on their site —

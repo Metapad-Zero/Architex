@@ -13,10 +13,11 @@ import {ILaunchFeePlugin} from "./ILaunchFeePlugin.sol";
 ///
 ///         Fees accrue per token (`usdcHeld`); ANYONE may deliver them through onFees for a configured token, not only
 ///         the launchpad's collection: Architex's own fee wallet, the creator or anyone else can top a token's pot up
-///         (a gift: nothing ever pays it back). Anyone may call run(token), paced exactly like Buyback & burn: a run
-///         offers min(usdcHeld, budget), where
-///           cap    = 0.25% of the USDC-side reserve (the curve's virtual USDC before graduation, the launch pool's
-///                    USDC reserve after), and
+///         (a gift: nothing ever pays it back). Anyone may call run(token), paced like Buyback & burn: a run offers
+///         min(usdcHeld, budget), where
+///           cap    = 0.25% of the curve's virtual USDC before graduation, and after it 0.25% of the LOCKED part of
+///                    the launch pool's USDC reserve, reserve * LP held by 0x…dEaD / LP supply (Buyback & burn v1
+///                    used the whole reserve, which parked liquidity can inflate for one transaction), and
 ///           budget = cap * min(now - lastRunAt, RUN_INTERVAL) / RUN_INTERVAL, rounded down (the full cap for a
 ///                    token's first run),
 ///         at most once per token per block, never below MIN_RUN_USDC. Burning and deepening share that one budget and
@@ -65,8 +66,9 @@ import {ILaunchFeePlugin} from "./ILaunchFeePlugin.sol";
 ///               7,500 |   1.3    3.6    6.0   10.9   26.3   55.2
 ///              10,000 |   1.0    3.1    5.1    9.4   23.0   48.6
 ///
-///         (the last row is Buyback & burn's, as it must be). Sandwiching one run always loses: a full cap lifts the
-///         price by at most about 0.5%, the round trip costs at least 1%. Past the bound the trader is a holder
+///         (the last row is Buyback & burn's, as it must be). Sandwiching one run always loses, with or without the bag
+///         parked as liquidity across it: a full cap lifts the price by at most about 0.5%, the round trip costs at
+///         least 1%, and parking does not move the locked part the cap is taken from. Past the bound the trader is a holder
 ///         collecting what the runs give every holder. Putting this plugin and Buyback & burn in one Combo would pace
 ///         them separately and halve these bounds; a burn share here does the same job under one budget, so there is
 ///         no reason to pair them.
@@ -109,7 +111,8 @@ interface IDeepenPoolPlugin is ILaunchFeePlugin {
     /// @notice The launch pair minted a different amount of LP than its reserves and supply imply.
     error LiquidityMismatch(uint256 expected, uint256 minted);
 
-    /// @notice 25: the cap, 0.25% of the USDC-side reserve (Buyback & burn's). No run offers more than one cap.
+    /// @notice 25: the cap, 0.25% of the curve's virtual USDC, or of the locked part of the pool's USDC reserve after
+    ///         graduation. No run offers more than one cap.
     function CAP_BPS() external view returns (uint256);
     /// @notice 3600 (one hour): the cap refills in proportion to the time since the last run, fully after this long.
     function RUN_INTERVAL() external view returns (uint256);

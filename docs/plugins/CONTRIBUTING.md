@@ -43,6 +43,12 @@ a plugin isn't listed.
    zero, your plugin, the launchpad, USDC, the token, any launch pair (`launchpad.isLaunchPair`; anyone can
    skim a transfer out of one), the launch router, the pair factory and any launch token, reading only the
    launchpad, never the recipient.
+9. **Size what a run spends from something one transaction can't move.** A launch pair charges nothing to add or
+   remove liquidity, so its reserves, like any balance, are anyone's to inflate for the length of one transaction.
+   Buyback & burn v1 took its cap from the pool's whole USDC reserve, and one transaction could push the price, park
+   the bag as liquidity and make a single run spend the whole pot at the pushed price (V13-SPEC §2.2, round-5
+   review H1). Deepen pool takes it from the locked part instead: the share of the reserve owned by LP at
+   `0x…dEaD`. Test your plugin against an attacker who pushes, parks, runs, unparks and sells in one transaction.
 
 The reference plugins in `contracts/plugins/launch/` share these rules through `LaunchFeePluginBase.sol`.
 Inherit from it.

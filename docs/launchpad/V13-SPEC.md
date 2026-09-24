@@ -122,6 +122,17 @@ buys at least one token wei, on the curve and in the pool. At most 2 units per t
   run in each of the next blocks and sell once, paying the fees once for many caps. That paid after 3 runs
   at c = 0%, 7 at 1%, 24 at 5% and 50 at 10%, and Arc makes more than a block a second; at 1% with
   1,000 USDC waiting, it took 44% of the pile.
+- **v1 defect, found after deployment (round-5 review, H1).** In the pool, v1's cap is 0.25% of the pool's whole
+  USDC reserve, and `LaunchPair` charges nothing to add or remove liquidity, so anyone can inflate that reserve for
+  the length of one transaction. Push the price with a buy, park the bag as liquidity, call `run`, unpark and sell:
+  in one transaction, held for zero blocks, a 200,000 USDC pot in a 25,000 USDC pool at a 1% creator fee went in
+  one run, for **+154,893 USDC net** after every fee. The smallest profitable pot is about 1,000 USDC at c = 0 and
+  10,000 at 1% (the capital, about 400 times the pot, all comes back inside the transaction; a flash loan would do).
+  The front-running bounds above hold only for a trader who does not add liquidity. v1 is deployed and immutable,
+  and no mainnet token uses it; **the builder has paused it** for new launches. The fix is Deepen pool's (§2.3): the
+  cap is 0.25% of the locked part of the pool. A fixed buyback is Deepen pool at `burnBps = 10,000`, or a Buyback &
+  burn v2 with the same base. `review2/CapInflationSettle.t.sol` keeps asserting that v1 pays, so it cannot be
+  listed again by accident.
 
 ### 2.3 Addendum: Deepen pool (added after sign-off, 2026-09-22)
 
@@ -147,7 +158,11 @@ deploy script `contracts/script/DeployDeepenPool.s.sol`.
   pays it back, and a token with a 0% creator fee can be fed this way alone.
 - **Pacing**: Buyback & burn's, with the same constants (`CAP_BPS` 25, `RUN_INTERVAL` 1 h, `MIN_RUN_USDC` 3): a run
   offers `min(held, cap × min(now − lastRunAt, 1 h) / 1 h)`, a full cap for a token's first run, at most once per
-  token per block, and `previewRun` is exactly what `run` offers (it also says how the offer divides).
+  token per block, and `previewRun` is exactly what `run` offers (it also says how the offer divides). One
+  difference, the fix for H1 (§2.2): after graduation the cap is 0.25% of the **locked part** of the pool's USDC
+  reserve, `reserve × LP held by 0x…dEaD / LP supply`, not of the whole reserve. `0x…dEaD` holds graduation's LP,
+  `MINIMUM_LIQUIDITY` and every add this plugin makes, and none of it can ever leave. In a pool nobody else has
+  added to that is the whole reserve, so the cap is unchanged there. On the curve it is still 0.25% of `virtualUsdc`.
 - **The split.** A pool run divides its offer U into `burnBps` of it (rounded down) and the rest. The burn side buys
   first, so the deepen side works against the pool that buy leaves. With that pool's USDC reserve `R` and
   `q = 10,000 − (50 + c)` bps (what a buy leaves after both fees), a buy of `b` puts `n = b·q/10⁴` into the pool and
@@ -184,7 +199,8 @@ deploy script `contracts/script/DeployDeepenPool.s.sol`.
   `0.25% × (1 + burnBps / 10,000)`: 0.25% at `burnBps = 0`, 0.5% at 10,000 (Buyback & burn's), 0.375% in between at
   the default. `k` grows either way.
 - **Sandwiching one run always loses**, at any size, any creator fee and any burn share: one cap lifts the price by
-  at most about 0.5% while the round trip costs 2 × (0.5% + c) ≥ 1%.
+  at most about 0.5% while the round trip costs 2 × (0.5% + c) ≥ 1%. That now includes a trader who parks the bag
+  as liquidity across the run (next bullet), which the first version of this section missed.
 - **Front-running the paced runs** means holding. On the curve the runs are Buyback & burn's, with its bounds (§2.2:
   3.1 h at c = 0.5%, 5.2 h at 1%, 9.4 h at 2%, 23 h at 5%, 48.6 h at 10%, and 1.0 h at c = 0), whatever the burn
   share. In the pool the bound is about **2 × (0.5% + c) / (0.25% × (1 + burnBps / 10,000)) − 1 hours**. The
@@ -212,10 +228,18 @@ deploy script `contracts/script/DeployDeepenPool.s.sol`.
   10% (on the curve, where both are buybacks, about `c / 50` hours). Nothing on-chain can stop a creator pairing two
   paced plugins, through a Combo or through a plugin of their own, so the **builder should not offer both in one
   Combo**: the burn share does the same job under one budget, and the marketplace copy says so.
-- **Liquidity is anyone's.** The cap follows the pool's USDC reserve, so a large liquidity provider raises it and the
-  pot spends faster; each run's price move, as a share of the reserve, is unchanged, so the bounds hold. A
-  pre-existing LP gains from a run exactly what holding the same tokens and USDC would, to rounding: the add is at
-  the pool's own ratio, and the LP it mints goes to the burn address.
+- **Parked liquidity cannot inflate a run (round-5 review, H1).** Liquidity is anyone's to add and remove, for
+  free, so a cap taken from the whole reserve could be inflated for one transaction (§2.2 has the attack and its
+  numbers; against the first version of this plugin it took a 200,000 USDC pot for +153,179 USDC net). The locked
+  part does not move when liquidity is added or removed at the pool's price. A push still moves it, by the square
+  root of the price move, so a push of `b` USDC raises the cap by at most 0.25% of `b`, while the push pays the
+  0.5% platform fee going in and again coming out (`CAP_BPS` < `FEE_BPS`). With the fix, the same attack loses
+  38,543 USDC, and no pot from 250 USDC to 1,000,000 USDC, no creator fee from 0 to 10% and no push size pays, in a
+  fresh pool or one shrunk to a quarter of its graduation size (`review2/CapInflationSettle.t.sol`,
+  `review2/DeepenCapBase.t.sol`, which fuzzes push, park, pot and creator fee). Liquidity other people add counts
+  for nothing, so the pot spends no faster than the locked part allows. LP given to `0x…dEaD` counts, in
+  proportion, because it is locked. A large LP is the counterparty to the run's buys, as to any buy, and loses about
+  `n²/R` against holding for a run of `n` into a USDC side of `R`.
 - **The creator fee of the run's own buys** comes back to the token's plugin: straight into this pot, or, through a
   Combo, partly to its other entries. The loop converges (each round returns at most c of what was bought with) and
   ends under `MIN_RUN_USDC`.
