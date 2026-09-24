@@ -18,7 +18,7 @@ creator picks the mix once, at launch: the **burn share**, `burnBps`, from 0 (al
 | `kind` | `'deepen'` (add to `ListedPluginKind`) |
 | `name` | `Deepen pool` |
 | `tagline` | `Burns the token and grows its pool, in one.` |
-| `description` | `Spends the fees buying the token and burning it while it is on the curve. Once it graduates, every run splits: your burn share buys the token and burns it, and the rest buys the token and adds it to the launch pool, locking the new liquidity at the burn address. Anyone can run it; it spends at most 0.25% of the curve's or pool's USDC side per hour, whatever the mix.` |
+| `description` | `Spends the fees buying the token and burning it while it is on the curve. Once it graduates, every run splits: your burn share buys the token and burns it, and the rest buys the token and adds it to the launch pool, locking the new liquidity at the burn address. Anyone can run it; it spends at most 0.25% of the curve's USDC side, or of the pool's locked USDC, per hour, whatever the mix.` |
 | `config` | `'burnShare'` (a new configuration kind: one number, see below) |
 | `suiteKey` | `'deepenPlugin'` |
 | `contractPath` | `contracts/plugins/launch/DeepenPoolPlugin.sol` |
@@ -64,8 +64,9 @@ On the curve every run buys and burns, so the hours there are Buyback & burn's w
 
 Deepen pool and Buyback & burn pace themselves separately. A Combo holding **both** spends twice as fast and cuts
 the hours above by about 2.4x (at a 1% creator fee and the default share: 7.2 h with this plugin alone, 2.5 h with
-Buyback & burn running beside it). The burn share makes the pairing pointless, so the builder should **not offer
-both in the same Combo**; if it ever does, say plainly that pairing them weakens the protection.
+Buyback & burn running beside it). Worse, the Buyback & burn deployed today (v1) can have its own pot drained in one
+transaction (V13-SPEC §2.2, H1), and Deepen pool's run then rides that attack (§9). The burn share makes the pairing
+pointless, so the builder must **refuse both in the same Combo**.
 
 ## Token page
 

@@ -184,8 +184,17 @@ mainnet:
   part of the pool, the share owned by LP at `0x…dEaD`, which adding or removing liquidity does not move. **Buyback &
   burn v1 is immutable**; no mainnet token uses it, and the builder has paused it for new launches. Its tests keep
   asserting that it pays, so it is not listed again by accident.
-- The review's other notes were documentation (an existing LP loses about `n²/R` against holding per run, not
-  nothing) and three informational checks that held.
+- The review's other notes were documentation (an existing LP loses about its share of `n²/R` against holding per
+  run, not nothing) and three informational checks that held.
+
+**Round 6, on the fix** (a fresh Claude review with proof-of-concept tests, and Grok #6,
+`docs/launchpad/GROK-REVIEW-6.md`; Grok #5 is `GROK-REVIEW-5.md`). Both call Deepen pool safe to deploy. Neither
+could move the locked part for less than it buys: across 48 pool shapes, creator fees and burn shares, pushes from
+1 unit to billions of USDC, parking, donations, unbalanced mints, LP gifted to `0x…dEaD` and repeated mint-and-burn,
+the closest case lost 0.504% of the push. Both found the same Low: in a Combo beside Buyback & burn v1, whose own pot
+is drained through H1, Deepen pool's run adds about 3,500 USDC to that attack. It is written into V13-SPEC §9 and the
+builder refuses the pairing. The rest was doc precision (the exact bound, the only-buyer assumption, dust at extreme
+prices), now fixed. The round-6 PoCs are kept as regression tests in `contracts/test/review3/`.
 
 ## 4. Third-party scanners — after mainnet deploy + Etherscan-equivalent verification
 

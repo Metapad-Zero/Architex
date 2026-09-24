@@ -10,9 +10,9 @@ import {ILaunchRouter} from "../../interfaces/ILaunchRouter.sol";
 import {ILaunchTokenExtensions} from "../../interfaces/ILaunchTokenExtensions.sol";
 import {ILaunchFeePlugin} from "../../interfaces/plugins/ILaunchFeePlugin.sol";
 import {IDeepenPoolPlugin} from "../../interfaces/plugins/IDeepenPoolPlugin.sol";
-import {LaunchFeePluginBase} from "./LaunchFeePluginBase.sol";
+import {LaunchFeePluginBase} from "../../plugins/launch/LaunchFeePluginBase.sol";
 
-/// @title DeepenPoolPlugin
+/// @title DeepenPoolPluginPreFix (review3 comparison copy of commit 7da9b3b, the version before the H1 fix; test-only)
 /// @notice "A launch pool that burns the entire way, past the curve and everything" (V13-SPEC §2.3). Each launch
 ///         token's creator fees, and anything anyone else delivers for it, are spent in paced runs that anyone can
 ///         call. On the curve a run is Buyback & burn's: buy the token through the launchpad and burn it. After
@@ -21,11 +21,11 @@ import {LaunchFeePluginBase} from "./LaunchFeePluginBase.sol";
 ///         the USDC left, to the token's launch pool, minting the LP straight to 0x…dEaD, locked forever. Everything
 ///         the add does not take is burned. The plugin keeps no token and no LP between calls.
 ///
-///         Both sides share ONE paced budget and one clock: a run offers min(held, budget), the budget being 0.25% of
-///         the curve's virtual USDC, or after graduation of the LOCKED part of the pool's USDC reserve (the share owned
-///         by LP at 0x…dEaD; see Security), prorated by the time since the token's last run (a full cap for its first
-///         run), at most once per token per block, never below MIN_RUN_USDC. That is the point of doing both here: two
-///         paced plugins on one token would spend twice as fast and halve the front-running protection.
+///         Both sides share ONE paced budget and one clock, Buyback & burn's, line for line: a run offers
+///         min(held, budget), the budget being 0.25% of the USDC-side reserve prorated by the time since the token's
+///         last run (a full cap for its first run), at most once per token per block, never below MIN_RUN_USDC. That
+///         is the point of doing both here: two paced plugins on one token would spend twice as fast and halve the
+///         front-running protection.
 ///
 /// @dev The add (IDeepenPoolPlugin has the split formula and the bound table). With the pool's reserves (T, R) after
 ///      the burn side's buy and q = 10,000 - fee bps, a buy of b puts n = b*q/1e4 USDC in and takes t = n*T/(R+n)
@@ -56,20 +56,10 @@ import {LaunchFeePluginBase} from "./LaunchFeePluginBase.sol";
 ///        side: the trader keeps the run's price rise (at most about 0.5% for a full cap, all of it burning) against a
 ///        round trip costing 2 * (0.5% + c). One run never pays, at any size, and holding through runs pays only after
 ///        the documented hours.
-///      - Anyone may add or remove liquidity, and LaunchPair charges nothing for either, so the pool's USDC reserve
-///        is anyone's to inflate for the length of one transaction. The budget therefore never reads it whole: in the
-///        pool the cap is 0.25% of the locked part, reserve * LP at 0x…dEaD / LP supply, where 0x…dEaD holds
-///        graduation's LP, MINIMUM_LIQUIDITY and every add this plugin makes, none of which can ever leave. Adding or
-///        removing liquidity at the pool's price leaves that part where it is. (Round-5 review, H1: with the whole
-///        reserve as the base, pushing the price, parking the bag as liquidity and running spent a 200,000 USDC pot
-///        at a price pushed about 3,200x, for +153,000 USDC net, in one transaction.) A push still moves the locked
-///        part, by the square root of the price move: a push of b raises the cap by at most 0.25% of b, plus a unit.
-///        What an attacker can take is the run's overpayment at the pushed price, about twice that for a small push,
-///        while the push pays FEE_BPS (0.5%) going in and again coming out, so CAP_BPS must stay below FEE_BPS (a 2x
-///        margin at a 0% creator fee). Liquidity other people add counts for nothing, so a crowded pool spends no
-///        faster than its locked part allows. Dead's new LP is exactly the run's add; a large LP is the counterparty
-///        to the run's buys, as to any buy. All of this assumes this plugin is the token's only buyer: a second
-///        paced buyer that pays for the push (Buyback & burn v1 in a Combo) lets a run here ride it (V13-SPEC §9).
+///      - Anyone may add or remove liquidity. A large LP raises the pool's USDC reserve and so the cap: the pot
+///        spends faster, but each run's price rise, relative to the reserve, stays the same. A pre-existing LP gains
+///        from a run exactly what holding the same tokens and USDC would (to rounding); dead's new LP is exactly
+///        the run's add.
 ///      - The creator fee on the run's own buys goes back to the token's plugin: straight back into this pot, or,
 ///        through a Combo, partly to its other entries (the creator's wallet, say). A trader paid part of the creator
 ///        fee faces a smaller c, as with Buyback & burn.
@@ -77,7 +67,7 @@ import {LaunchFeePluginBase} from "./LaunchFeePluginBase.sol";
 ///        launchpad, its launch router, the token's launch pair, the token and USDC.
 ///      - Extraction: the pot leaves only through a run, into the launchpad (fees), the pair (the buys and the add)
 ///        and the token's burn. No owner, no admin, no sweep; LP only ever goes to 0x…dEaD.
-contract DeepenPoolPlugin is IDeepenPoolPlugin, LaunchFeePluginBase {
+contract DeepenPoolPluginPreFix is IDeepenPoolPlugin, LaunchFeePluginBase {
     using SafeERC20 for IERC20;
 
     /// @inheritdoc IDeepenPoolPlugin
@@ -165,8 +155,8 @@ contract DeepenPoolPlugin is IDeepenPoolPlugin, LaunchFeePluginBase {
         if (block.number < deepen.nextRunBlock) revert AlreadyRanThisBlock(token);
 
         bool graduated = LAUNCHPAD.isGraduated(token);
-        (address pair, uint256 base) = _capBase(token, graduated);
-        uint256 offer = Math.min(deepen.held, _budget(base, deepen.lastRunAt));
+        (address pair, uint256 reserve) = _usdcSideReserve(token, graduated);
+        uint256 offer = Math.min(deepen.held, _budget(reserve, deepen.lastRunAt));
         // Below the minimum the rounded-up fees would eat the whole buy, and the launchpad or router would revert.
         if (offer < MIN_RUN_USDC) revert NothingToBuy(token);
         deepen.nextRunBlock = block.number + 1;
@@ -216,8 +206,8 @@ contract DeepenPoolPlugin is IDeepenPoolPlugin, LaunchFeePluginBase {
         if (!isConfigured(token) || deepen.held == 0 || block.number < deepen.nextRunBlock) {
             return (0, 0, 0, graduated);
         }
-        (, uint256 base) = _capBase(token, graduated);
-        usdcOffered = Math.min(deepen.held, _budget(base, deepen.lastRunAt));
+        (, uint256 reserve) = _usdcSideReserve(token, graduated);
+        usdcOffered = Math.min(deepen.held, _budget(reserve, deepen.lastRunAt));
         if (usdcOffered < MIN_RUN_USDC) return (0, 0, 0, graduated);
         // On the curve there is no pool to add to: the whole offer buys and burns, whatever the burn share.
         if (!graduated) return (usdcOffered, usdcOffered, 0, graduated);
@@ -232,7 +222,7 @@ contract DeepenPoolPlugin is IDeepenPoolPlugin, LaunchFeePluginBase {
     {
         if (usdcOffered == 0) return (0, 0, 0);
         if (!LAUNCHPAD.isGraduated(token)) return (usdcOffered, 0, 0);
-        (, uint256 reserve) = _pool(token);
+        (, uint256 reserve) = _usdcSideReserve(token, true);
         uint256 usdcToDeepen;
         (usdcToBurn, usdcToDeepen) = _sides(usdcOffered, _deepens[token].burnBps);
         if (usdcToDeepen == 0) return (usdcToBurn, 0, 0);
@@ -398,9 +388,9 @@ contract DeepenPoolPlugin is IDeepenPoolPlugin, LaunchFeePluginBase {
     /// @dev What a run may spend now: the cap prorated by the time since the token's last run,
     ///      cap * min(now - lastRunAt, RUN_INTERVAL) / RUN_INTERVAL rounded down, or the full cap if it never ran.
     ///      Idle time beyond one interval does not accumulate, so no run ever offers more than one cap.
-    ///      (Buyback & burn's _budget, with the base read by the caller.)
-    function _budget(uint256 base, uint256 lastRun) private view returns (uint256 budget) {
-        budget = _cap(base);
+    ///      (Buyback & burn's _budget, with the reserve read by the caller.)
+    function _budget(uint256 reserve, uint256 lastRun) private view returns (uint256 budget) {
+        budget = _cap(reserve);
         if (lastRun != 0) {
             uint256 elapsed = block.timestamp - lastRun;
             if (elapsed < RUN_INTERVAL) budget = (budget * elapsed) / RUN_INTERVAL;
@@ -418,28 +408,19 @@ contract DeepenPoolPlugin is IDeepenPoolPlugin, LaunchFeePluginBase {
         else if (usdcToDeepen < MIN_RUN_USDC) (usdcToBurn, usdcToDeepen) = (offer, 0);
     }
 
-    /// @dev 0.25% of the base, rounded down.
-    function _cap(uint256 base) private pure returns (uint256) {
-        return (base * CAP_BPS) / _BPS;
+    /// @dev 0.25% of the USDC-side reserve, rounded down (Buyback & burn's _cap, with the reserve read by the caller).
+    function _cap(uint256 reserve) private pure returns (uint256) {
+        return (reserve * CAP_BPS) / _BPS;
     }
 
-    /// @dev What the cap is 0.25% of (with the pair, which a pool run needs anyway). On the curve: its virtual USDC.
-    ///      In the pool: the locked part of the pool's USDC reserve, reserve * LP held by 0x…dEaD / LP supply, rounded
-    ///      down. A graduated pool's supply is never zero: graduation mints to 0x…dEaD, MINIMUM_LIQUIDITY included, and
-    ///      nothing can move LP out of it. Why not the whole reserve: the contract's security notes.
-    function _capBase(address token, bool graduated) private view returns (address pair, uint256 base) {
+    /// @dev The reserve the cap is 0.25% of: the curve's virtual USDC before graduation, the launch pool's USDC reserve
+    ///      after (with the pair, which the pool run needs anyway).
+    function _usdcSideReserve(address token, bool graduated) private view returns (address pair, uint256 reserve) {
         if (!graduated) return (address(0), LAUNCHPAD.virtualUsdcOf(token));
-        uint256 reserve;
-        (pair, reserve) = _pool(token);
-        base = Math.mulDiv(reserve, IERC20(pair).balanceOf(LP_RECIPIENT), IERC20(pair).totalSupply());
-    }
-
-    /// @dev The token's launch pool and its USDC reserve as last synced.
-    function _pool(address token) private view returns (address pair, uint256 reserveUsdc) {
         pair = LAUNCHPAD.pairOf(token);
         if (pair == address(0)) revert PairNotSet(token);
-        (, uint112 reserve,) = ILaunchPair(pair).getReserves();
-        reserveUsdc = reserve;
+        (, uint112 reserveUsdc,) = ILaunchPair(pair).getReserves();
+        reserve = reserveUsdc;
     }
 
     /// @dev The platform fee plus the token's creator fee, in bps: what a launch-pool buy pays out of its USDC.

@@ -108,7 +108,9 @@ its first run. So a token spends **at most 0.25% of its reserve per hour, plus o
 an idle hour, and still runs at most once per block. A run takes no slippage bound: the pacing is the
 protection. An offer below `MIN_RUN_USDC` = 3 units is no run (`previewRun` 0, `run` reverts
 `NothingToBuy`): fees round up, so 2 units pay 1 + 1 and buy nothing, while 3 always leave a net unit that
-buys at least one token wei, on the curve and in the pool. At most 2 units per token can stay behind.
+buys at least one token wei, on the curve and in the pool. At most 2 units per token can stay behind. (This
+assumes a token wei is worth less than one USDC unit, which holds until the price is about 8 × 10¹⁵ times the
+graduation price.)
 
 - To front-run the buyback, a trader buys before runs and sells after them, paying 0.5% + c on each leg
   (c = the token's creator fee), while each full cap lifts the price by about 0.5%. Beyond the one cap
@@ -180,7 +182,9 @@ deploy script `contracts/script/DeployDeepenPool.s.sol`.
   matches. It transfers both into the pair and mints in the same call, with nothing in between that anyone else can
   use: `LaunchPair.mint` credits balances minus reserves, and a plain transfer into a pair can be skimmed by anyone.
   The LP is minted to `0x…dEaD`, and the run checks the amount against its own reading of the pair's formula
-  (`LiquidityMismatch`). Rounding leaves **at most 4 units of an offer held** for the next run.
+  (`LiquidityMismatch`). Rounding leaves **at most 4 units of an offer held** for the next run. (This assumes a
+  token wei is worth less than one USDC unit, which holds until the price is about 8 × 10¹⁵ times the graduation
+  price.)
 - **Everything else it holds is burned in the same run**: the burn side's tokens, what the add could not take, and
   anything sent to the plugin directly. It never keeps LP either: LP someone sends it is passed to `0x…dEaD` by the
   next pool run. `run` emits one `DeepenRun` with what was bought, burned, added and locked.
@@ -200,7 +204,9 @@ deploy script `contracts/script/DeployDeepenPool.s.sol`.
   the default. `k` grows either way.
 - **Sandwiching one run always loses**, at any size, any creator fee and any burn share: one cap lifts the price by
   at most about 0.5% while the round trip costs 2 × (0.5% + c) ≥ 1%. That now includes a trader who parks the bag
-  as liquidity across the run (next bullet), which the first version of this section missed.
+  as liquidity across the run (the H1 bullet below), which the first version of this section missed. Every bound in
+  this section assumes Deepen pool is the only plugin buying the token: a second buyer that pays for the push lets
+  a run here ride it (§9, "Deepen pool beside Buyback & burn v1").
 - **Front-running the paced runs** means holding. On the curve the runs are Buyback & burn's, with its bounds (§2.2:
   3.1 h at c = 0.5%, 5.2 h at 1%, 9.4 h at 2%, 23 h at 5%, 48.6 h at 10%, and 1.0 h at c = 0), whatever the burn
   share. In the pool the bound is about **2 × (0.5% + c) / (0.25% × (1 + burnBps / 10,000)) − 1 hours**. The
@@ -225,21 +231,27 @@ deploy script `contracts/script/DeployDeepenPool.s.sol`.
 - **Two paced plugins on one token [accepted limit].** A Combo may still hold both Deepen pool and Buyback & burn.
   They pace separately, so the token spends up to two caps an hour and the bounds fall by about 2.4x: in the pool,
   with the default burn share, 0.2 h at c = 0, 1.3 h at 0.5%, 2.5 h at 1%, 4.9 h at 2%, 12.6 h at 5% and 27.1 h at
-  10% (on the curve, where both are buybacks, about `c / 50` hours). Nothing on-chain can stop a creator pairing two
-  paced plugins, through a Combo or through a plugin of their own, so the **builder should not offer both in one
-  Combo**: the burn share does the same job under one budget, and the marketplace copy says so.
+  10% (on the curve, where both are buybacks, about `c / 50` hours). At c = 0 the hold depends on the burn share:
+  about 2 minutes at 10,000 and 0.2 h at the default (round-6 review). Nothing on-chain can stop a creator pairing
+  two paced plugins, through a Combo or through a plugin of their own, so the **builder refuses both in one Combo**:
+  the burn share does the same job under one budget. The Buyback & burn deployed today is v1, whose own pot can be
+  drained in one transaction (§2.2), which makes the pairing worse still (§9).
 - **Parked liquidity cannot inflate a run (round-5 review, H1).** Liquidity is anyone's to add and remove, for
   free, so a cap taken from the whole reserve could be inflated for one transaction (§2.2 has the attack and its
   numbers; against the first version of this plugin it took a 200,000 USDC pot for +153,179 USDC net). The locked
   part does not move when liquidity is added or removed at the pool's price. A push still moves it, by the square
-  root of the price move, so a push of `b` USDC raises the cap by at most 0.25% of `b`, while the push pays the
-  0.5% platform fee going in and again coming out (`CAP_BPS` < `FEE_BPS`). With the fix, the same attack loses
-  38,543 USDC, and no pot from 250 USDC to 1,000,000 USDC, no creator fee from 0 to 10% and no push size pays, in a
-  fresh pool or one shrunk to a quarter of its graduation size (`review2/CapInflationSettle.t.sol`,
-  `review2/DeepenCapBase.t.sol`, which fuzzes push, park, pot and creator fee). Liquidity other people add counts
-  for nothing, so the pot spends no faster than the locked part allows. LP given to `0x…dEaD` counts, in
-  proportion, because it is locked. A large LP is the counterparty to the run's buys, as to any buy, and loses about
-  `n²/R` against holding for a run of `n` into a USDC side of `R`.
+  root of the price move, so a push of `b` USDC raises the cap by at most 0.25% of `b` (plus one unit of
+  rounding). What an attacker can take is the run's overpayment at the pushed price, about twice that for a small
+  push, while the push pays the 0.5% platform fee going in and again coming out. So the design needs `CAP_BPS`
+  strictly below `FEE_BPS`: at a 0% creator fee the margin is 2x, and the closest case in the round-6 sweep lost
+  0.504% of the push. With the fix, the same attack loses 38,543 USDC, and nothing tried pays: pots from 250 USDC
+  to 1,000,000 USDC, creator fees from 0 to 10%, burn shares 0, 5,000 and 10,000, pushes from 1 USDC to 10,000,000
+  USDC with and without parking, in fresh, shrunk, grown and outside-LP pools, donations with and without a sync,
+  unbalanced mints, LP given to `0x…dEaD` and repeated mint-and-burn (`review2/`, `review3/`, with fuzzing).
+  Liquidity other people add counts for nothing, so the pot spends no faster than the locked part allows. LP given
+  to `0x…dEaD` counts, in proportion, because it is locked. A large LP is the counterparty to the run's buys, as to
+  any buy: an LP owning a share `s` of the pool loses about `s × n²/R` against holding for a run of `n` into a USDC
+  side of `R`.
 - **The creator fee of the run's own buys** comes back to the token's plugin: straight into this pot, or, through a
   Combo, partly to its other entries. The loop converges (each round returns at most c of what was bought with) and
   ends under `MIN_RUN_USDC`.
@@ -452,6 +464,13 @@ the pair and the token, none of which calls anyone else.
 - **Combo remainder.** Each Combo slice is `amount × bps / 10,000` rounded down and the last entry takes the
   remainder, so it gains at most (entries − 1) raw units per collection (0.000004 USDC with five entries). The
   creator chooses the order.
+- **Deepen pool beside Buyback & burn v1 (round-6 reviews, Low).** v1's cap is the whole reserve, so a Combo holding
+  both is still drained through v1 (§2.2), and the push that pays for that also lets Deepen pool's run spend one cap
+  of the pushed locked part at the pushed price: about 3,500 USDC more on a fresh 25,000 USDC pool (+158,353 against
+  v1's +154,893 alone, at a 1% creator fee with 200,000 USDC in each pot). Deepen pool's own pot is not taken. The
+  builder refuses the pairing, and v1 is paused for new launches, so only a creator calling the launchpad directly
+  can build it, for their own token. A guard inside Deepen pool (reading a Combo's `allocationOf` at `onLaunch`)
+  was considered and left out: it would know only v1's address, and any other second buyer has the same effect.
 - **Buyback pacing can lag a busy, high-fee token.** Buyback & burn spends at most 0.25% of the USDC-side reserve
   an hour, so fees arriving faster than that wait in the plugin: for a 25,000 USDC pool, from about 15,000
   USDC of daily volume at a 10% creator fee (30,000 at 5%, 150,000 at 1%). Nothing is lost; the buyback catches

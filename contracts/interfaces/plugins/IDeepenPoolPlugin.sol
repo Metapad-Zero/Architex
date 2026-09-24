@@ -66,8 +66,8 @@ import {ILaunchFeePlugin} from "./ILaunchFeePlugin.sol";
 ///               7,500 |   1.3    3.6    6.0   10.9   26.3   55.2
 ///              10,000 |   1.0    3.1    5.1    9.4   23.0   48.6
 ///
-///         (the last row is Buyback & burn's, as it must be). Sandwiching one run always loses, with or without the bag
-///         parked as liquidity across it: a full cap lifts the price by at most about 0.5%, the round trip costs at
+///         (the last row is Buyback & burn's, as it must be). While this plugin is the token's only buyer, sandwiching
+///         one run always loses, with or without the bag parked as liquidity across it: a full cap lifts the price by at most about 0.5%, the round trip costs at
 ///         least 1%, and parking does not move the locked part the cap is taken from. Past the bound the trader is a holder
 ///         collecting what the runs give every holder. Putting this plugin and Buyback & burn in one Combo would pace
 ///         them separately and halve these bounds; a burn share here does the same job under one budget, so there is
