@@ -1,4 +1,5 @@
 import { lazy, Suspense } from 'react'
+import { Analytics } from '@vercel/analytics/react'
 import { AppShell } from './components/AppShell'
 import { SwapSheet } from './components/SwapSheet'
 import { TableSkeleton } from './components/Skeleton'
@@ -14,33 +15,36 @@ export default function App() {
   const { route, setRoute } = useHashRoute()
   const launchRoute = isLaunchViewAvailable && (route.view === 'launch' || route.view === 'launch-new')
   return (
-    <AppShell route={route} onRoute={setRoute}>
-      {route.view === 'pools' ? (
-        <Suspense fallback={<div className="pools-page"><TableSkeleton rows={5} /></div>}>
-          <PoolsView selectedPair={route.pair} onSelectPair={(pair) => setRoute({ view: 'pools', pair })} />
-        </Suspense>
-      ) : launchRoute ? (
-        <Suspense fallback={<div className="pools-page"><TableSkeleton rows={5} /></div>}>
-          <LaunchView
-            token={route.view === 'launch' ? route.token : undefined}
-            side={route.view === 'launch' ? route.side : undefined}
-            creating={route.view === 'launch-new'}
-            onOpen={(token) => setRoute({ view: 'launch', token })}
-            onCreate={() => setRoute({ view: 'launch-new' })}
-            onCreated={(token) => setRoute({ view: 'launch', token })}
-          />
-        </Suspense>
-      ) : route.view === 'bridge' ? (
-        <Suspense fallback={<div className="pools-page"><TableSkeleton rows={5} /></div>}>
-          <BridgeView />
-        </Suspense>
-      ) : route.view === 'docs' ? (
-        <Suspense fallback={<div className="pools-page"><TableSkeleton rows={5} /></div>}>
-          <DocsView section={route.section} onSection={(section) => setRoute({ view: 'docs', section })} />
-        </Suspense>
-      ) : (
-        <SwapSheet />
-      )}
-    </AppShell>
+    <>
+      <AppShell route={route} onRoute={setRoute}>
+        {route.view === 'pools' ? (
+          <Suspense fallback={<div className="pools-page"><TableSkeleton rows={5} /></div>}>
+            <PoolsView selectedPair={route.pair} onSelectPair={(pair) => setRoute({ view: 'pools', pair })} />
+          </Suspense>
+        ) : launchRoute ? (
+          <Suspense fallback={<div className="pools-page"><TableSkeleton rows={5} /></div>}>
+            <LaunchView
+              token={route.view === 'launch' ? route.token : undefined}
+              side={route.view === 'launch' ? route.side : undefined}
+              creating={route.view === 'launch-new'}
+              onOpen={(token) => setRoute({ view: 'launch', token })}
+              onCreate={() => setRoute({ view: 'launch-new' })}
+              onCreated={(token) => setRoute({ view: 'launch', token })}
+            />
+          </Suspense>
+        ) : route.view === 'bridge' ? (
+          <Suspense fallback={<div className="pools-page"><TableSkeleton rows={5} /></div>}>
+            <BridgeView />
+          </Suspense>
+        ) : route.view === 'docs' ? (
+          <Suspense fallback={<div className="pools-page"><TableSkeleton rows={5} /></div>}>
+            <DocsView section={route.section} onSection={(section) => setRoute({ view: 'docs', section })} />
+          </Suspense>
+        ) : (
+          <SwapSheet />
+        )}
+      </AppShell>
+      <Analytics />
+    </>
   )
 }
