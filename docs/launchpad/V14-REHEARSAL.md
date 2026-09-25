@@ -6,14 +6,14 @@ every part of it through real transactions against Uniswap's own v4 PoolManager 
 window, graduated into Uniswap v4 and traded there, and every fee is synced, collected and paid out. The books are
 checked to the unit after every transaction.
 
-**Status, 2026-09-25: built, and proven end to end on a local anvil fork of Arc Testnet at `15ac4ea`. Nothing has been
+**Status, 2026-09-25: built, and proven end to end on a local anvil fork of Arc Testnet at `ce900d7`. Nothing has been
 sent to Arc Testnet or mainnet.** The live run waits for the two security reviews in progress.
 
 | Fork dry run (Run A, rUSDC) | Transactions | Checks | Gas | USDC at 25 gwei |
 | --- | ---: | ---: | ---: | ---: |
 | deploy (the Foundry script) | 7 | 36 | 12,175,363 | 0.304384 |
-| drive (5 tokens, 5 graduations) | 88 | 1,409 | 23,153,494 | 0.578837 |
-| **total** | **95** | **1,445** | **35,328,857** | **0.883221** |
+| drive (5 tokens, 5 graduations) | 88 | 1,409 | 23,153,518 | 0.578838 |
+| **total** | **95** | **1,445** | **35,328,881** | **0.883222** |
 
 Every check passed on the first attempt of the final run, and **no contract behaviour contradicted the spec**. "USDC at
 25 gwei" is what Arc Testnet charges (a 20 gwei base fee plus the node's 5 gwei tip, so 1M gas is 0.025 USDC); the fork's
@@ -201,7 +201,7 @@ process arguments while it runs; `--interactive` instead of `--private-key "$REH
 | Part | Gas | USDC |
 | --- | ---: | ---: |
 | Run A deploy (measured on the fork) | 12,175,363 | 0.30 |
-| Run A drive (measured on the fork) | 23,153,494 | 0.58 |
+| Run A drive (measured on the fork) | 23,153,518 | 0.58 |
 | Run B deploy (measured on the fork) | 12,154,743 | 0.30 |
 | Run B drive (launch measured on the fork, the rest estimated from v1.3's Arc-USDC trades) | about 2.3M | 0.06 |
 | Run B's surcharge, left in the launchpad for good | | 0.54 to 0.86 |
@@ -253,7 +253,7 @@ re-sent nothing (81 transactions, 81 distinct) and passed.
 
 ### Results, by step
 
-The final run, at `15ac4ea`, from a fork of Arc Testnet at block 63,984,515:
+The final run, at `ce900d7`, from a fork of Arc Testnet at block 63,985,330:
 
 | step | transactions | checks | gas | USDC at 25 gwei | result |
 | --- | ---: | ---: | ---: | ---: | --- |
@@ -286,7 +286,7 @@ The final run, at `15ac4ea`, from a fork of Arc Testnet at block 63,984,515:
 | pool:wallet | 2 | 30 | 323,170 | 0.008079 | pass |
 | pool:split | 2 | 30 | 318,441 | 0.007961 | pass |
 | pool:holders | 2 | 30 | 317,056 | 0.007926 | pass |
-| pool:combo | 2 | 30 | 317,565 | 0.007939 | pass |
+| pool:combo | 2 | 30 | 317,589 | 0.007940 | pass |
 | pool:zero | 2 | 30 | 312,745 | 0.007819 | pass |
 | raw:wallet | 2 | 32 | 296,304 | 0.007408 | pass |
 | raw:holders | 2 | 32 | 296,940 | 0.007424 | pass |
@@ -306,7 +306,7 @@ The final run, at `15ac4ea`, from a fork of Arc Testnet at block 63,984,515:
 | claim:combo | 1 | 16 | 96,480 | 0.002412 | pass |
 | collectFees | 1 | 11 | 41,148 | 0.001029 | pass |
 | final | 0 | 37 | 0 | 0 | pass |
-| **total** | **95** | **1,445** | **35,328,857** | **0.883221** | **all pass** |
+| **total** | **95** | **1,445** | **35,328,881** | **0.883222** | **all pass** |
 
 ### What the run showed
 
@@ -328,7 +328,7 @@ The final run, at `15ac4ea`, from a fork of Arc Testnet at block 63,984,515:
   PoolManager holds 23 units of rUSDC more than the 172,706.318472 its positions are worth (rounding in the pools'
   favour).
 - **Dividends.** The Holders streams (RHLD directly, RCMB through Combo) grew by about `streamRate × dt × share` over 19 s
-  (1,601,583 units against 1,601,581, and 35,369 against 35,360: `streamRate` is rounded down); each claim paid exactly
+  (1,601,583 units against 1,601,581, and 35,368 against 35,360: `streamRate` is rounded down); each claim paid exactly
   `claimable` at its block; 1 unit of dust in each token overall.
 
 ### Gas per transaction
@@ -406,8 +406,8 @@ The final run, at `15ac4ea`, from a fork of Arc Testnet at block 63,984,515:
 | pool:split | sell RSPL (router) | 158,072 | 0.003952 |
 | pool:holders | buy RHLD (router) | 159,838 | 0.003996 |
 | pool:holders | sell RHLD (router) | 157,218 | 0.003930 |
-| pool:combo | buy RCMB (router) | 159,373 | 0.003984 |
-| pool:combo | sell RCMB (router) | 158,192 | 0.003955 |
+| pool:combo | buy RCMB (router) | 159,385 | 0.003985 |
+| pool:combo | sell RCMB (router) | 158,204 | 0.003955 |
 | pool:zero | buy RZRO (router) | 157,417 | 0.003935 |
 | pool:zero | sell RZRO (router) | 155,328 | 0.003883 |
 | raw:wallet | exact-out buy of 2000000 RWAL (RawSwapper) | 145,991 | 0.003650 |
