@@ -1,0 +1,26 @@
+{
+  "chainId": 5042002,
+  "network": "Arc Testnet",
+  "commit": "bd8a8e1",
+  "baseSuite": "deployments/arc-testnet-v13-rehearsal.json",
+  "deployer": "0x7212fA4Fe663d063A7a83dA0467d592ed3A51D46",
+  "usdc": "0x309297011592BA9a157204e57EB0AF2175D8ceed",
+  "launchpad": "0xCEbf26B8d49963860B09851a1d27C73fd4b6DC37",
+  "pairFactory": "0x171b4969F54b896EBD518eC5D857181D9766B78D",
+  "router": "0xd4561e380219F6BFb798b52A1F9bcB8445d8CE52",
+  "combo": "0x3F6a480dBb609256A8EdF943456Afec1f565f0c8",
+  "deepenPool": "0x47052294674cD6A4962A56a38E03B8F888FbAAeD",
+  "settler": "0x62cd6dB5ac18CB954C1B8025ECf1C4cCe8172953",
+  "tokens": {
+    "DPD": "0x4a074Bf1CFc55ac3c77965ad342F07042bb1F7aC",
+    "DP0": "0xed732Ad6950e9534F854fF12efeF71b8045fA050",
+    "DPF": "0x6a98B9C7A473377e7AD795B74057Fc025Edaee9F",
+    "DPC": "0x0773622FeFADF42579099439aD25B793f03455cD",
+    "DPT": "0xF53697059050788D08965C1507CD7aaC3Bfa7982"
+  },
+  "deployedAt": "2026-09-25T11:47:23.406Z",
+  "txs": {
+    "deepenPool": "0xfbf370d50ace5c943ce93972acda3ed37e904f57eb0b6ddfafd62835167de721",
+    "settler": "0x361ee87b2b610f833abf7fe4ba2510771d4c07d4b6719a26db43eba5507e9c2f"
+  }
+}
