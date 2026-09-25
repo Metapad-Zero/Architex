@@ -333,23 +333,45 @@ contract BuybackBurnE2ETest is E2EBase {
 
     /// @dev The per-block chain the pacing replaced: buy, run in each of the next 50 blocks (a second apart, the most
     ///      whole-second timestamps allow), sell. It loses at every creator fee, on the curve and in the pool, with
-    ///      a pile far larger than the runs can spend.
-    function test_buyback_chainingRunsBlockAfterBlockLoses_everyCreatorFee() public {
-        uint16[6] memory fees = [uint16(0), 50, 100, 200, 500, 1000];
+    ///      a pile far larger than the runs can spend. One test per creator fee: all six in one test came within 0.01%
+    ///      of Foundry's default 2^30 gas limit and ran out on CI's Foundry.
+    function _chainingRunsBlockAfterBlockLoses(uint16 fee) internal {
         uint256[3] memory sizes = [uint256(2_000e6), 8_000e6, 20_000e6];
-        for (uint256 i; i < fees.length; ++i) {
-            for (uint256 j; j < sizes.length; ++j) {
-                for (uint256 venue; venue < 2; ++venue) {
-                    if (venue == 0 && sizes[j] > 8_000e6) continue; // stay on the curve
-                    uint256 snap = vm.snapshotState();
-                    address token = _frontRunTarget(fees[i], 1_700e6, 10_000e6, venue == 1);
-                    int256 pnl = _frontRun(token, sizes[j], _gaps(49, 1));
-                    assertLt(pnl, 0, "chaining runs block after block loses");
-                    assertFalse(venue == 0 && pad.isGraduated(token));
-                    vm.revertToState(snap);
-                }
+        for (uint256 j; j < sizes.length; ++j) {
+            for (uint256 venue; venue < 2; ++venue) {
+                if (venue == 0 && sizes[j] > 8_000e6) continue; // stay on the curve
+                uint256 snap = vm.snapshotState();
+                address token = _frontRunTarget(fee, 1_700e6, 10_000e6, venue == 1);
+                int256 pnl = _frontRun(token, sizes[j], _gaps(49, 1));
+                assertLt(pnl, 0, "chaining runs block after block loses");
+                assertFalse(venue == 0 && pad.isGraduated(token));
+                vm.revertToState(snap);
             }
         }
+    }
+
+    function test_buyback_chainingRunsBlockAfterBlockLoses_fee0() public {
+        _chainingRunsBlockAfterBlockLoses(0);
+    }
+
+    function test_buyback_chainingRunsBlockAfterBlockLoses_fee50() public {
+        _chainingRunsBlockAfterBlockLoses(50);
+    }
+
+    function test_buyback_chainingRunsBlockAfterBlockLoses_fee100() public {
+        _chainingRunsBlockAfterBlockLoses(100);
+    }
+
+    function test_buyback_chainingRunsBlockAfterBlockLoses_fee200() public {
+        _chainingRunsBlockAfterBlockLoses(200);
+    }
+
+    function test_buyback_chainingRunsBlockAfterBlockLoses_fee500() public {
+        _chainingRunsBlockAfterBlockLoses(500);
+    }
+
+    function test_buyback_chainingRunsBlockAfterBlockLoses_fee1000() public {
+        _chainingRunsBlockAfterBlockLoses(1000);
     }
 
     /// @dev V13-SPEC §2.2: the shortest profitable hold is 3.1 h at c = 0.5%, 5.2 h at 1%, 9.4 h at 2%, 23 h at 5%,
