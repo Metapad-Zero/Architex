@@ -720,6 +720,8 @@ if (SIGNER === 'anvil') {
 const DRIVING = SIGNER !== 'none'
 const chain = defineChain({ id: chainId, name: 'arc', nativeCurrency: { name: 'USDC', symbol: 'USDC', decimals: 18 }, rpcUrls: { default: { http: [RPC] } } })
 const wallet = createWalletClient({ chain, transport: http(RPC, { retryCount: 0, timeout: 30_000 }) })
+/** Run A's mints come from rUSDC's owner: the actor itself, or (on anvil) the impersonated owner. */
+const RUSDC_OWNER: Address = REAL ? me : getAddress(await retry(() => pub.readContract({ address: USDC, abi: ERC20, functionName: 'owner' })))
 
 const SPECS = specsFor(me)
 const KINDS = Object.keys(SPECS) as Kind[]
@@ -863,15 +865,17 @@ async function broadcast(serialized: Hex, hash: Hex): Promise<'sent' | 'taken'> 
 }
 
 /** Simulates, then signs (key) or asks anvil to send (anvil) one transaction; `to` undefined deploys `data`. Waits for
- *  the receipt and records it. `usdcOut` (Run B) is what the transaction takes from the actor, for the floor. */
-async function sendRaw(step: string, what: string, to: Address | undefined, data: Hex, usdcOut = 0n): Promise<TransactionReceipt> {
+ *  the receipt and records it. `usdcOut` (Run B) is what the transaction takes from the actor, for the floor. `from` is
+ *  the actor, except for rUSDC mints on anvil when the actor is not rUSDC's owner (the owner is impersonated then). */
+async function sendRaw(step: string, what: string, to: Address | undefined, data: Hex, usdcOut = 0n, from: Address = me): Promise<TransactionReceipt> {
   if (!DRIVING) throw new Error('SIGNER is needed to send transactions')
+  if (from !== me && SIGNER !== 'anvil') throw new Error(`${what}: only ${from} can send it, and REHEARSAL_KEY is ${me}'s`)
   try {
-    await retry(() => pub.call({ account: me, to, data, blockNumber: head }))
+    await retry(() => pub.call({ account: from, to, data, blockNumber: head }))
   } catch (e) {
     throw new Error(`${what} would revert: ${revertName(e)}`)
   }
-  const estimate = await retry(() => pub.estimateGas({ account: me, to, data, blockNumber: head }))
+  const estimate = await retry(() => pub.estimateGas({ account: from, to, data, blockNumber: head }))
   const gas = estimate + estimate / 4n + 25_000n
   const block = await retry(() => pub.getBlock({ blockNumber: head }))
   tipCache ??= await retry(() => pub.estimateMaxPriorityFeePerGas())
@@ -888,8 +892,8 @@ async function sendRaw(step: string, what: string, to: Address | undefined, data
     }
   }
   for (let attempt = 1; ; attempt++) {
-    const pendingNonce = await retry(() => pub.getTransactionCount({ address: me, blockTag: 'pending' }))
-    const nonce = Math.max(pendingNonce, nextNonce)
+    const pendingNonce = await retry(() => pub.getTransactionCount({ address: from, blockTag: 'pending' }))
+    const nonce = from === me ? Math.max(pendingNonce, nextNonce) : pendingNonce
     let hash: Hex
     if (account) {
       const serialized = await account.signTransaction({ type: 'eip1559', chainId, to, data, gas, nonce, maxFeePerGas, maxPriorityFeePerGas: tip })
@@ -902,11 +906,11 @@ async function sendRaw(step: string, what: string, to: Address | undefined, data
         continue
       }
     } else {
-      hash = await wallet.sendTransaction({ account: me, to, data, gas, nonce, maxFeePerGas, maxPriorityFeePerGas: tip, chain })
+      hash = await wallet.sendTransaction({ account: from, to, data, gas, nonce, maxFeePerGas, maxPriorityFeePerGas: tip, chain })
       progress.pending = { step, what, hash, nonce }
       save()
     }
-    nextNonce = nonce + 1
+    if (from === me) nextNonce = nonce + 1
     const receipt = await retry(() => pub.waitForTransactionReceipt({ hash, pollingInterval: 250, timeout: 180_000 }))
     recordTx(step, what, receipt)
     progress.pending = undefined
@@ -924,11 +928,11 @@ interface Sent {
 }
 /** Sends a step's call once: a transaction this step already mined (an earlier run) is re-used, not re-sent. Returns the
  *  receipt and the arguments the mined transaction actually carried. */
-async function tx(step: string, what: string, to: Address, abi: Abi, functionName: string, args: readonly unknown[] | (() => Promise<readonly unknown[]>), usdcOut = 0n): Promise<Sent> {
+async function tx(step: string, what: string, to: Address, abi: Abi, functionName: string, args: readonly unknown[] | (() => Promise<readonly unknown[]>), usdcOut = 0n, from: Address = me): Promise<Sent> {
   const mined = minedTx(step, what)
   if (!mined) {
     const a = typeof args === 'function' ? await args() : args
-    return { receipt: await sendRaw(step, what, to, encodeFunctionData({ abi, functionName, args: a }), usdcOut), args: a }
+    return { receipt: await sendRaw(step, what, to, encodeFunctionData({ abi, functionName, args: a }), usdcOut, from), args: a }
   }
   const receipt = await retry(() => pub.getTransactionReceipt({ hash: mined.hash }))
   const sent = await retry(() => pub.getTransaction({ hash: mined.hash }))
@@ -1057,10 +1061,11 @@ async function multiread(reads: Read[], block: bigint): Promise<unknown[]> {
   return out
 }
 
-/** Addresses whose USDC is tracked, by label. The actor's is left out in Run B, where gas moves it (checked apart). */
+/** Addresses whose USDC is tracked, by label. In Run B two are left out: the actor's, which gas moves (checked apart), and
+ *  the PoolManager's, which every Uniswap trade on Arc moves (Run B opens no pool). rUSDC, Run A's, exists only here. */
 function usdcHoldersAt(b: bigint): [string, Address][] {
-  const list: [string, Address][] = [['launchpad', LP], ['hook', HOOK], ['poolManager', POOL_MANAGER], ['split', SPLIT], ['holders', HOLDERS], ['combo', COMBO]]
-  if (!REAL) list.push(['burner', me])
+  const list: [string, Address][] = [['launchpad', LP], ['hook', HOOK], ['split', SPLIT], ['holders', HOLDERS], ['combo', COMBO]]
+  if (!REAL) list.push(['poolManager', POOL_MANAGER], ['burner', me])
   if (FEE_TO !== me) list.push(['feeTo', FEE_TO])
   if (rawAt(b)) list.push(['raw', RAW()])
   if (!REAL) {
@@ -1482,7 +1487,8 @@ async function deployment() {
     check(`${U}.decimals`, await rd(USDC, ABI.erc20, 'decimals', [], at), 6)
     if (!REAL) {
       check('rUSDC.symbol', await rd(USDC, ABI.erc20, 'symbol', [], at), 'rUSDC')
-      check('rUSDC.owner is the actor (it mints)', a(await rd(USDC, ABI.erc20, 'owner', [], at)), me)
+      // The actor mints, as the owner; on anvil another owner is impersonated for the mints instead.
+      check(`rUSDC.owner is ${SIGNER === 'anvil' && RUSDC_OWNER !== me ? 'impersonated to mint' : 'the actor (it mints)'}`, a(await rd(USDC, ABI.erc20, 'owner', [], at)), SIGNER === 'anvil' ? RUSDC_OWNER : me)
     }
     // Byte for byte.
     for (const [n, art, addr] of [
@@ -1525,7 +1531,7 @@ async function fund() {
   await step('fund', async () => {
     for (const [who, whoLabel, amount] of [[me, 'burner', A.burnerMint], [RAW(), 'raw', A.rawUsdc]] as const) {
       const what = `mint ${fmt(amount)} rUSDC to the ${whoLabel}`
-      const { receipt } = await tx('fund', what, USDC, ABI.erc20, 'mint', [who, amount])
+      const { receipt } = await tx('fund', what, USDC, ABI.erc20, 'mint', [who, amount], 0n, RUSDC_OWNER)
       const B = receipt.blockNumber
       check(`${what}: rUSDC supply`, (await rd<bigint>(USDC, ABI.erc20, 'totalSupply', [], B)) - (await rd<bigint>(USDC, ABI.erc20, 'totalSupply', [], B - 1n)), amount)
       await books(what, receipt, { [`usdc:${whoLabel}`]: amount })
@@ -1558,6 +1564,8 @@ async function plan() {
       progress.planned[k] = { address, usdcIs0: BigInt(USDC) < BigInt(address) }
       note(`${sym(k)}: ${address}, USDC is currency${BigInt(USDC) < BigInt(address) ? '0' : '1'}`)
     }
+    // The PoolManager's USDC before any of this suite's pools exist: the final solvency check counts from here.
+    progress.notes.pmUsdcBaseline = (await rd<bigint>(USDC, ABI.erc20, 'balanceOf', [POOL_MANAGER], head)).toString()
     const hi = KINDS.find((k) => progress.planned[k]?.usdcIs0)
     const lo = KINDS.find((k) => progress.planned[k]?.usdcIs0 === false)
     progress.features = REAL ? [] : ([hi, lo].filter(Boolean) as Kind[])
@@ -1817,7 +1825,10 @@ async function graduate(k: Kind, first: boolean) {
         poolKeyOf(token), { zeroForOne: usdcIs0, amountSpecified: A.rawWindowOutBuy, sqrtPriceLimitX96: LIMIT(usdcIs0) },
       ])
       dump = await tx(id, `dump ${fmt18(A.dump)} ${s.symbol} under the bid's top (router)`, ROUTER, ABI.router, 'sell', async () => [token, A.dump, 0n, me, await deadline()])
-      lock0 = await tx(id, `lock ${s.symbol} while the price is under the bid's top`, HOOK, ABI.hook, 'lock', [token])
+      const lock0What = `lock ${s.symbol} while the price is under the bid's top`
+      // If both window buys landed after the window (a slow node), nothing waits to be locked and lock would revert.
+      if (minedTx(id, lock0What) || (await rd<bigint>(HOOK, ABI.hook, 'lockHeld', [token], head)) > 0n) lock0 = await tx(id, lock0What, HOOK, ABI.hook, 'lock', [token])
+      else note('no surcharge is waiting (the window buys landed after the window): the lock-under-the-top case is skipped for this token')
     }
 
     await checkGraduation(k, sellOut, first)
@@ -1831,12 +1842,12 @@ async function graduate(k: Kind, first: boolean) {
     const sellModel = await checkPoolTrade('window sell (router): pays no surcharge', k, wSell, 'sell', 'in', wSell.args[1] as bigint, 'burner')
     check('window sell: quote at the block before == fill (a sell has no surcharge to change)', await rd<bigint>(ROUTER, ABI.router, 'quoteSell', [token, wSell.args[1]], wSell.receipt.blockNumber - 1n), sellModel.received)
     if (rawOut) await checkPoolTrade('exact-out buy in the window (RawSwapper)', k, rawOut, 'buy', 'out', A.rawWindowOutBuy, 'raw')
-    if (dump && lock0) {
+    if (dump) {
       const d = await checkPoolTrade('dump (router)', k, dump, 'sell', 'in', A.dump, 'burner')
       const r = bidRange(rec.usdcIs0, rec.graduationTick, d.swap.tick)
       checkThat("the dump took the price under the bid's top", !r.ok, `tick ${d.swap.tick}, bid top at tick ${rec.usdcIs0 ? r.lower : r.upper}`)
-      await checkLock('lock under the top', k, lock0)
     }
+    if (lock0) await checkLock('lock under the top', k, lock0)
   })
 }
 
@@ -1996,7 +2007,12 @@ async function buyback(k: Kind) {
     check('buy back: no surcharge', m.fees.snipe, 0n)
     const r = bidRange(rec.usdcIs0, rec.graduationTick, m.swap.tick)
     checkThat("the price is back above the bid's top", r.ok, `tick ${m.swap.tick}, top at tick ${rec.usdcIs0 ? r.lower : r.upper}`)
-    await checkLock('lock above the top', k, await tx(id, `lock ${s.symbol} above the top`, HOOK, ABI.hook, 'lock', [token]))
+    const what = `lock ${s.symbol} above the top`
+    if (!minedTx(id, what) && (await rd<bigint>(HOOK, ABI.hook, 'lockHeld', [token], head)) === 0n) {
+      await expectRevert(`${what} with nothing held`, HOOK, ABI.hook, 'lock', [token], 'NothingToLock', head)
+      return
+    }
+    await checkLock('lock above the top', k, await tx(id, what, HOOK, ABI.hook, 'lock', [token]))
   })
 }
 
@@ -2410,8 +2426,11 @@ async function finalState() {
       const token = tokenOf(k)
       const x = sym(k)
       const supply = s.get(`tok.supply:${x}`) ?? 0n
-      const burned = progress.pools[k] ? TOTAL_SUPPLY - supply : 0n
-      check(`${x}: supply == 1e9 less only the graduation's leftover burn`, supply, TOTAL_SUPPLY - burned)
+      // The only burn is the graduation's leftover: the 200M less what the full-range position took (PoolOpened).
+      const gradTx = progress.txs.find((t) => t.step === `graduate:${k}` && t.what.endsWith('out (graduation)'))
+      const opened = gradTx ? eventsOf<{ tokensAdded: bigint }>(await retry(() => pub.getTransactionReceipt({ hash: gradTx.hash })), HOOK, ABI.hook, 'PoolOpened') : []
+      const burned = opened.length ? POOL_SUPPLY - opened[0].tokensAdded : 0n
+      check(`${x}: supply == 1e9 less only the graduation's leftover burn (${burned} wei)`, supply, TOTAL_SUPPLY - burned)
       windowBuys += spec(k).windowBuys
       windowPaid += Number(progress.notes[`create:${k}:windowPaid`] ?? '0')
       const line = [`${x}: ${progress.pools[k] ? 'graduated' : `on the curve (${fmt((s.get(`curve.vU:${x}`) ?? 0n) - VIRTUAL_USDC_0)} ${U} float)`}`]
@@ -2427,6 +2446,32 @@ async function finalState() {
       note(line.join('; '))
     }
     if (!REAL) {
+      // The PoolManager holds at least what every position is worth at the pools' prices (rounded down) plus the hook's
+      // claims; what is left over is the rounding every swap and add keeps in the pools' favour.
+      let usdcInPools = 0n
+      for (const k of made.filter((kk) => progress.pools[kk])) {
+        const rec = poolRec(k)
+        const x = sym(k)
+        const sqrtP = s.get(`pool.sqrtP:${x}`) ?? 0n
+        const tick = Number(s.get(`pool.tick:${x}`) ?? 0n)
+        let a0 = 0n
+        let a1 = 0n
+        for (const p of positionsAt(k, B)) {
+          const [sa, sb] = [V4.sqrtAtTick(p.lower), V4.sqrtAtTick(p.upper)]
+          if (tick < p.lower) a0 += V4.amount0Delta(sa, sb, p.liquidity, false)
+          else if (tick < p.upper) {
+            a0 += V4.amount0Delta(sqrtP, sb, p.liquidity, false)
+            a1 += V4.amount1Delta(sa, sqrtP, p.liquidity, false)
+          } else a1 += V4.amount1Delta(sa, sb, p.liquidity, false)
+        }
+        const [u, t] = rec.usdcIs0 ? [a0, a1] : [a1, a0]
+        usdcInPools += u
+        const dust = (s.get(`tok.poolManager:${x}`) ?? 0n) - t
+        checkThat(`${x}: the PoolManager holds the tokens its positions are worth, and a little rounding more`, dust >= 0n && dust < 10n ** 9n, `${fmt18(t)} in positions, ${dust} wei over`)
+      }
+      const baseline = BigInt(progress.notes.pmUsdcBaseline ?? '0')
+      const usdcDust = (s.get('usdc:poolManager') ?? 0n) - baseline - usdcInPools - (s.get('hook.claims') ?? 0n)
+      checkThat(`the PoolManager holds the ${U} every position is worth plus the hook's claims, and a little rounding more`, usdcDust >= 0n && usdcDust < 1000n, `${fmt(usdcInPools)} in positions over a ${fmt(baseline)} baseline, ${usdcDust} unit(s) over`)
       check('the Split plugin holds Σ usdcHeld of its tokens', s.get('usdc:split'), (await rd<bigint>(SPLIT, ABI.split, 'usdcHeld', [tokenOf('split')], B)) + (await rd<bigint>(SPLIT, ABI.split, 'usdcHeld', [tokenOf('combo')], B)))
       check('the Holders plugin and the Combo hold nothing (they forward it all)', [s.get('usdc:holders'), s.get('usdc:combo')], [0n, 0n])
     }
@@ -2460,8 +2505,10 @@ async function summary() {
   const stepChecks = (id: string) => progress.results.find((r) => r.step === id)?.checks ?? 0
   console.log(`\n── gas (${rows.length} transactions; "at 25 gwei" is what Arc Testnet charges)`)
   if (MARKDOWN) {
-    console.log('| step | transaction | gas | USDC at 25 gwei |\n| --- | --- | ---: | ---: |')
-    for (const r of rows) console.log(`| ${r.step} | ${r.what} | ${r.gasUsed.toLocaleString('en-US')} | ${live(r.gasUsed)} |`)
+    // Hashes only mean something on Arc Testnet; a fork's are thrown away with it.
+    const hashes = chainId === ARC_TESTNET
+    console.log(hashes ? '| step | transaction | tx hash | gas | USDC at 25 gwei |\n| --- | --- | --- | ---: | ---: |' : '| step | transaction | gas | USDC at 25 gwei |\n| --- | --- | ---: | ---: |')
+    for (const r of rows) console.log(`| ${r.step} | ${r.what} |${hashes ? ` \`${r.hash}\` |` : ''} ${r.gasUsed.toLocaleString('en-US')} | ${live(r.gasUsed)} |`)
     const steps = [...new Set(rows.map((r) => r.step))]
     console.log('\n| step | transactions | checks | gas | USDC at 25 gwei | result |\n| --- | ---: | ---: | ---: | ---: | --- |')
     for (const st of steps) {
@@ -2517,6 +2564,12 @@ try {
     await rpc('anvil_impersonateAccount', [me])
     const bal = await nativeOf(me, await latest())
     if (bal < 100n * E18) await rpc('anvil_setBalance', [me, toHex(100n * E18)])
+    if (RUSDC_OWNER !== me) {
+      // The actor is someone else (an anvil default account, say): the owner mints rUSDC and is feeTo, as itself.
+      await rpc('anvil_impersonateAccount', [RUSDC_OWNER])
+      if ((await nativeOf(RUSDC_OWNER, await latest())) < E18) await rpc('anvil_setBalance', [RUSDC_OWNER, toHex(10n * E18)])
+      note(`anvil: impersonating rUSDC's owner ${RUSDC_OWNER} for the mints`)
+    }
     note(`anvil: impersonating ${me}; native balance ${fmt18(bal)} → ${fmt18(await nativeOf(me, await latest()))}`)
   }
   await deployment()
@@ -2539,9 +2592,11 @@ try {
   for (const [i, k] of KINDS.entries()) await create(k, i === 0)
   for (const [i, k] of KINDS.entries()) await curveTrades(k, i === 0)
   if (REAL) {
+    // Sell everything back first, so the float returns and every fee but the surcharge comes back to the actor (it is
+    // the creator-fee destination and feeTo).
     for (const k of KINDS) {
-      await collect(k)
       await sellAll(k)
+      await collect(k)
     }
   } else {
     for (const [i, k] of KINDS.entries()) await graduate(k, i === 0)
