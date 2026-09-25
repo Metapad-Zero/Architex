@@ -1,6 +1,7 @@
 # Launchpad v1.4: graduate into Uniswap v4 (draft)
 
-Status: **draft for the owner**, 2026-09-25. Nothing here is built yet. Sections marked **[decided]** are the owner's
+Status: **built on branch `v14`, not reviewed or deployed**, 2026-09-25. Contracts in `contracts-v14/src`, tests in
+`contracts-v14/test` (run with `FOUNDRY_PROFILE=v14 forge test`). Sections marked **[decided]** are the owner's
 calls; **[proposed]** are defaults to confirm; **[research]** waits on facts still being gathered about Uniswap v4 on
 Arc. v1.3 (V13-SPEC.md) stays live for the tokens it launched; this spec only covers new launches.
 
@@ -43,19 +44,27 @@ Mainnet (developers.uniswap.org, code confirmed on chain 2026-09-25):
 A PoolManager with the same code is at the same address on Arc Testnet; whether the periphery is there too is
 **[research]** (if not, the rehearsal deploys its own).
 
-**Routing [research].** Uniswap's app, API and the aggregators that use it route through a v4 hook only if it is on
-Uniswap's per-chain routing allowlist. A hook that uses delta flags or dynamic fees (any fee hook) has to be
-submitted: Uniswap checks routing compatibility (not security), and needs the source verified on the explorer and a
-live pool with liquidity. Until it is listed, graduated tokens still trade on architex.fun and through any integrator
-that calls the PoolManager directly. Whether competitors' hooks are listed on Arc, and how long it took, is being
-researched.
+**Routing [researched 2026-09-25].** Uniswap's app and API route through a v4 hook only if it is on Uniswap's
+per-chain routing allowlist; a hook that uses delta flags or dynamic fees (any fee hook, ours included) has to be
+submitted, and Uniswap's public routing code has no Arc allowlist entries yet. In a live test the Uniswap app sent a
+buyer of an Argus token through a junk unhooked copy pool at 79% price impact instead. Aggregators are further along:
+0x and KyberSwap already route hundreds of swaps an hour into Argus's delta-fee hooks on Arc. So graduated tokens reach
+wallets first through architex.fun and those aggregators, then the Uniswap app once listed. Argus's newest hook takes
+its fees exactly as ours does (USDC only, beforeSwap delta when USDC is the fixed side, afterSwap otherwise, LP fee 0).
+Arc specifics that shaped the code: pools use the ERC-20 USDC at `0x3600…` (as nearly all Arc launchpads do), settled
+by sync, transfer, settle; about two blocks share each one-second timestamp, so windows count blocks; a fork cannot run
+the USDC precompile, so tests etch Uniswap's PoolManager code with a mock USDC and the rehearsal runs on Arc Testnet,
+where the whole v4 stack sits at the mainnet addresses.
 
 ## 3. The hook: `ArchitexLaunchHook`
 
-One hook contract for every v1.4 pool, deployed at a CREATE2 address whose low bits carry its permissions.
+One hook contract for every v1.4 pool (`contracts-v14/src/ArchitexLaunchHook.sol`), deployed at a CREATE2 address
+whose low 14 bits carry exactly its permissions (`0x28CC`). It imports nothing BUSL: v4-core's StateLibrary pulls in
+the BUSL `Position.sol`, so the hook reads the pool's price with its own copy of `getSlot0`.
 
-- **`beforeInitialize`:** only the v1.4 launchpad may initialize a pool with this hook, and only for a token it
-  launched, at graduation. Nobody can create one of our pools early or at the wrong price.
+- **`beforeInitialize`:** v4 skips a hook's own callbacks when the hook itself is the caller, so the hook opens pools as
+  itself (in `graduate`, launchpad only) and refuses every other initializer. Nobody can open one of our pools early or
+  at the wrong price.
 - **`beforeAddLiquidity` / `beforeRemoveLiquidity`:** closed pools accept liquidity only from the launchpad (the
   graduation position) and listed liquidity plugins; open pools accept anyone. The locked positions belong to the
   hook, which has no function that removes them. Outside LPs in an open pool can remove their own liquidity.
@@ -64,7 +73,9 @@ One hook contract for every v1.4 pool, deployed at a CREATE2 address whose low b
   - a buy pays them out of the USDC in; a sell out of the USDC out (the v1.3 rule);
   - the hook moves them to the launchpad and calls `launchpad.accrueTradeFees(token, platformFee, creatorFee)`, the
     same books v1.3's launch router writes, so collection and every plugin work unchanged;
-  - during the opening window (§5) it also takes the surcharge.
+  - during the opening window (§5) it also takes the surcharge;
+  - a swap that a price limit stops early is refused when the fees were fixed on the trader's own USDC, so nobody pays
+    fees on USDC the pool did not take or give (`PartialFill`).
 - **LP fee [proposed]:** 0 for closed pools, as in v1.3's launch pools; the trading cost is the platform and creator
   fees. For open pools see §6.
 - **PoolKey:** the token and USDC, sorted; the LP fee; a tick spacing wide enough for one full-range position
@@ -87,19 +98,23 @@ One hook contract for every v1.4 pool, deployed at a CREATE2 address whose low b
 
 ## 5. Anti-sniping [decided: D2; parameters proposed]
 
-- **When:** for `W` seconds after `createToken` (buys on the curve) and for `W` seconds after graduation (swaps in the
-  pool that buy the token). Sells never pay it.
-- **How much [proposed]:** a surcharge that starts at 90% and falls to 0 over `W` = 10 seconds (about twenty Arc
-  blocks), on top of the normal fees. Argus uses up to 99% over 3 seconds.
+- **When:** for 20 blocks (about 10 seconds on Arc) after `createToken` (buys on the curve) and after graduation (buys
+  in the pool). Sells never pay it. It counts blocks, not seconds: Arc makes about two blocks per one-second timestamp,
+  which is why Argus's 3-second window protects only about two blocks.
+- **How much [default the owner did not change]:** 90% in the opening block, falling linearly to 0 over the 20 blocks,
+  on top of the normal fees, and never more than leaves platform, creator and snipe fees together under 99%.
 - **The creator's first buy** runs in the launch transaction itself, before any bot can act, so it is exempt
   **[proposed]**.
 - **Where it goes [decided]: locked into the pool.**
-  - In the pool: the hook adds it as locked liquidity. The proposal is a USDC-only position just below the current
-    price, a bid wall that nobody can ever withdraw. Adding it needs no swap, so there is nothing to sandwich (the
-    Deepen pool review's lesson).
-  - On the curve there is no pool yet: the launchpad holds it for the token and locks it in at graduation, the same
-    way. **[proposed]** If a curve never graduates, it stays in the launchpad for good, like any other stranded
-    balance. It never changes the curve, so every curve stays identical.
+  - In the pool: the hook holds it and anyone can call `lock(token)` to add it as locked liquidity: a USDC-only position
+    that starts at **half** the lower of the current and the graduation price and runs all the way down, a bid nobody
+    can ever withdraw. Adding it needs no swap, so there is nothing to sandwich (the Deepen pool review's lesson). The
+    discount matters twice: a sniper who dumps the moment the window closes is not paid back out of his own surcharge
+    (Argus found that sending snipe fees to holders refunded snipers 27 to 90%), and pushing the price before a `lock`
+    cannot move the bid anywhere worth selling into.
+  - On the curve there is no pool yet: the launchpad holds it for the token (`pendingSnipe`) and the hook locks it in at
+    graduation, the same way, at the graduation price. If a curve never graduates it stays in the launchpad for good
+    (the default the owner did not change). It never changes the curve, so every curve stays identical.
 
 ## 6. Open or closed pools [decided: D3]
 
@@ -107,9 +122,9 @@ One hook contract for every v1.4 pool, deployed at a CREATE2 address whose low b
 - **Closed (the builder's default [proposed]):** only the graduation position, the anti-snipe liquidity and listed
   liquidity plugins (Deepen pool v1.4). Nobody can move the pool's liquidity to game a plugin's budget.
 - **Open:** anyone may add and remove their own liquidity; the locked positions still never move.
-- **LP fee in open pools [owner decision still needed]:** with no LP fee, outside liquidity earns nothing, so it only
-  comes from someone paid to provide it (a market maker hired by the project). Options: keep 0; or let the creator
-  pick an LP fee (0.05%, 0.3% or 1%) for an open pool, on top of the platform and creator fees.
+- **LP fee in open pools [default: none]:** pools charge no LP fee, so outside liquidity earns nothing and only comes
+  from someone paid to provide it (a market maker hired by the project). Letting the creator pick an LP fee for an open
+  pool is a later option.
 
 ## 7. Plugins
 
@@ -147,8 +162,10 @@ pool with the hook; a closed pool's liquidity only ever grows.
 
 ## 11. Still open
 
-1. The LP fee for open pools (§6).
-2. The anti-snipe numbers (90% falling to 0 over 10 seconds) and whether the creator's first buy is exempt (§5).
-3. What happens to a never-graduated curve's anti-snipe collection (§5).
-4. Whether the builder stops offering v1.3 launches the day v1.4 is live (proposed: yes; v1.3 tokens keep trading
+1. Whether the builder stops offering v1.3 launches the day v1.4 is live (proposed: yes; v1.3 tokens keep trading
    where they are).
+2. Deepen pool v1.4 (buys through the PoolManager, adds to the hook's locked position) and the site's v4 trading,
+   charts and listing feeds.
+3. The Uniswap routing allowlist submission, and asking 0x and KyberSwap to route the hook.
+4. Evidence for the owner's curve-first call: mercuri, the one Arc launchpad already doing curve-then-Uniswap, had 39
+   launches and no graduation by 2026-09-25; Argus, straight into Uniswap, had 168,000 launches (much of it bot flow).
