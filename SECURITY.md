@@ -196,6 +196,15 @@ is drained through H1, Deepen pool's run adds about 3,500 USDC to that attack. I
 builder refuses the pairing. The rest was doc precision (the exact bound, the only-buyer assumption, dust at extreme
 prices), now fixed. The round-6 PoCs are kept as regression tests in `contracts/test/review3/`.
 
+**Aderyn 0.6.8** (CI from 2026-09-25; the CI had been failing to build Aderyn from source since 2026-09-21, and now
+installs the pinned prebuilt release): 40 files, 3 High and 18 Low classes, none real. H-1 is `TestToken.transferFrom`
+passing its arguments to OpenZeppelin's (a test token); H-2 is the launchpad's `receive`/`fallback`, which revert, so
+no ether can be locked; H-3 is state written after calls to the protocol's own contracts, under `nonReentrant` or in
+a constructor or the Uniswap V2 pair's lock. In Deepen pool the only instance is `run` reading
+`LAUNCHPAD.isGraduated`, a view, inside `nonReentrant`. The Lows are style (pragma, literals, events) and the
+`IArchitexFeePlugin` import `@inheritdoc` needs. Static analysis cannot see H1-style economics; the reviews above are
+what covered that.
+
 ## 4. Third-party scanners — after mainnet deploy + Etherscan-equivalent verification
 
 These need a **deployed, verified contract address** and most need an account on their site —
