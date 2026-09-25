@@ -226,11 +226,7 @@ export function LaunchTradeSheet({
           {`${pool ? 'Its pool opened' : `${launch.symbol} launched`} moments ago: for 20 blocks a buy pays an anti-sniping fee that falls to 0 at block ${snipeEnd.toLocaleString('en-US')}, in about ${secondsUntil(snipeEnd, block)} seconds. It goes into the pool as liquidity nobody can withdraw; waiting a few seconds avoids it.`}
         </p>
       )}
-      {trade.quoteError && (
-        <p className="quote-message" role="status">
-          {`The pool could not quote that amount. ${trade.quoteError}`}
-        </p>
-      )}
+      {trade.quoteError && <p className="quote-message" role="status">{trade.quoteError}</p>}
       {sellsOut && quote && (
         <p className="quote-message" role="status">
           This buy sells out the curve and graduates {launch.symbol}. It spends {formatAmount(quote.amountIn, usdc.decimals)} of the {formatAmount(quote.offer, usdc.decimals)} USDC offered.

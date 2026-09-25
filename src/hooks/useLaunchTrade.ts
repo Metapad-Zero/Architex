@@ -64,6 +64,12 @@ interface UseLaunchTradeArgs {
   impactAcknowledgedKey: string | undefined
 }
 
+/** Why the pool could not quote, in a sentence: the contract's refusal, or a chain that could not be read. */
+function poolQuoteProblem(error: unknown): string {
+  const reason = revertReason(error)
+  return reason === 'Transaction reverted' ? 'The pool could not be read just now. Trying again.' : `The pool could not quote that amount. ${reason}`
+}
+
 /** The typed amount, once it has held still for a moment. */
 function useSettled(value: bigint, delayMs: number): bigint {
   const [settled, setSettled] = useState(value)
@@ -134,7 +140,7 @@ export function useLaunchTrade({
     },
   })
   const poolQuoteFresh = inV4Pool && settledIn === parsedIn && poolQuoteQuery.data !== undefined && !poolQuoteQuery.isPlaceholderData
-  const poolQuoteError = inV4Pool && settledIn === parsedIn && parsedIn > 0n && poolQuoteQuery.isError ? revertReason(poolQuoteQuery.error) : undefined
+  const poolQuoteError = inV4Pool && settledIn === parsedIn && parsedIn > 0n && poolQuoteQuery.isError ? poolQuoteProblem(poolQuoteQuery.error) : undefined
 
   const quote = useMemo(() => {
     if (!launch) return undefined
@@ -176,11 +182,12 @@ export function useLaunchTrade({
     if (phase === 'quoteMoved') return 'quoteMoved'
     if (phase === 'pending') return 'pending'
     if (launch && !isPriced(launch)) return 'poolLoading'
-    if (!quote) return inV4Pool && parsedIn > 0n && !poolQuoteError ? 'quoting' : 'enterAmount'
+    // A pool quote on its way reads as quoting; one that came back unusable, or refused, as no quote.
+    if (!quote) return inV4Pool && parsedIn > 0n && !poolQuoteError && !poolQuoteFresh ? 'quoting' : 'enterAmount'
     if (!payToken || spendableBalance(payToken.address, balance) < required) return 'insufficientBalance'
     if (side === 'buy' && allowance < required) return 'needsApproval'
     return 'ready'
-  }, [account, allowance, balance, chainId, impactRefused, inV4Pool, isConnected, launch, parsedIn, payToken, phase, poolQuoteError, quote, required, side])
+  }, [account, allowance, balance, chainId, impactRefused, inV4Pool, isConnected, launch, parsedIn, payToken, phase, poolQuoteError, poolQuoteFresh, quote, required, side])
 
   const label = useMemo(() => {
     const symbol = token?.symbol ?? 'token'
