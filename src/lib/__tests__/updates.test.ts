@@ -3,7 +3,7 @@ import { isUnread, latestId, PRODUCT_UPDATES, visibleUpdates } from '../updates'
 
 describe('product updates', () => {
   test('newest item is the latest id', () => {
-    expect(latestId(PRODUCT_UPDATES)).toBe('creator-fees')
+    expect(latestId(PRODUCT_UPDATES)).toBe('deepen-pool')
   })
 
   test('hides the launch items when the Launch view is off', () => {
@@ -12,8 +12,8 @@ describe('product updates', () => {
     expect(items.map((item) => item.id)).toEqual(['docs', 'bridge'])
   })
 
-  test('keeps the launch items when the Launch view is on, creator fees first', () => {
-    expect(visibleUpdates(true).map((item) => item.id)).toEqual(['creator-fees', 'docs', 'bridge', 'launch'])
+  test('keeps the launch items when the Launch view is on, Deepen pool first', () => {
+    expect(visibleUpdates(true).map((item) => item.id)).toEqual(['deepen-pool', 'creator-fees', 'docs', 'bridge', 'launch'])
   })
 
   test('is unread when nothing has been dismissed', () => {
@@ -25,7 +25,8 @@ describe('product updates', () => {
     expect(isUnread(items, latestId(items))).toBe(false)
   })
 
-  test('comes back for everyone who dismissed the stack before creator fees shipped', () => {
+  test('comes back for everyone who dismissed the stack before Deepen pool shipped', () => {
+    expect(isUnread(visibleUpdates(true), 'creator-fees')).toBe(true)
     expect(isUnread(visibleUpdates(true), 'docs')).toBe(true)
     expect(isUnread(visibleUpdates(true), 'launch')).toBe(true)
   })

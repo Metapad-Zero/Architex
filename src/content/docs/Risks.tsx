@@ -84,9 +84,10 @@ export function DocsRisks() {
           fees would stay in the launchpad; a blocked token's holders couldn't claim either.
         </li>
         <li>
-          Buyback &amp; burn spends at most 0.25% of the pool's USDC side an hour. On a busy token
-          with a high creator fee, fees can arrive faster than that, and the USDC waiting to buy
-          back grows until volume cools. Nothing is lost; it's just slower.
+          Buyback &amp; burn and Deepen pool spend at most 0.25% of the pool's USDC an hour (for
+          Deepen pool, of the part locked for good). On a busy token with a high creator fee, fees
+          can arrive faster than that, and the USDC waiting to be spent grows until volume cools.
+          Nothing is lost; it's just slower.
         </li>
         <li>
           Holder dividends are shared by the second. If everyone else sells, whoever still holds

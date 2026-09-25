@@ -50,7 +50,7 @@ export const LISTED_PLUGINS: readonly ListedPlugin[] = [
     config: 'none',
     suiteKey: 'buybackPlugin',
     contractPath: 'contracts/plugins/launch/BuybackBurnPlugin.sol',
-    paused: 'Paused for new launches. An updated version is coming.',
+    paused: 'Paused for new launches. Deepen pool at a 100% burn share does the same job.',
   },
   {
     kind: 'deepen',

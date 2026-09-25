@@ -338,7 +338,7 @@ describe('Deepen pool', () => {
       } finally {
         buyback.paused = paused
       }
-      expect(listedPlugin('buyback').paused).toBe('Paused for new launches. An updated version is coming.')
+      expect(listedPlugin('buyback').paused).toBe('Paused for new launches. Deepen pool at a 100% burn share does the same job.')
     })
   })
 })

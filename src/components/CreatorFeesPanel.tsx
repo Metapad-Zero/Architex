@@ -158,14 +158,12 @@ function BuybackPanel({ buyback, symbol, graduated, alsoPaysHolders, busy, statu
         <div><dt>Next run</dt><dd className={buyback.offer > 0n ? '' : 'text-g500'}>{next}</dd></div>
         <div>
           <dt>Last run</dt>
-          <dd className={buyback.lastRunAt > 0n ? '' : 'text-g500'}>
-            {buyback.lastRunAt === 0n
-              ? 'Never'
-              : fullAt > now
-                ? `${formatWhen(buyback.lastRunAt)} · full budget again at ${formatTime(fullAt)}`
-                : formatWhen(buyback.lastRunAt)}
-          </dd>
+          <dd className={buyback.lastRunAt > 0n ? '' : 'text-g500'}>{buyback.lastRunAt === 0n ? 'Never' : formatWhen(buyback.lastRunAt)}</dd>
         </div>
+        {/* Its own row: beside the last run it was cut off on a phone. */}
+        {buyback.lastRunAt > 0n && fullAt > now && (
+          <div><dt>Full budget again</dt><dd>{formatTime(fullAt)}</dd></div>
+        )}
         <div><dt>Spent so far</dt><dd>{usdc(buyback.totalSpent)}</dd></div>
         <div><dt>Burned so far</dt><dd>{formatAmount(buyback.totalBurned, 18)} {symbol}</dd></div>
       </dl>
@@ -178,7 +176,7 @@ function BuybackPanel({ buyback, symbol, graduated, alsoPaysHolders, busy, statu
       <p className="fee-plugin-note">
         Anyone can run it. It spends at most 0.25% of the {side} USDC side per hour and burns every token it buys, so the supply only goes down.
         {alsoPaysHolders && ' It doesn’t raise anyone’s share of holder dividends: the tokens it buys come from the curve or the pool, which earn none.'}
-        {listedPlugin('buyback').paused && ' This version is paused for new launches, and an updated one is coming.'}
+        {listedPlugin('buyback').paused && ' It is paused for new launches; Deepen pool at a 100% burn share does the same job.'}
       </p>
     </section>
   )
@@ -222,14 +220,12 @@ function DeepenPanel({ deepen, symbol, graduated, alsoPaysHolders, busy, status,
         )}
         <div>
           <dt>Last run</dt>
-          <dd className={deepen.lastRunAt > 0n ? '' : 'text-g500'}>
-            {deepen.lastRunAt === 0n
-              ? 'Never'
-              : fullAt > now
-                ? `${formatWhen(deepen.lastRunAt)} · full budget again at ${formatTime(fullAt)}`
-                : formatWhen(deepen.lastRunAt)}
-          </dd>
+          <dd className={deepen.lastRunAt > 0n ? '' : 'text-g500'}>{deepen.lastRunAt === 0n ? 'Never' : formatWhen(deepen.lastRunAt)}</dd>
         </div>
+        {/* Its own row: beside the last run it was cut off on a phone. */}
+        {deepen.lastRunAt > 0n && fullAt > now && (
+          <div><dt>Full budget again</dt><dd>{formatTime(fullAt)}</dd></div>
+        )}
         <div><dt>Spent so far</dt><dd>{usdc(deepen.totalSpent)}</dd></div>
         <div><dt>Burned so far</dt><dd>{formatAmount(deepen.totalBurned, 18)} {symbol}</dd></div>
         {/* One fact per line, so each fits a phone's width. */}
