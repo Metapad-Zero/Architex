@@ -330,6 +330,201 @@ export const launchRouterAbi = parseAbi([
   'function sell(address token, uint256 tokensIn, uint256 minUsdcOut, address to, uint256 deadline) returns (uint256 usdcOut)',
 ])
 
+// ─── Launchpad v1.4 (docs/launchpad/V14-SPEC.md; contracts-v14/src/interfaces/*.sol are the source of truth) ───
+
+/** LaunchTokenV14's errors: v1.3's, with the pool lock named for Uniswap's PoolManager. */
+const launchTokenV14Errors = [
+  'error OnlyLaunchpad()',
+  'error OnlyLaunchpadOrRouter()',
+  'error InvalidPullTarget()',
+  'error AlreadyGraduated()',
+  'error PoolLockedUntilGraduation()',
+] as const
+
+/**
+ * ArchitexLaunchHook's errors (its OnlyLaunchpad is the token's, above). Uniswap's PoolManager wraps a hook's refusal
+ * in WrappedError(hook, selector, reason, details); lib/errors.ts reads `reason` against these.
+ */
+export const launchHookErrors = [
+  'error PoolCreationRestricted()',
+  'error ClosedPool()',
+  'error UnknownLaunch()',
+  'error AlreadyOpened()',
+  'error FeesExceedAmount()',
+  'error NothingToLock()',
+  'error PartialFill()',
+] as const
+
+/** Uniswap v4's own refusals that can end a pool trade: a hook's revert, wrapped, and a pool that is not open. */
+const uniswapV4Errors = [
+  'error WrappedError(address target, bytes4 selector, bytes reason, bytes details)',
+  'error PoolNotInitialized()',
+] as const
+
+const launchpadV14Errors = [
+  'error ZeroAddress()',
+  'error ZeroAmount()',
+  'error Forbidden()',
+  'error UnknownToken()',
+  'error CurveGraduated()',
+  'error NotGraduated()',
+  'error SlippageExceeded()',
+  'error Expired()',
+  'error ExceedsSold()',
+  'error InvalidName()',
+  'error InvalidSymbol()',
+  'error InvalidMetadata()',
+  'error LaunchFeeTooHigh()',
+  'error LaunchFeeAboveMax()',
+  'error CreatorFeeTooHigh()',
+  'error InvalidPlugin()',
+  'error DataForNonPlugin()',
+  'error NotInitialized()',
+  'error AlreadyInitialized()',
+  'error InvalidWiring()',
+  'error PluginPullMismatch()',
+] as const
+
+const curveV14 =
+  'struct Curve { address token; address creator; uint128 virtualUsdc; uint128 virtualTokens; uint128 tokensSold; uint64 createdAt; uint64 createdBlock; bool graduated; bool openPool; uint16 creatorFeeBps; bool pluginHooks; address plugin; string metadataURI; }'
+const tokenCreatedV14 =
+  'event TokenCreated(address indexed token, address indexed creator, address indexed plugin, bool openPool, uint16 creatorFeeBps, string name, string symbol, string metadataURI)'
+const createTokenV14 =
+  'function createToken(string name, string symbol, string metadataURI, uint16 creatorFeeBps, address plugin, bytes pluginData, bool openPool, uint256 initialBuyUsdc, uint256 minTokensOut, uint256 maxLaunchFee) returns (address token)'
+
+/**
+ * IArchitexLaunchpadV14, including IArchitexLaunchpadLite. v1.3's curves and fees with a third fee on a curve buy in
+ * the token's first SNIPE_BLOCKS blocks (the snipe fee, held for its pool), an open or closed pool chosen at launch,
+ * and graduation into a Uniswap v4 pool behind the hook instead of a launch pair.
+ */
+export const launchpadV14Abi = parseAbi([
+  curveV14,
+  'event Initialized(address indexed hook, address indexed router)',
+  tokenCreatedV14,
+  'event Trade(address indexed token, address indexed trader, bool isBuy, uint256 usdcAmount, uint256 tokenAmount, uint256 platformFee, uint256 creatorFee, uint256 snipeFee, uint256 virtualUsdc, uint256 virtualTokens)',
+  'event Graduated(address indexed token, bytes32 indexed poolId, uint256 usdcSeeded, uint256 tokensSeeded, uint256 liquidityLocked, uint256 snipeLocked)',
+  'event PoolFeesAccrued(address indexed token, uint256 platformFee, uint256 creatorFee)',
+  'event CreatorFeesCollected(address indexed token, address indexed plugin, uint256 amount)',
+  'event FeeToUpdated(address indexed feeTo)',
+  'event FeeToSetterUpdated(address indexed feeToSetter)',
+  'event LaunchFeeUpdated(uint256 launchFee)',
+  'event FeesCollected(address indexed feeTo, uint256 amount)',
+  ...launchpadV14Errors,
+  ...launchTokenV14Errors,
+  ...launchHookErrors,
+  ...uniswapV4Errors,
+  ...oz20Errors,
+  'function usdc() view returns (address)',
+  'function router() view returns (address)',
+  'function pairFactory() view returns (address)',
+  'function isLaunchPair(address account) view returns (bool)',
+  'function FEE_BPS() view returns (uint256)',
+  'function feeTo() view returns (address)',
+  'function feeToSetter() view returns (address)',
+  'function launchFee() view returns (uint256)',
+  'function pendingFees() view returns (uint256)',
+  'function pendingCreatorFees(address token) view returns (uint256)',
+  'function pendingSnipe(address token) view returns (uint256)',
+  'function snipeBpsOf(address token) view returns (uint256)',
+  'function TOTAL_SUPPLY() view returns (uint256)',
+  'function CURVE_SUPPLY() view returns (uint256)',
+  'function POOL_SUPPLY() view returns (uint256)',
+  'function VIRTUAL_TOKENS_0() view returns (uint256)',
+  'function VIRTUAL_USDC_0() view returns (uint256)',
+  'function MAX_LAUNCH_FEE() view returns (uint256)',
+  'function MAX_CREATOR_FEE_BPS() view returns (uint256)',
+  'function SNIPE_BLOCKS() view returns (uint256)',
+  'function SNIPE_START_BPS() view returns (uint256)',
+  'function MAX_TOTAL_FEE_BPS() view returns (uint256)',
+  'function poolManager() view returns (address)',
+  'function hook() view returns (address)',
+  'function pluginOf(address token) view returns (address)',
+  'function creatorOf(address token) view returns (address)',
+  'function creatorFeeBpsOf(address token) view returns (uint16)',
+  'function pairOf(address token) view returns (address)',
+  'function isGraduated(address token) view returns (bool)',
+  'function virtualUsdcOf(address token) view returns (uint256)',
+  'function initialize(address hook, address router)',
+  createTokenV14,
+  'function buy(address token, uint256 usdcIn, uint256 minTokensOut, address to, uint256 deadline) returns (uint256 tokensOut, uint256 usdcSpent)',
+  'function sell(address token, uint256 tokensIn, uint256 minUsdcOut, address to, uint256 deadline) returns (uint256 usdcOut)',
+  'function quoteBuy(address token, uint256 usdcIn) view returns (uint256 tokensOut, uint256 platformFee, uint256 creatorFee, uint256 snipeFee, uint256 usdcSpent, bool graduates)',
+  'function quoteSell(address token, uint256 tokensIn) view returns (uint256 usdcOut, uint256 platformFee, uint256 creatorFee)',
+  'function curves(address token) view returns (Curve)',
+  'function tokensLength() view returns (uint256)',
+  'function tokenAt(uint256 index) view returns (address)',
+  'function curvesPage(uint256 start, uint256 count) view returns (Curve[])',
+  'function spotPrice(address token) view returns (uint256)',
+  'function marketCap(address token) view returns (uint256)',
+  'function progressBps(address token) view returns (uint256)',
+  'function collectFees() returns (uint256 amount)',
+  'function collectCreatorFees(address token) returns (uint256 amount)',
+  'function accrueTradeFees(address token, uint256 platformFee, uint256 creatorFee)',
+  'function setFeeTo(address feeTo)',
+  'function setFeeToSetter(address feeToSetter)',
+  'function setLaunchFee(uint256 launchFee)',
+])
+
+/**
+ * IArchitexLaunchHook: one hook for every v1.4 pool. It opens each pool at graduation, takes the platform, creator and
+ * snipe fees of every swap in USDC (PoolTrade), and locks the snipe fees it holds into the pool as a bid (BidLocked).
+ * PoolTrade's `sender` is whoever called the PoolManager (a router), not necessarily the trader.
+ */
+export const launchHookAbi = parseAbi([
+  'struct PoolKey { address currency0; address currency1; uint24 fee; int24 tickSpacing; address hooks; }',
+  'struct Launch { address token; bool usdcIs0; bool open; uint16 creatorFeeBps; uint64 openBlock; int24 graduationTick; }',
+  'event PoolOpened(address indexed token, bytes32 indexed poolId, uint160 sqrtPriceX96, uint256 tokensAdded, uint256 usdcAdded, uint128 liquidity, bool open)',
+  'event PoolTrade(address indexed token, address indexed sender, bool isBuy, uint256 usdcAmount, uint256 tokenAmount, uint256 platformFee, uint256 creatorFee, uint256 snipeFee)',
+  'event BidLocked(address indexed token, uint256 usdc, uint128 liquidity, int24 tickLower, int24 tickUpper)',
+  'error OnlyLaunchpad()',
+  ...launchHookErrors,
+  ...uniswapV4Errors,
+  'function LP_FEE() view returns (uint24)',
+  'function TICK_SPACING() view returns (int24)',
+  'function FEE_BPS() view returns (uint256)',
+  'function SNIPE_BLOCKS() view returns (uint256)',
+  'function SNIPE_START_BPS() view returns (uint256)',
+  'function MAX_TOTAL_FEE_BPS() view returns (uint256)',
+  'function launchpad() view returns (address)',
+  'function usdc() view returns (address)',
+  'function poolManager() view returns (address)',
+  'function lock(address token) returns (uint128 liquidity)',
+  'function lockHeld(address token) view returns (uint256)',
+  'function poolKeyOf(address token) view returns (PoolKey)',
+  'function launchOf(address token) view returns (bytes32 poolId, Launch launch)',
+  'function snipeBpsOf(address token) view returns (uint256)',
+])
+
+/**
+ * IArchitexV4Router: exact-in buys and sells of graduated v1.4 tokens in their pools. `quoteBuy` and `quoteSell` are
+ * not views on chain (each runs the swap inside the PoolManager and reverts with the result, so nothing is kept);
+ * they are declared view here so they are read with eth_call like any view, fees included.
+ */
+export const v4RouterAbi = parseAbi([
+  'error Expired()',
+  'error SlippageExceeded()',
+  'error NotGraduated()',
+  'error OnlyPoolManager()',
+  'error Quote(uint256 amountOut)',
+  ...launchTokenV14Errors,
+  ...launchHookErrors,
+  ...uniswapV4Errors,
+  ...oz20Errors,
+  'function launchpad() view returns (address)',
+  'function usdc() view returns (address)',
+  'function poolManager() view returns (address)',
+  'function buy(address token, uint256 usdcIn, uint256 minTokensOut, address to, uint256 deadline) returns (uint256 tokensOut)',
+  'function sell(address token, uint256 tokensIn, uint256 minUsdcOut, address to, uint256 deadline) returns (uint256 usdcOut)',
+  'function quoteBuy(address token, uint256 usdcIn) view returns (uint256 tokensOut)',
+  'function quoteSell(address token, uint256 tokensIn) view returns (uint256 usdcOut)',
+])
+
+/** Uniswap v4's StateView (periphery): a pool's price and in-range liquidity, by pool id. */
+export const stateViewAbi = parseAbi([
+  'function getSlot0(bytes32 poolId) view returns (uint160 sqrtPriceX96, int24 tick, uint24 protocolFee, uint24 lpFee)',
+  'function getLiquidity(bytes32 poolId) view returns (uint128 liquidity)',
+])
+
 // ─── Creator-fee plugins (contracts/interfaces/plugins/*.sol) ───────────────────────────────────────────────
 
 /** Errors every reference plugin shares (ILaunchFeePlugin), so a plugin revert inside createToken or a collection decodes. */
@@ -516,6 +711,19 @@ export const launchpadWithPluginErrorsAbi = parseAbi([
   ...deepenPluginErrors,
   ...comboPluginErrors,
   'function createToken(string name, string symbol, string metadataURI, uint16 creatorFeeBps, address plugin, bytes pluginData, uint256 initialBuyUsdc, uint256 minTokensOut, uint256 maxLaunchFee) returns (address token)',
+  'function collectCreatorFees(address token) returns (uint256 amount)',
+])
+
+/** launchpadWithPluginErrorsAbi for the v1.4 launchpad: its createToken takes the pool choice. */
+export const launchpadV14WithPluginErrorsAbi = parseAbi([
+  curveV14,
+  tokenCreatedV14,
+  ...launchpadV14Errors,
+  ...oz20Errors,
+  ...launchFeePluginErrors,
+  ...splitPluginErrors,
+  ...comboPluginErrors,
+  createTokenV14,
   'function collectCreatorFees(address token) returns (uint256 amount)',
 ])
 

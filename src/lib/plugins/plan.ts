@@ -79,6 +79,8 @@ export interface PlanContext {
   suite: LaunchSuite
   /** Other Architex contracts that would strand USDC sent to them (core factory, router, lens). */
   architexContracts?: readonly Address[]
+  /** Uniswap's PoolManager, where v1.4 pools live: USDC sent to it by plain transfer is anyone's to take. */
+  poolManager?: Address
   /** On-chain facts about the typed addresses; without them only the static checks run. */
   facts?: DestinationFacts
 }
@@ -136,6 +138,9 @@ function refuse(address: Address, role: Recipient, ctx: PlanContext): string | u
   if (address === zeroAddress) return 'The zero address cannot receive fees.'
   if (same(address, ctx.suite.launchpad)) return 'That is the launchpad. It cannot receive its own fees.'
   if (same(address, ctx.usdc)) return 'That is the USDC contract. USDC sent to it is lost.'
+  if (ctx.poolManager && ctx.poolManager !== zeroAddress && same(address, ctx.poolManager)) {
+    return 'That is Uniswap’s PoolManager. Anyone could take fees sent to it, so it cannot receive them.'
+  }
   const facts = ctx.facts
   const id = address.toLowerCase()
   if (facts?.launchPairs.has(id)) return 'That is a launch pool. Anyone could take fees sent to it, so it cannot receive them.'

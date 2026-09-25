@@ -1,8 +1,21 @@
 import { decodeAbiParameters, decodeFunctionData, hexToString, isHex, maxUint256, parseAbi, zeroAddress, type Address, type Hex, type TypedDataDefinition } from 'viem'
 import { listedPluginAt } from '../content/plugins/registry'
-import { buybackPluginAbi, deepenPluginAbi, factoryAbi, launchRouterAbi, launchTokenAbi, launchpadAbi, routerAbi, splitPluginAbi, testTokenAbi } from './abi'
+import {
+  buybackPluginAbi,
+  deepenPluginAbi,
+  factoryAbi,
+  launchHookAbi,
+  launchRouterAbi,
+  launchTokenAbi,
+  launchpadAbi,
+  launchpadV14Abi,
+  routerAbi,
+  splitPluginAbi,
+  testTokenAbi,
+  v4RouterAbi,
+} from './abi'
 import { bytes32ToAddress, domainLabel, isMessenger, isTransmitter } from './cctp'
-import { deployment, launchSuite, type LaunchSuite } from './deployment'
+import { deployment, launchSuite, launchSuiteV14, suiteFor, type LaunchSuite, type LaunchSuiteV14 } from './deployment'
 import { formatAmount, formatPct, shortAddress } from './format'
 import { DEEPEN_DEFAULT_BURN_BPS } from './plugins/state'
 import { rememberedToken, type Token } from './tokens'
@@ -50,15 +63,22 @@ function symbol(address: string, tokens: readonly Token[]): string {
   return tokenFor(address, tokens)?.symbol ?? shortAddress(address)
 }
 
-function contractName(address: string | undefined, tokens: readonly Token[], suite: LaunchSuite = launchSuite): string {
+function known(address: string | undefined, contract: string): boolean {
+  return contract !== zeroAddress && same(address, contract)
+}
+
+function contractName(address: string | undefined, tokens: readonly Token[], suite: LaunchSuite = launchSuite, v14: LaunchSuiteV14 = launchSuiteV14): string {
   if (!address) return 'Contract creation'
   if (same(address, deployment.router)) return 'Architex router'
   if (same(address, deployment.factory)) return 'Architex factory'
   if (isMessenger(address)) return 'USDC bridge'
   if (isTransmitter(address)) return 'USDC bridge mint'
-  if (suite.launchpad !== zeroAddress && same(address, suite.launchpad)) return 'Architex launchpad'
-  if (suite.launchRouter !== zeroAddress && same(address, suite.launchRouter)) return 'Architex launch router'
-  const listed = listedPluginAt(address, suite)
+  if (known(address, suite.launchpad)) return 'Architex launchpad'
+  if (known(address, suite.launchRouter)) return 'Architex launch router'
+  if (known(address, v14.launchpad)) return 'Architex launchpad v1.4'
+  if (known(address, v14.router)) return 'Architex v4 router'
+  if (known(address, v14.hook)) return 'Architex launch hook'
+  const listed = listedPluginAt(address, suite) ?? listedPluginAt(address, suiteFor('v14'))
   if (listed) return `${listed.name} plugin`
   if (deployment.pairs.some((pair) => same(pair.pair, address))) return 'Architex pool'
   const token = tokenFor(address, tokens)
@@ -222,28 +242,82 @@ export function describeLaunchpadCall(data: Hex, from: string | undefined, token
   }
 }
 
+/**
+ * The v1.4 launchpad. Its createToken carries the creator's pool choice (a different selector from v1.3's); its buy,
+ * sell and collections are v1.3's calls to the letter, and read the same.
+ */
+export function describeLaunchpadV14Call(data: Hex, from: string | undefined, tokens: readonly Token[], suite: LaunchSuite = suiteFor('v14')): SigningIntent | undefined {
+  const call = decode(launchpadV14Abi, data)
+  if (!call) return undefined
+  if (call.functionName !== 'createToken') return describeLaunchpadCall(data, from, tokens, suite)
+  const [name, tokenSymbol, , creatorFeeBps, plugin, pluginData, openPool, initialBuyUsdc, , maxLaunchFee] = call.args
+  const usdc = usdcAddress()
+  return {
+    title: 'Create token',
+    lines: [
+      { label: 'Name', value: name || 'None' },
+      { label: 'Symbol', value: tokenSymbol || 'None' },
+      { label: 'Creator fee', value: `${formatPct(creatorFeeBps)} of every trade` },
+      { label: 'Fees go to', value: destination(plugin, from, suite) },
+      ...pluginDataLines(plugin, pluginData, suite),
+      { label: 'Pool', value: openPool ? 'Open: anyone can add liquidity' : 'Closed: only the locked liquidity' },
+      { label: 'First buy', value: initialBuyUsdc > 0n ? amount(initialBuyUsdc, usdc, tokens) : 'None' },
+      { label: 'Launch fee', value: `Up to ${amount(maxLaunchFee, usdc, tokens)}` },
+    ],
+    note: 'The creator fee, where it goes and the pool choice are locked for good once the token exists.',
+  }
+}
+
+/** A pool trade's receipt lines: what is paid or sold, the least received, a recipient that is not the signer, the deadline. */
+function poolTrade(buy: boolean, token: Address, amountIn: bigint, minOut: bigint, to: Address, deadline: bigint, from: string | undefined, tokens: readonly Token[]): SigningIntent {
+  const usdc = usdcAddress()
+  const lines: IntentLine[] = buy
+    ? [
+        { label: 'You pay', value: amount(amountIn, usdc, tokens) },
+        { label: 'You receive at least', value: amount(minOut, token, tokens) },
+      ]
+    : [
+        { label: 'You sell', value: amount(amountIn, token, tokens) },
+        { label: 'You receive at least', value: amount(minOut, usdc, tokens) },
+      ]
+  if (!same(to, from)) lines.push({ label: 'Sent to', value: shortAddress(to) })
+  lines.push({ label: 'Valid until', value: until(deadline) })
+  return { title: `${buy ? 'Buy' : 'Sell'} ${symbol(token, tokens)}`, lines }
+}
+
 /** Launch-pool trades, through the launch router. */
 export function describeLaunchRouterCall(data: Hex, from: string | undefined, tokens: readonly Token[]): SigningIntent | undefined {
   const call = decode(launchRouterAbi, data)
   if (!call) return undefined
-  const usdc = usdcAddress()
   if (call.functionName === 'buy' || call.functionName === 'sell') {
     const [token, amountIn, minOut, to, deadline] = call.args
-    const buy = call.functionName === 'buy'
-    const lines: IntentLine[] = buy
-      ? [
-          { label: 'You pay', value: amount(amountIn, usdc, tokens) },
-          { label: 'You receive at least', value: amount(minOut, token, tokens) },
-        ]
-      : [
-          { label: 'You sell', value: amount(amountIn, token, tokens) },
-          { label: 'You receive at least', value: amount(minOut, usdc, tokens) },
-        ]
-    if (!same(to, from)) lines.push({ label: 'Sent to', value: shortAddress(to) })
-    lines.push({ label: 'Valid until', value: until(deadline) })
-    return { title: `${buy ? 'Buy' : 'Sell'} ${symbol(token, tokens)}`, lines }
+    return poolTrade(call.functionName === 'buy', token, amountIn, minOut, to, deadline, from, tokens)
   }
   return undefined
+}
+
+/** Trades of a graduated v1.4 token in its Uniswap pool, through the Architex v4 router. */
+export function describeV4RouterCall(data: Hex, from: string | undefined, tokens: readonly Token[]): SigningIntent | undefined {
+  const call = decode(v4RouterAbi, data)
+  if (!call) return undefined
+  if (call.functionName === 'buy' || call.functionName === 'sell') {
+    const [token, amountIn, minOut, to, deadline] = call.args
+    const intent = poolTrade(call.functionName === 'buy', token, amountIn, minOut, to, deadline, from, tokens)
+    return { ...intent, lines: [...intent.lines.slice(0, 2), { label: 'Pool', value: 'Uniswap v4' }, ...intent.lines.slice(2)] }
+  }
+  return undefined
+}
+
+/** The launch hook's one public action: locking the anti-sniping fees it holds for a token into the token's pool. */
+export function describeLaunchHookCall(data: Hex, tokens: readonly Token[]): SigningIntent | undefined {
+  const call = decode(launchHookAbi, data)
+  if (call?.functionName !== 'lock') return undefined
+  const [token] = call.args
+  return {
+    title: `Lock ${symbol(token, tokens)} anti-sniping fees`,
+    lines: [{ label: 'Token', value: symbol(token, tokens) }],
+    note: 'Adds the anti-sniping fees the hook holds for this token to its Uniswap pool, as liquidity nobody can withdraw. Nothing comes to you.',
+  }
 }
 
 /**
@@ -391,8 +465,29 @@ function describeTransaction(tx: TxRequest, tokens: readonly Token[]): SigningIn
     if (intent) return intent
   }
 
+  if (data && known(tx.to, launchSuiteV14.launchpad)) {
+    const intent = describeLaunchpadV14Call(data, tx.from, tokens)
+    if (intent) return intent
+  }
+
+  if (data && known(tx.to, launchSuiteV14.router)) {
+    const intent = describeV4RouterCall(data, tx.from, tokens)
+    if (intent) return intent
+  }
+
+  if (data && known(tx.to, launchSuiteV14.hook)) {
+    const intent = describeLaunchHookCall(data, tokens)
+    if (intent) return intent
+  }
+
   if (data && tx.to && listedPluginAt(tx.to)) {
     const intent = describePluginCall(tx.to, data, tx.from, tokens)
+    if (intent) return intent
+  }
+
+  // The v1.4 launchpad's own Split and Combo (and Distribute to holders), bound to it at deployment.
+  if (data && tx.to && listedPluginAt(tx.to, suiteFor('v14'))) {
+    const intent = describePluginCall(tx.to, data, tx.from, tokens, suiteFor('v14'))
     if (intent) return intent
   }
 

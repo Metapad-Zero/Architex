@@ -1,4 +1,5 @@
-import { BaseError, ContractFunctionRevertedError } from 'viem'
+import { BaseError, ContractFunctionRevertedError, decodeErrorResult, isHex, parseAbi } from 'viem'
+import { launchHookErrors } from './abi'
 
 /**
  * Turns a decoded custom-error name (or a raw wallet/RPC message) into a sentence that names the
@@ -35,7 +36,7 @@ const REVERTS: Record<string, string> = {
   LaunchFeeAboveMax: 'The launch fee went up after this form read it. Check the new fee, then create again.',
   CreatorFeeTooHigh: 'The creator fee can be at most 10%.',
   InvalidPlugin:
-    'Creator fees cannot go to that address: it could never pass them on (the zero address, the launchpad, USDC, the launch router or pair factory, a launch token or a launch pool). Choose another destination.',
+    'Creator fees cannot go to that address: it could never pass them on (the zero address, the launchpad, USDC, the launch router or pair factory, the launch hook, Uniswap’s PoolManager, a launch token or a launch pool). Choose another destination.',
   DataForNonPlugin: 'That address isn’t a plugin, so it can’t take settings. Clear them or pick a listed plugin.',
   NotInitialized: 'The launchpad is not set up yet. Try again later.',
   PluginPullMismatch: 'This token’s plugin did not take its fees as it must, so they stay with the launchpad.',
@@ -44,6 +45,17 @@ const REVERTS: Record<string, string> = {
   PairAlreadySet: 'The pool for this token is already set.',
   AlreadyGraduated: 'This token has already graduated.',
   PairLockedUntilGraduation: 'Transfers to the pool are locked until the curve graduates.',
+  PoolLockedUntilGraduation: 'Transfers to the pool are locked until the curve graduates.',
+  // Launchpad v1.4's hook, and Uniswap v4 around it.
+  FeesExceedAmount: 'The fees would take the whole amount. Enter a larger amount.',
+  PartialFill: 'The pool could not fill the whole trade. Try a smaller amount.',
+  ClosedPool: 'This pool is closed: only its locked liquidity can be in it.',
+  UnknownLaunch: 'This token’s Uniswap pool is not open yet. It still trades on its curve.',
+  PoolNotInitialized: 'This token’s Uniswap pool is not open yet. It still trades on its curve.',
+  AlreadyOpened: 'This token’s pool is already open.',
+  PoolCreationRestricted: 'Only the launchpad can open this pool.',
+  NothingToLock: 'No anti-sniping fees are waiting to be locked for this token.',
+  WrappedError: 'The pool refused the trade. Check the amount, then try again.',
   // Creator-fee plugins (contracts/interfaces/plugins).
   NotConfigured: 'That plugin does not serve this token.',
   AlreadyConfigured: 'That plugin is already set up for this token.',
@@ -82,11 +94,41 @@ export function explainRevert(errorName: string | undefined): string {
   return REVERTS[errorName] ?? `Transaction reverted (${errorName})`
 }
 
+/**
+ * What a refusal inside a Uniswap v4 pool can be. The PoolManager wraps a hook's revert, or a token's inside a swap, in
+ * WrappedError(target, selector, reason, details); `reason` is the original error.
+ */
+const wrappedErrorsAbi = parseAbi([
+  ...launchHookErrors,
+  'error OnlyLaunchpad()',
+  'error Forbidden()',
+  'error UnknownToken()',
+  'error NotGraduated()',
+  'error OnlyLaunchpadOrRouter()',
+  'error InvalidPullTarget()',
+  'error ERC20InsufficientBalance(address sender, uint256 balance, uint256 needed)',
+  'error ERC20InsufficientAllowance(address spender, uint256 allowance, uint256 needed)',
+])
+
+/** The name of the error a WrappedError carries, when it is one the site knows. */
+export function wrappedErrorName(reason: unknown): string | undefined {
+  if (typeof reason !== 'string' || !isHex(reason) || reason.length < 10) return undefined
+  try {
+    return decodeErrorResult({ abi: wrappedErrorsAbi, data: reason }).errorName
+  } catch {
+    return undefined
+  }
+}
+
 /** Decodes a viem error chain down to the custom error name and explains it. */
 export function revertReason(error: unknown): string {
   if (error instanceof BaseError) {
     const reverted = error.walk((cause) => cause instanceof ContractFunctionRevertedError)
-    if (reverted instanceof ContractFunctionRevertedError) return explainRevert(reverted.data?.errorName)
+    if (reverted instanceof ContractFunctionRevertedError) {
+      const data = reverted.data
+      if (data?.errorName === 'WrappedError') return explainRevert(wrappedErrorName(data.args?.[2]) ?? 'WrappedError')
+      return explainRevert(data?.errorName)
+    }
   }
   return 'Transaction reverted'
 }

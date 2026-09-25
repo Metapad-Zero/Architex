@@ -10,8 +10,9 @@ import {
 } from './amm'
 import { CURVE } from './curve'
 import { formatAmount } from './format'
-import type { LaunchRecord, TradeVenue } from './launch'
+import { launchVersion, type LaunchRecord, type TradeVenue } from './launch'
 import type { LaunchQuote, LaunchSide } from './launchQuote'
+import { maxV4Trade, snipeBps, v4Value } from './launchV14'
 
 /**
  * The price-impact guard: one policy for every sheet that trades against a pool or a curve (Swap, and a launch's
@@ -99,19 +100,26 @@ function launchReserves(launch: LaunchRecord, venue: TradeVenue): { usdc: bigint
 
 /**
  * What price impact costs a launch trade, in USD (USDC, 6 decimals): the tokens valued at the curve's or the pool's
- * price before the trade, against the USDC that went into it or came out of it. Both fees are left out (they have
- * their own receipt lines), so a buy is measured on the USDC after them and a sell on the USDC before them.
+ * price before the trade, against the USDC that went into it or came out of it. Every fee is left out (each has its
+ * own receipt line), so a buy is measured on the USDC after them and a sell on the USDC before them.
  *
- * On a launch sheet "price impact" is how far the trade moves the price, which runs ahead of this cost: a buy that
- * moves the curve's price 21% costs about 9% of the USDC that goes in.
+ * On a curve or a v1.3 launch pool "price impact" is how far the trade moves the price, which runs ahead of this
+ * cost: a buy that moves the curve's price 21% costs about 9% of the USDC that goes in. In a v1.4 Uniswap pool the
+ * impact is this cost itself, as a share (lib/launchV14.ts v4ImpactBps).
  */
 export function launchImpactLossUsd(launch: LaunchRecord, side: LaunchSide, quote: LaunchQuote): bigint {
-  const reserves = launchReserves(launch, quote.venue)
-  if (!reserves || reserves.tokens <= 0n) return 0n
-  const fees = quote.platformFee + quote.creatorFee
+  const fees = quote.platformFee + quote.creatorFee + quote.snipeFee
   const usdc = side === 'buy' ? quote.amountIn - fees : quote.amountOut + fees
   const tokens = side === 'buy' ? quote.amountOut : quote.amountIn
-  const atPriceBefore = (tokens * reserves.usdc) / reserves.tokens
+  let atPriceBefore: bigint
+  if (quote.venue === 'pool' && launchVersion(launch) === 'v14') {
+    if (!launch.v4) return 0n
+    atPriceBefore = v4Value(tokens, launch.v4)
+  } else {
+    const reserves = launchReserves(launch, quote.venue)
+    if (!reserves || reserves.tokens <= 0n) return 0n
+    atPriceBefore = (tokens * reserves.usdc) / reserves.tokens
+  }
   const loss = side === 'buy' ? usdc - atPriceBefore : atPriceBefore - usdc
   return loss > 0n ? loss : 0n
 }
@@ -192,11 +200,25 @@ export function maxLaunchSell(tokenReserve: bigint, targetBps: bigint = IMPACT_H
   return (tokenReserve * (growth - ROOT_SCALE)) / ROOT_SCALE
 }
 
-/** The largest buy (USDC) or sell (tokens) of this launch whose price move stays under `targetBps`, where it trades now. */
-export function maxLaunchTrade(launch: LaunchRecord, side: LaunchSide, targetBps: bigint = IMPACT_HINT_TARGET_BPS): bigint {
+/**
+ * The largest buy (USDC) or sell (tokens) of this launch whose impact stays under `targetBps`, where it trades now. A
+ * graduated v1.4 token's comes from its pool's liquidity in range (lib/launchV14.ts maxV4Trade), 0 until that is read;
+ * `block` is the chain's latest block, for the fees of a buy in the pool's first blocks.
+ */
+export function maxLaunchTrade(launch: LaunchRecord, side: LaunchSide, targetBps: bigint = IMPACT_HINT_TARGET_BPS, block?: bigint): bigint {
+  if (launch.graduated && launchVersion(launch) === 'v14') {
+    if (!launch.v4) return 0n
+    const snipe = block === undefined ? 0 : snipeBps(launch.v4.openBlock, block, launch.creatorFeeBps)
+    return maxV4Trade(side, launch.v4, CURVE.FEE_BPS + BigInt(launch.creatorFeeBps) + BigInt(snipe), targetBps)
+  }
   const reserves = launchReserves(launch, launch.graduated ? 'pool' : 'curve')
   if (!reserves) return 0n
-  return side === 'buy' ? maxLaunchBuy(reserves.usdc, launch.creatorFeeBps, targetBps) : maxLaunchSell(reserves.tokens, targetBps)
+  // A v1.4 curve buy in the token's first blocks pays the snipe fee out of the offer too, beside the creator fee.
+  const snipe =
+    !launch.graduated && launchVersion(launch) === 'v14' && launch.createdBlock !== undefined && block !== undefined
+      ? snipeBps(launch.createdBlock, block, launch.creatorFeeBps)
+      : 0
+  return side === 'buy' ? maxLaunchBuy(reserves.usdc, launch.creatorFeeBps + snipe, targetBps) : maxLaunchSell(reserves.tokens, targetBps)
 }
 
 /** Rounds down to `digits` significant digits, so "about X or less" never names more than the limit. */
