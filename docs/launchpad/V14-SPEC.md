@@ -186,12 +186,13 @@ the BUSL `Position.sol`, so the hook reads the pool's price with its own copy of
   `lock` places nothing and the USDC stays as the hook's claims until the price comes back, for good if it never does.
   Nobody can withdraw it either way. Placing the bid lower instead would let anyone move it by pushing the price first
   (Claude review #7, L2).
-- **Nothing that unlocks runs inside someone else's unlock.** A graduating buy, `lock` and `syncPoolFees` revert
-  `AlreadyUnlocked` when called from inside a v4 unlock; `collectCreatorFees` then skips the sync and pays what the
-  launchpad already holds.
-- **A USDC blocklist.** Circle can blocklist any address. On the launchpad it stops only payouts: pools keep trading
-  and their fees wait as the hook's claims. On the hook it stops graduations (the hook passes the curve's USDC into the
-  pool), while the curve keeps trading both ways.
+- **Nothing that unlocks runs inside someone else's unlock.** A graduating buy (a `createToken` whose first buy
+  graduates included), `lock`, `syncPoolFees` and `syncPoolFeesBatch` revert `AlreadyUnlocked` when called from inside
+  a v4 unlock; `collectCreatorFees` then skips the sync and pays what the launchpad already holds.
+- **A USDC blocklist.** Circle can blocklist any address. On the launchpad it stops everything that moves USDC through
+  the launchpad: curve buys and sells, graduations, launches that pay a launch fee, syncs and payouts. Graduated pools
+  keep trading, and their fees wait as the hook's claims. On the hook it stops only graduations (the hook passes the
+  curve's USDC into the pool); the curve keeps trading both ways.
 - **Sells need no approval.** The router pulls a seller's tokens through the token itself, always from its own caller
   (v1.3's launch router did the same). A contract that holds launch tokens and relays arbitrary calls to targets other
   than the token can be made to sell them through the router; wallets and ordinary contracts cannot.
@@ -207,8 +208,8 @@ The v1.3 bar: unit, fuzz and invariant tests against a real v4 PoolManager; end-
 graduation; adversarial reviews (Claude lenses and Grok) until no High is open; an Arc Testnet rehearsal; the owner
 deploys to mainnet; then the Uniswap routing allowlist submission with a live pool. New invariants to add to V13-SPEC
 §6: the hook never lets a swap skip the fees; the locked positions can never shrink; only the launchpad can create a
-pool with the hook; a closed pool's liquidity only ever grows; the hook holds no USDC and its claims are exactly what
-it owes (pool fees not yet synced, USDC waiting for a bid); `lock` never reverts once there is something to lock; no
+pool with the hook; a closed pool's liquidity only ever grows; the hook holds no USDC and its claims are at least what
+it owes (pool fees not yet synced, USDC waiting for a bid; anyone can add claims to the hook, which then stay there); `lock` never reverts once there is something to lock; no
 donation ever lands.
 
 Reviews so far: Grok #7 (`GROK-REVIEW-7.md`: no High; the router fix, the spec corrections) and Claude #7
