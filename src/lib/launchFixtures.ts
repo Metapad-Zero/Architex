@@ -14,7 +14,7 @@ import { activeChain } from '../chain'
 import { listedPlugin, listedPluginAt, pluginAddress } from '../content/plugins/registry'
 import { sqrt } from './amm'
 import { CURVE, INITIAL_CURVE, quoteBuy, quotePoolBuy, quotePoolSell, quoteSell, realUsdc, type CurveState, type PoolReserves } from './curve'
-import { FIXTURE_SUITE, FIXTURE_SUITE_V14, suiteFor, type LaunchVersion } from './deployment'
+import { FIXTURE_SUITE, FIXTURE_SUITE_V14, isV14Available, suiteFor, type LaunchVersion } from './deployment'
 import type { LaunchRecord, LaunchTrade } from './launch'
 import { setLaunchFixtureApi, type FixtureCreateArgs } from './launchFixtureApi'
 import { launchPoolKey, poolFeesOnGross, poolIdOf, snipeBps, usdcIsCurrency0, type PoolTradeFees } from './launchV14'
@@ -867,7 +867,8 @@ function seedMarket(): void {
   )
   buyInternal(bob, mint, 50n * USDC, NOW - 20)
 
-  // ─── Launchpad v1.4 ──────────────────────────────────────────────────────
+  // ─── Launchpad v1.4 (only while the fixture previews it as live) ──────────
+  if (!isV14Available) return
   const splitV14 = encodeSplit([CREATOR, alice], [3n, 1n])
 
   // Graduated into a closed Uniswap pool (USDC is its currency0), with buys that paid the pool's snipe fee in its first
