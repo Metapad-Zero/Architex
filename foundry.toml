@@ -24,6 +24,9 @@ out = "contracts-v14/out"
 cache_path = "contracts-v14/cache"
 evm_version = "cancun"
 fs_permissions = [{ access = "read", path = "./contracts-v14/test/fixtures" }]
+# The hook is deployed with CREATE2 through the deterministic deployer at a mined salt; tests of the deploy script need
+# `new X{salt: s}` to go through that deployer too, as it does in a broadcast.
+always_use_create_2_factory = true
 
 [rpc_endpoints]
 ethereum = "https://ethereum-rpc.publicnode.com"
