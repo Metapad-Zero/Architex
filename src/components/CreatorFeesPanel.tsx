@@ -232,13 +232,16 @@ function DeepenPanel({ deepen, symbol, graduated, alsoPaysHolders, busy, status,
         </div>
         <div><dt>Spent so far</dt><dd>{usdc(deepen.totalSpent)}</dd></div>
         <div><dt>Burned so far</dt><dd>{formatAmount(deepen.totalBurned, 18)} {symbol}</dd></div>
-        <div>
-          <dt>Added to the pool</dt>
-          <dd className={graduated ? '' : 'text-g500'}>
-            {graduated ? `${usdc(deepen.totalUsdcAdded)} + ${formatAmount(deepen.totalTokensAdded, 18)} ${symbol}` : 'Starts once it graduates'}
-          </dd>
-        </div>
-        {graduated && <div><dt>Liquidity locked</dt><dd>{formatLp(deepen.totalLiquidity)} LP</dd></div>}
+        {/* One fact per line, so each fits a phone's width. */}
+        {graduated ? (
+          <>
+            <div><dt>USDC added to the pool</dt><dd>{usdc(deepen.totalUsdcAdded)}</dd></div>
+            <div><dt>Tokens added to the pool</dt><dd>{formatAmount(deepen.totalTokensAdded, 18)} {symbol}</dd></div>
+            <div><dt>Liquidity locked</dt><dd>{formatLp(deepen.totalLiquidity)} LP</dd></div>
+          </>
+        ) : (
+          <div><dt>Added to the pool</dt><dd className="text-g500">Starts once it graduates</dd></div>
+        )}
       </dl>
       <div className="mt-4">
         <GhostButton disabled={deepen.offer === 0n || Boolean(busy)} onClick={() => run(runDeepen)}>

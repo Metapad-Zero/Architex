@@ -71,9 +71,9 @@ export function DocsFees() {
         that's locked at the burn address for good. The creator picks the burn share at launch, from
         0% (everything goes into the pool) to 100% (everything is burned), 50% to start, and it's
         locked like the rest. Anyone can run it, paced like a buyback: at most 0.25% of the curve's
-        USDC side per hour, and after graduation of the pool's locked USDC, the part that belongs to
-        liquidity at the burn address. Liquidity that can be taken back out doesn't count, so parking
-        some in the pool for a moment can't make a run spend more.
+        USDC side per hour, or, once the token graduates, of the pool's locked USDC (the part that
+        belongs to liquidity at the burn address). Liquidity that can be taken back out doesn't
+        count, so parking some in the pool for a moment can't make a run spend more.
       </p>
       <p>
         Burning takes tokens out of the pool and leaves the USDC in, so per USDC it lifts the price
