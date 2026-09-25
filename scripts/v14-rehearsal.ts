@@ -1,0 +1,2575 @@
+/**
+ * Arc Testnet rehearsal of the Architex launchpad v1.4 (docs/launchpad/V14-REHEARSAL.md; V14-SPEC §11).
+ *
+ *   bun run scripts/v14-rehearsal.ts                                  # read-only: deployment checks and progress so far
+ *   SIGNER=key bun run scripts/v14-rehearsal.ts                       # live: signs with REHEARSAL_KEY; resumable
+ *   SIGNER=anvil RPC_URL=http://127.0.0.1:<port> bun run scripts/v14-rehearsal.ts   # a local anvil fork, no key
+ *   DEPLOYMENT=deployments/arc-testnet-v14-realusdc.json SIGNER=key bun run scripts/v14-rehearsal.ts   # Run B
+ *   bun run scripts/v14-rehearsal.ts --preview                        # which launch tokens would sort below USDC
+ *
+ * It drives the suite deployed by contracts-v14/script/DeployLaunchpadV14.s.sol and recorded by
+ * scripts/v14-rehearsal-record.ts, against Uniswap's own v4 PoolManager on Arc Testnet (0x8366…0951).
+ *
+ * Run A (a deployment on the mintable rehearsal USDC, rUSDC): verifies the deployment (wiring, the hook's permission
+ * bits and CREATE2 salt, every contract byte for byte against the local build); deploys the test RawSwapper; launches
+ * five tokens covering closed and open pools, creator fees of 0, 1% and 10%, a plain wallet, Split, Distribute to
+ * holders and Combo, with and without the creator's first buy; buys on each curve inside its snipe window and after it;
+ * graduates all five into Uniswap v4; trades each pool through the Architex router inside and after the pool's snipe
+ * window; swaps exact-out through the RawSwapper; proves donations and outside liquidity in a closed pool are refused and
+ * outside liquidity in an open pool is accepted; places bids with `lock`, including the case where the price sits under
+ * the bid's top; and syncs, collects and pays out every fee.
+ *
+ * Run B (a deployment on Arc's own USDC, 0x36…00): the curve half with 1 USDC trades, one inside the snipe window. A
+ * graduation would need about 25,000 USDC. Arc's USDC is a precompile that a local fork cannot execute, so Run B only
+ * runs live.
+ *
+ * Every transaction is simulated first (a revert costs nothing) and checked at its receipt's block B against B-1:
+ *   - the result against the contracts' own quotes and an independent model of the spec: the curve (V13-SPEC §5 with the
+ *     snipe fee), the hook's fees (V14-SPEC §3), Uniswap v4's pool math (scripts/v14-v4-math.ts: every swap, add and bid
+ *     to the unit, across ticks), the graduation, and the dividend stream fed from the token's own storage;
+ *   - every event against the model;
+ *   - a snapshot of every tracked balance and accrual (Multicall3, one call per block): each must move by exactly what
+ *     the model says, and nothing else may move;
+ *   - the invariants: launchpad USDC == pendingFees + Σ pendingCreatorFees + Σ pendingSnipe + Σ (virtualUsdc -
+ *     VIRTUAL_USDC_0) over live curves; the hook holds no USDC and no launch token; the hook's ERC-6909 claims ==
+ *     Σ (pendingPlatform + pendingCreator + lockHeld); no token's supply grows, and every token's supply is held by the
+ *     addresses tracked;
+ *   - the actor's native balance moved by the gas alone (rUSDC), or by the USDC traded plus the gas (Arc's USDC).
+ * The snipe windows are checked against the block each transaction actually landed in. The run stops at the first step
+ * with a failed check.
+ *
+ * Signing (SIGNER):
+ *   - key: signs locally with the key in REHEARSAL_KEY (never printed, logged or written). For Arc Testnet.
+ *   - anvil: sends with eth_sendTransaction from ACTOR (default: the deployment's deployer) after
+ *     anvil_impersonateAccount, topping its gas up with anvil_setBalance. Needs a local anvil; no key at all.
+ *   - unset: read-only.
+ * Chain guard: Arc Testnet (5042002), or a localhost node on chain 31337 (a fork run with --chain-id 31337). It refuses
+ * Arc mainnet always, and key signing on a localhost node that reports 5042002 (those signatures would be valid live).
+ *
+ * Progress (token addresses, positions, mined transactions, finished steps) lives next to the deployment record in
+ * *.progress.json (gitignored), or PROGRESS=<file>: a re-run skips finished steps, never re-sends a mined transaction,
+ * and re-checks a step whose transaction was mined but not yet checked.
+ *
+ * Environment: DEPLOYMENT, PROGRESS, RPC_URL (or ARC_TESTNET_RPC), SIGNER, REHEARSAL_KEY, ACTOR (anvil only), ARTIFACTS
+ * (default contracts-v14/out), GAS_CAP (USDC of gas this progress file may spend; default 2 for Run A, 1 for Run B),
+ * FLOOR (Run B: the least native USDC the actor keeps, default 0.5), RUNB_WINDOW_USDC (Run B's in-window buy, default 1),
+ * SAMPLE_SECONDS (default 20), MARKDOWN=1 (print the results as markdown tables).
+ */
+import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import {
+  BaseError,
+  createPublicClient,
+  createWalletClient,
+  decodeErrorResult,
+  decodeFunctionData,
+  decodeFunctionResult,
+  defineChain,
+  encodeAbiParameters,
+  encodeDeployData,
+  encodeFunctionData,
+  formatUnits,
+  getAddress,
+  getContractAddress,
+  hexToBigInt,
+  http,
+  keccak256,
+  maxUint256,
+  multicall3Abi,
+  pad,
+  parseAbi,
+  parseEventLogs,
+  slice,
+  stringToHex,
+  toFunctionSelector,
+  toHex,
+  zeroAddress,
+  type Abi,
+  type Address,
+  type Hex,
+  type TransactionReceipt,
+} from 'viem'
+import { privateKeyToAccount } from 'viem/accounts'
+import * as V4 from './v14-v4-math.ts'
+
+// ── Configuration ─────────────────────────────────────────────────────────────
+
+const ROOT = fileURLToPath(new URL('..', import.meta.url))
+const ARC_TESTNET = 5042002
+const ARC_MAINNET = 5042
+const ARC_USDC = getAddress('0x3600000000000000000000000000000000000000')
+const RUSDC = getAddress('0x309297011592BA9a157204e57EB0AF2175D8ceed')
+const BURNER = getAddress('0x7212fA4Fe663d063A7a83dA0467d592ed3A51D46')
+const POOL_MANAGER = getAddress('0x8366a39CC670B4001A1121B8F6A443A643e40951')
+const STATE_VIEW = getAddress('0xF3334192D15450CdD385c8B70e03f9A6bD9E673b')
+const CREATE2_DEPLOYER = getAddress('0x4e59b44847b379578588920cA78FbF26c0B4956C')
+const MULTICALL3 = getAddress('0xcA11bde05977b3631167028862bE2a173976CA11')
+const DEAD = getAddress('0x000000000000000000000000000000000000dEaD')
+
+const RPC = process.env.RPC_URL ?? process.env.ARC_TESTNET_RPC ?? 'https://rpc.testnet.arc.io'
+const LOCAL_RPC = /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?\/?$/.test(RPC)
+const ARTIFACTS = resolve(ROOT, process.env.ARTIFACTS ?? 'contracts-v14/out')
+const MARKDOWN = process.env.MARKDOWN === '1'
+const SAMPLE_SECONDS = Number(process.env.SAMPLE_SECONDS ?? '20')
+
+// Spec constants (V13-SPEC §1, §5; V14-SPEC §3, §5); the deploy step compares them with the contracts.
+const E18 = 10n ** 18n
+const BPS = 10_000n
+const FEE_BPS = 50n
+const TOTAL_SUPPLY = 1_000_000_000n * E18
+const CURVE_SUPPLY = 800_000_000n * E18
+const POOL_SUPPLY = 200_000_000n * E18
+const VIRTUAL_USDC_0 = 8_333_333_333n
+const VIRTUAL_TOKENS_0 = 1_066_666_667n * E18
+const SNIPE_BLOCKS = 20n
+const SNIPE_START_BPS = 9000n
+const MAX_TOTAL_FEE_BPS = 9900n
+const TICK_SPACING = 200
+const BID_DISCOUNT_TICKS = 6932
+const BID_SPAN_TICKS = 92_200
+const HOOK_FLAGS = 0x28ecn
+const MIN_T = V4.minUsableTick(TICK_SPACING)
+const MAX_T = V4.maxUsableTick(TICK_SPACING)
+/** LaunchTokenV14's dividend stream (V13-SPEC §3), and its storage (`forge inspect LaunchTokenV14 storageLayout`). */
+const DRIP_PERIOD = 86_400n
+const MAGNITUDE = 2n ** 128n
+const SLOT = { perShare: 6n, corrections: 7n, rate: 10n, stream: 11n } as const
+/** On Arc the native balance is USDC with 18 decimals: one 6-decimal unit is 1e12 wei. */
+const WEI_PER_UNIT = 10n ** 12n
+/** What Arc Testnet charges: a 20 gwei base fee and the node's suggested 5 gwei tip. */
+const LIVE_GAS_PRICE = 25n * 10n ** 9n
+
+const usd = (n: number) => BigInt(Math.round(n * 1e6))
+const tokens = (n: number) => BigInt(n) * E18
+const fmt = (units: bigint) => formatUnits(units, 6)
+const fmt18 = (wei: bigint) => formatUnits(wei, 18)
+const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms))
+
+// ── RPC ───────────────────────────────────────────────────────────────────────
+
+const pub = createPublicClient({ transport: http(RPC, { retryCount: 3, retryDelay: 400, timeout: 30_000 }) })
+
+function errorText(e: unknown): string {
+  if (e instanceof BaseError) return `${e.shortMessage} ${e.details ?? ''} ${e.message}`
+  if (e instanceof Error) return e.message
+  return typeof e === 'string' ? e : 'unknown error'
+}
+// Arc's public RPC answers bursts with "Request exceeds defined limit", and a block it has not reached yet with
+// "Requested resource not found". Both are retried with backoff; a revert never is.
+const TRANSIENT =
+  /exceeds defined limit|resource not found|429|too many|rate.?limit|timeout|timed out|took too long|ECONNRESET|ECONNREFUSED|socket|fetch failed|network error|50[234]|header not found|unknown block|block not found|missing trie node|temporar|busy|HTTP request failed/i
+const transient = (e: unknown) => {
+  const text = errorText(e)
+  return !/revert/i.test(text) && TRANSIENT.test(text)
+}
+let inflight = 0
+const queue: (() => void)[] = []
+let rpcRetries = 0
+async function retry<T>(fn: () => Promise<T>): Promise<T> {
+  let delay = 400
+  for (let attempt = 1; ; attempt++) {
+    while (inflight >= 3) await new Promise<void>((go) => queue.push(go))
+    inflight++
+    try {
+      return await fn()
+    } catch (e) {
+      if (attempt >= 10 || !transient(e)) throw e
+      rpcRetries++
+    } finally {
+      inflight--
+      queue.shift()?.()
+    }
+    await sleep(delay + Math.floor(Math.random() * 250))
+    delay = Math.min(delay * 2, 8000)
+  }
+}
+
+// ── Preview (read-only, no deployment needed) ─────────────────────────────────
+
+if (process.argv.includes('--preview')) {
+  // The launchpad is the deployer's first CREATE in the deploy script and every launch token a CREATE from the launchpad
+  // (nonce 1, 2, …), so the deployer's nonce at deploy time fixes which tokens sort below USDC (USDC is then currency1).
+  const deployer = getAddress(process.env.DEPLOYER ?? BURNER)
+  const usdc = getAddress(process.env.USDC ?? RUSDC)
+  const nonce = await retry(() => pub.getTransactionCount({ address: deployer, blockTag: 'pending' }))
+  console.log(`deployer ${deployer} (next nonce ${nonce}), USDC ${usdc}; tokens 1-5 in launch order, ↓ = sorts below USDC:`)
+  for (let n = nonce; n < nonce + 6; n++) {
+    const lp = getContractAddress({ from: deployer, nonce: BigInt(n) })
+    const slots = [1, 2, 3, 4, 5].map((i) => (BigInt(getContractAddress({ from: lp, nonce: BigInt(i) })) < BigInt(usdc) ? '↓' : '·'))
+    console.log(`  deploy at nonce ${n}: launchpad ${lp}  ${slots.join(' ')}`)
+  }
+  process.exit(0)
+}
+
+// ── Deployment, artifacts ─────────────────────────────────────────────────────
+
+const DEPLOYMENT = resolve(ROOT, process.env.DEPLOYMENT ?? 'deployments/arc-testnet-v14-rehearsal.json')
+const PROGRESS = resolve(ROOT, process.env.PROGRESS ?? DEPLOYMENT.replace(/\.json$/, '.progress.json'))
+
+interface Deployment {
+  chainId: number
+  network: string
+  mode: string
+  deployer: string
+  commit: string | null
+  usdc: string
+  poolManager: string
+  launchpad: string
+  hook: string
+  hookSalt: Hex
+  router: string
+  plugins: { split: string; holders: string; combo: string }
+  launchFee: string
+  feeTo: string
+  feeToSetter: string
+  deployedAt: string
+  txs: Record<string, Hex>
+}
+const dep = JSON.parse(readFileSync(DEPLOYMENT, 'utf8')) as Deployment
+const USDC = getAddress(dep.usdc)
+const LP = getAddress(dep.launchpad)
+const HOOK = getAddress(dep.hook)
+const ROUTER = getAddress(dep.router)
+const SPLIT = getAddress(dep.plugins.split)
+const HOLDERS = getAddress(dep.plugins.holders)
+const COMBO = getAddress(dep.plugins.combo)
+const FEE_TO = getAddress(dep.feeTo)
+/** Run B: the launchpad runs on Arc's own USDC, which is also the gas token. */
+const REAL = USDC === ARC_USDC
+const U = REAL ? 'USDC' : 'rUSDC'
+if (getAddress(dep.poolManager) !== POOL_MANAGER) throw new Error(`${DEPLOYMENT}: PoolManager ${dep.poolManager} is not Uniswap's ${POOL_MANAGER}`)
+
+interface Artifact {
+  abi: Abi
+  bytecode: { object: Hex }
+  deployedBytecode: { object: string; immutableReferences?: Record<string, { start: number; length: number }[]> }
+}
+const artifact = (file: string, name = file) => JSON.parse(readFileSync(resolve(ARTIFACTS, `${file}.sol`, `${name}.json`), 'utf8')) as Artifact
+const ART = {
+  pad: artifact('ArchitexLaunchpadV14'),
+  hook: artifact('ArchitexLaunchHook'),
+  router: artifact('ArchitexV4Router'),
+  token: artifact('LaunchTokenV14'),
+  split: artifact('SplitPlugin'),
+  holders: artifact('HolderDistributionPlugin'),
+  combo: artifact('ComboPlugin'),
+  raw: artifact('V14Base', 'RawSwapper'),
+  pm: artifact('IPoolManager'),
+}
+const ERC20 = parseAbi([
+  'function balanceOf(address) view returns (uint256)',
+  'function allowance(address, address) view returns (uint256)',
+  'function approve(address, uint256) returns (bool)',
+  'function transfer(address, uint256) returns (bool)',
+  'function totalSupply() view returns (uint256)',
+  'function decimals() view returns (uint8)',
+  'function symbol() view returns (string)',
+  'function owner() view returns (address)',
+  'function mint(address, uint256)',
+  'event Transfer(address indexed from, address indexed to, uint256 value)',
+])
+const STATE_VIEW_ABI = parseAbi([
+  'function getSlot0(bytes32 poolId) view returns (uint160 sqrtPriceX96, int24 tick, uint24 protocolFee, uint24 lpFee)',
+  'function getLiquidity(bytes32 poolId) view returns (uint128 liquidity)',
+  'function getTickLiquidity(bytes32 poolId, int24 tick) view returns (uint128 liquidityGross, int128 liquidityNet)',
+  'function getPositionInfo(bytes32 poolId, address owner, int24 tickLower, int24 tickUpper, bytes32 salt) view returns (uint128 liquidity, uint256 feeGrowthInside0LastX128, uint256 feeGrowthInside1LastX128)',
+  'function getFeeGrowthGlobals(bytes32 poolId) view returns (uint256 feeGrowthGlobal0, uint256 feeGrowthGlobal1)',
+])
+const ABI = {
+  pad: ART.pad.abi,
+  hook: ART.hook.abi,
+  router: ART.router.abi,
+  token: ART.token.abi,
+  split: ART.split.abi,
+  holders: ART.holders.abi,
+  combo: ART.combo.abi,
+  raw: ART.raw.abi,
+  pm: ART.pm.abi,
+  erc20: ERC20 as Abi,
+  stateView: STATE_VIEW_ABI as Abi,
+}
+/** Every custom error any of these contracts, Uniswap's PoolManager or OpenZeppelin can revert with. */
+const ERRORS: Abi = (() => {
+  const seen = new Set<string>()
+  const out: Abi[number][] = []
+  const extra = parseAbi([
+    'error WrappedError(address target, bytes4 selector, bytes reason, bytes details)',
+    'error HookCallFailed()',
+    'error Error(string)',
+    'error PoolAlreadyInitialized()',
+    'error PriceLimitAlreadyExceeded(uint160 sqrtPriceCurrentX96, uint160 sqrtPriceLimitX96)',
+    'error HookAddressNotValid(address hooks)',
+  ])
+  for (const abi of [...Object.values(ABI), extra as Abi]) {
+    for (const item of abi) {
+      if (item.type !== 'error') continue
+      const sig = `${item.name}(${item.inputs.map((i) => i.type).join(',')})`
+      if (seen.has(sig)) continue
+      seen.add(sig)
+      out.push(item)
+    }
+  }
+  return out
+})()
+
+// ── Actors and tokens ─────────────────────────────────────────────────────────
+
+/** Fixed addresses nobody holds a key for: the last 20 bytes of a hash of a label. They only ever receive fees. */
+const fixedAddress = (label: string) => getAddress(`0x${keccak256(stringToHex(`architex/v14-rehearsal/${label}`)).slice(-40)}`)
+const CREATOR_WALLET = fixedAddress('creator-wallet')
+const ZERO_WALLET = fixedAddress('zero-fee-wallet')
+const COMBO_WALLET = fixedAddress('combo-wallet')
+const PAYEES = [fixedAddress('split-payee-1'), fixedAddress('split-payee-2'), fixedAddress('split-payee-3')]
+const SHARES = [5n, 3n, 2n]
+const COMBO_PAYEES = [fixedAddress('combo-split-payee-1'), fixedAddress('combo-split-payee-2')]
+const COMBO_SHARES = [1n, 1n]
+const COMBO_TARGETS = [HOLDERS, SPLIT, COMBO_WALLET]
+const COMBO_BPS = [5000, 3000, 2000]
+
+type Kind = 'wallet' | 'split' | 'holders' | 'combo' | 'zero'
+interface Spec {
+  name: string
+  symbol: string
+  feeBps: bigint
+  plugin: Address
+  data: Hex
+  hooks: boolean
+  open: boolean
+  firstBuy: bigint
+  /** Curve buys fired right after the launch, inside its snipe window. */
+  windowBuys: number
+}
+const splitData = (payees: Address[], shares: bigint[]) => encodeAbiParameters([{ type: 'address[]' }, { type: 'uint256[]' }], [payees, shares])
+const comboData = () =>
+  encodeAbiParameters([{ type: 'address[]' }, { type: 'uint16[]' }, { type: 'bytes[]' }], [COMBO_TARGETS, COMBO_BPS, ['0x', splitData(COMBO_PAYEES, COMBO_SHARES), '0x']])
+
+/** Run A: the matrix the rehearsal must cover (closed and open pools; creator fees 0, 1% and 10%; a wallet, Split,
+ *  Distribute to holders and Combo; with and without the creator's first buy). Run B: one token on Arc's USDC whose
+ *  creator fees come back to the actor. */
+function specsFor(actor: Address): Partial<Record<Kind, Spec>> {
+  if (REAL) {
+    return { wallet: { name: 'Rehearsal Arc USDC', symbol: 'RARC', feeBps: 100n, plugin: actor, data: '0x', hooks: false, open: false, firstBuy: 0n, windowBuys: 1 } }
+  }
+  return {
+    wallet: { name: 'Rehearsal Wallet', symbol: 'RWAL', feeBps: 100n, plugin: CREATOR_WALLET, data: '0x', hooks: false, open: false, firstBuy: usd(100), windowBuys: 1 },
+    split: { name: 'Rehearsal Split', symbol: 'RSPL', feeBps: 1000n, plugin: SPLIT, data: splitData(PAYEES, SHARES), hooks: true, open: true, firstBuy: 0n, windowBuys: 1 },
+    holders: { name: 'Rehearsal Holders', symbol: 'RHLD', feeBps: 1000n, plugin: HOLDERS, data: '0x', hooks: true, open: false, firstBuy: usd(100), windowBuys: 1 },
+    combo: { name: 'Rehearsal Combo', symbol: 'RCMB', feeBps: 100n, plugin: COMBO, data: comboData(), hooks: true, open: true, firstBuy: 0n, windowBuys: 1 },
+    zero: { name: 'Rehearsal Zero Fee', symbol: 'RZRO', feeBps: 0n, plugin: ZERO_WALLET, data: '0x', hooks: false, open: false, firstBuy: 0n, windowBuys: 3 },
+  }
+}
+const usesSplit = (k: Kind) => k === 'split' || k === 'combo'
+const usesHolders = (k: Kind) => k === 'holders' || k === 'combo'
+
+/** USDC (6 decimals) and token amounts per action. rUSDC is minted freely, so Run A trades are large; Run B trades 1 USDC
+ *  on the curve and nothing else. */
+interface Amounts {
+  windowBuy: bigint
+  curveBuy: bigint
+  graduateOffer: bigint
+  poolWindowBuy: bigint
+  poolWindowSell: bigint
+  rawWindowOutBuy: bigint
+  dump: bigint
+  poolBuy: bigint
+  poolSell: bigint
+  rawOutBuy: bigint
+  rawOutSellUsdc: bigint
+  rawTokens: bigint
+  rawUsdc: bigint
+  lpUsdc: bigint
+  lpTokens: bigint
+  burnerMint: bigint
+}
+const A: Amounts = REAL
+  ? {
+      windowBuy: usd(Number(process.env.RUNB_WINDOW_USDC ?? '1')),
+      curveBuy: usd(1),
+      graduateOffer: 0n, poolWindowBuy: 0n, poolWindowSell: 0n, rawWindowOutBuy: 0n, dump: 0n, poolBuy: 0n, poolSell: 0n, rawOutBuy: 0n,
+      rawOutSellUsdc: 0n, rawTokens: 0n, rawUsdc: 0n, lpUsdc: 0n, lpTokens: 0n, burnerMint: 0n,
+    }
+  : {
+      windowBuy: usd(1000),
+      curveBuy: usd(1000),
+      graduateOffer: usd(60_000),
+      poolWindowBuy: usd(2000),
+      poolWindowSell: tokens(1_000_000),
+      rawWindowOutBuy: tokens(5_000_000),
+      dump: tokens(150_000_000),
+      poolBuy: usd(1000),
+      poolSell: tokens(1_000_000),
+      rawOutBuy: tokens(2_000_000),
+      rawOutSellUsdc: usd(100),
+      rawTokens: tokens(30_000_000),
+      rawUsdc: usd(50_000),
+      lpUsdc: usd(1000),
+      lpTokens: tokens(10_000_000),
+      burnerMint: usd(400_000),
+    }
+const GAS_CAP_WEI = BigInt(Math.round(Number(process.env.GAS_CAP ?? (REAL ? '1' : '2')) * 1e6)) * WEI_PER_UNIT
+const FLOOR_WEI = BigInt(Math.round(Number(process.env.FLOOR ?? '0.5') * 1e6)) * WEI_PER_UNIT
+
+// ── Checks ────────────────────────────────────────────────────────────────────
+
+let failures = 0
+let checks = 0
+let stepFailed: string[] = []
+const canon = (v: unknown): unknown => {
+  if (typeof v === 'bigint') return v.toString()
+  if (Array.isArray(v)) return v.map(canon)
+  if (v !== null && typeof v === 'object') {
+    const o = v as Record<string, unknown>
+    return Object.fromEntries(Object.keys(o).sort().map((k) => [k, canon(o[k])]))
+  }
+  return v
+}
+const show = (v: unknown): string => (typeof v === 'bigint' ? v.toString() : (JSON.stringify(canon(v)) ?? 'undefined'))
+function check(label: string, actual: unknown, expected: unknown): boolean {
+  checks++
+  const a = show(actual)
+  const ok = a === show(expected)
+  if (!ok) {
+    failures++
+    stepFailed.push(label)
+  }
+  console.log(ok ? `ok   ${label}: ${a.length > 100 ? `${a.slice(0, 97)}…` : a}` : `FAIL ${label}: got ${a}, expected ${show(expected)}`)
+  return ok
+}
+function checkThat(label: string, ok: boolean, detail: string): boolean {
+  checks++
+  if (!ok) {
+    failures++
+    stepFailed.push(label)
+  }
+  console.log(`${ok ? 'ok  ' : 'FAIL'} ${label}: ${detail}`)
+  return ok
+}
+const note = (text: string) => console.log(`     ${text}`)
+const pick = <T extends object, K extends keyof T>(o: T, keys: readonly K[]) => Object.fromEntries(keys.map((k) => [k, o[k]]))
+
+// ── Revert decoding ───────────────────────────────────────────────────────────
+
+const LABELS = new Map<string, string>()
+const label = (a: string) => LABELS.get(getAddress(a)) ?? a
+/** The revert data inside a viem error, wherever the node put it. */
+function revertData(e: unknown): Hex | undefined {
+  let cur: unknown = e
+  for (let i = 0; i < 12 && cur; i++) {
+    const c = cur as { data?: unknown; cause?: unknown }
+    if (typeof c.data === 'string' && c.data.startsWith('0x')) return c.data as Hex
+    if (c.data && typeof (c.data as { data?: unknown }).data === 'string') return (c.data as { data: Hex }).data
+    cur = c.cause
+  }
+  const m = /data: "?(0x[0-9a-fA-F]*)"?/.exec(errorText(e))
+  return m ? (m[1] as Hex) : undefined
+}
+/** An error's name; a hook revert that the PoolManager wrapped reads `WrappedError(<target>: <inner error>)`. */
+function decodeRevert(data: Hex | undefined): string {
+  if (!data || data === '0x') return 'revert without data'
+  try {
+    const d = decodeErrorResult({ abi: ERRORS, data })
+    if (d.errorName === 'WrappedError') {
+      const [target, , reason] = d.args as readonly [Address, Hex, Hex, Hex]
+      return `WrappedError(${label(target)}: ${decodeRevert(reason)})`
+    }
+    return d.errorName
+  } catch {
+    return `unknown error ${data.slice(0, 10)}`
+  }
+}
+const revertName = (e: unknown) => decodeRevert(revertData(e)) + (revertData(e) ? '' : ` [${errorText(e).split('\n')[0].slice(0, 120)}]`)
+
+/** A call that must revert with `expected` (an error name, or 'ok' for no revert), simulated for free at `block`. */
+async function expectRevert(what: string, to: Address, abi: Abi, functionName: string, args: readonly unknown[], expected: string, block: bigint, from?: Address) {
+  let got = 'ok'
+  try {
+    await retry(() => pub.call({ account: from ?? me, to, data: encodeFunctionData({ abi, functionName, args }), blockNumber: block }))
+  } catch (e) {
+    got = decodeRevert(revertData(e))
+  }
+  check(expected === 'ok' ? `${what} is accepted` : `${what} reverts`, got, expected)
+}
+/** The return value of a call simulated at `block`. */
+async function simulate<T>(to: Address, abi: Abi, functionName: string, args: readonly unknown[], block: bigint, from?: Address): Promise<T> {
+  const res = await retry(() => pub.call({ account: from ?? me, to, data: encodeFunctionData({ abi, functionName, args }), blockNumber: block }))
+  return decodeFunctionResult({ abi, functionName, data: res.data ?? '0x' }) as T
+}
+
+// ── Model: the spec's formulas, written independently of the contracts ────────
+
+const divCeil = (a: bigint, b: bigint) => (a === 0n ? 0n : (a - 1n) / b + 1n)
+const minOf = (a: bigint, b: bigint) => (a < b ? a : b)
+const maxOf = (a: bigint, b: bigint) => (a > b ? a : b)
+
+/** V14-SPEC §5: the surcharge in `block` of a window opened in `openBlock` (90% falling to 0 over 20 blocks), capped so
+ *  all fees together take at most 99%. */
+function snipeBpsAt(openBlock: bigint, block: bigint, creatorBps: bigint): bigint {
+  const end = openBlock + SNIPE_BLOCKS
+  if (block >= end) return 0n
+  const bps = (SNIPE_START_BPS * (end - block)) / SNIPE_BLOCKS
+  const room = MAX_TOTAL_FEE_BPS - FEE_BPS - creatorBps
+  return bps > room ? room : bps
+}
+
+interface CurveState {
+  virtualUsdc: bigint
+  virtualTokens: bigint
+  tokensSold: bigint
+}
+const INITIAL_CURVE: CurveState = { virtualUsdc: VIRTUAL_USDC_0, virtualTokens: VIRTUAL_TOKENS_0, tokensSold: 0n }
+interface BuyModel {
+  tokensOut: bigint
+  platformFee: bigint
+  creatorFee: bigint
+  snipeFee: bigint
+  usdcSpent: bigint
+  graduates: boolean
+  net: bigint
+}
+/** V13-SPEC §5 buy math with the snipe fee as a third fee (V14-SPEC §5), including the sell-out buy's exact fill. */
+function modelCurveBuy(c: CurveState, usdcIn: bigint, creatorBps: bigint, snipeBps: bigint): BuyModel {
+  const k = c.virtualUsdc * c.virtualTokens
+  const platformFee = divCeil(usdcIn * FEE_BPS, BPS)
+  const creatorFee = divCeil(usdcIn * creatorBps, BPS)
+  const snipeFee = divCeil(usdcIn * snipeBps, BPS)
+  if (platformFee + creatorFee + snipeFee >= usdcIn) throw new Error('model: the fees eat the whole buy')
+  const net = usdcIn - platformFee - creatorFee - snipeFee
+  const out = c.virtualTokens - divCeil(k, c.virtualUsdc + net)
+  const remaining = CURVE_SUPPLY - c.tokensSold
+  if (out < remaining) return { tokensOut: out, platformFee, creatorFee, snipeFee, usdcSpent: usdcIn, graduates: false, net }
+  const feeBps = FEE_BPS + creatorBps + snipeBps
+  const fillNet = divCeil(k, c.virtualTokens - remaining) - c.virtualUsdc
+  const gross = fillNet + divCeil(fillNet * feeBps, BPS - feeBps)
+  const usdcSpent = minOf(gross, usdcIn)
+  const totalFee = usdcSpent - fillNet
+  const p = divCeil(totalFee * FEE_BPS, feeBps)
+  const cr = minOf(divCeil(totalFee * creatorBps, feeBps), totalFee - p)
+  return { tokensOut: remaining, platformFee: p, creatorFee: cr, snipeFee: totalFee - p - cr, usdcSpent, graduates: true, net: fillNet }
+}
+/** V13-SPEC §5 sell math: both fees on the gross USDC, rounded up. */
+function modelCurveSell(c: CurveState, tokensIn: bigint, creatorBps: bigint) {
+  const gross = c.virtualUsdc - divCeil(c.virtualUsdc * c.virtualTokens, c.virtualTokens + tokensIn)
+  const platformFee = divCeil(gross * FEE_BPS, BPS)
+  const creatorFee = divCeil(gross * creatorBps, BPS)
+  return { gross, platformFee, creatorFee, usdcOut: gross - platformFee - creatorFee }
+}
+
+interface Fees {
+  platform: bigint
+  creator: bigint
+  snipe: bigint
+  total: bigint
+}
+/** V14-SPEC §3: fees on a known gross USDC amount, each rounded up. */
+function feesOnGross(gross: bigint, creatorBps: bigint, snipeBps: bigint): Fees {
+  const platform = divCeil(gross * FEE_BPS, BPS)
+  const creator = divCeil(gross * creatorBps, BPS)
+  const snipe = divCeil(gross * snipeBps, BPS)
+  if (platform + creator + snipe >= gross) throw new Error('model: FeesExceedAmount')
+  return { platform, creator, snipe, total: platform + creator + snipe }
+}
+/** V14-SPEC §3: fees on top of a net USDC amount: total = ceil(net·r/(1e4-r)), split platform first, then the creator,
+ *  the surcharge last, each rounded up and capped by what is left (v1.3's exact-fill split). */
+function feesOnNet(net: bigint, creatorBps: bigint, snipeBps: bigint): Fees {
+  if (net === 0n) throw new Error('model: FeesExceedAmount')
+  const r = FEE_BPS + creatorBps + snipeBps
+  const total = divCeil(net * r, BPS - r)
+  const platform = divCeil(total * FEE_BPS, r)
+  const creator = minOf(divCeil(total * creatorBps, r), total - platform)
+  return { platform, creator, snipe: total - platform - creator, total }
+}
+
+const ceilTick = (t: number) => {
+  let c = Math.trunc(t / TICK_SPACING)
+  if (t > 0 && t % TICK_SPACING !== 0) c++
+  return c * TICK_SPACING
+}
+const floorTick = (t: number) => {
+  let c = Math.trunc(t / TICK_SPACING)
+  if (t < 0 && t % TICK_SPACING !== 0) c--
+  return c * TICK_SPACING
+}
+/** V14-SPEC §5: a bid's range, anchored to the graduation tick: its top about half the graduation price (6,932 ticks),
+ *  running 92,200 ticks lower; placeable only while the whole range is on the USDC side of the current tick. */
+function bidRange(usdcIs0: boolean, graduationTick: number, tick: number) {
+  if (usdcIs0) {
+    const lower = ceilTick(graduationTick + BID_DISCOUNT_TICKS + 1)
+    const upper = Math.min(lower + BID_SPAN_TICKS, MAX_T)
+    return { lower, upper, ok: tick < lower && lower < upper }
+  }
+  const upper = floorTick(graduationTick - BID_DISCOUNT_TICKS)
+  const lower = Math.max(upper - BID_SPAN_TICKS, MIN_T)
+  return { lower, upper, ok: tick >= upper && lower < upper }
+}
+interface BidModel {
+  lower: number
+  upper: number
+  liquidity: bigint
+  used: bigint
+}
+/** A bid of `amount` USDC into `pool` (updated): a USDC-only position at the anchored range, or none while the price is
+ *  under its top or the amount buys no liquidity. */
+function modelBid(pool: V4.PoolModel, usdcIs0: boolean, graduationTick: number, amount: bigint): BidModel | undefined {
+  const { lower, upper, ok } = bidRange(usdcIs0, graduationTick, pool.tick)
+  if (!ok || amount === 0n) return undefined
+  const a = V4.sqrtAtTick(lower)
+  const b = V4.sqrtAtTick(upper)
+  const liquidity = usdcIs0 ? V4.liquidityForAmount0(a, b, amount) : V4.liquidityForAmount1(a, b, amount)
+  if (liquidity === 0n) return undefined
+  const d = V4.modifyLiquidity(pool, lower, upper, liquidity)
+  if ((usdcIs0 ? d.amount1 : d.amount0) !== 0n) throw new Error('model: bid not one-sided')
+  return { lower, upper, liquidity, used: -(usdcIs0 ? d.amount0 : d.amount1) }
+}
+
+interface GraduationModel {
+  sqrtPrice: bigint
+  tick: number
+  liquidity: bigint
+  tokensUsed: bigint
+  usdcUsed: bigint
+  burned: bigint
+  toLock: bigint
+  bid?: BidModel
+  pool: V4.PoolModel
+}
+/** V14-SPEC §4: open the pool at the price where one full-range position takes both amounts, add that position, burn the
+ *  tokens it leaves, and bid the snipe fees plus the USDC it leaves. */
+function modelGraduation(usdcIs0: boolean, usdcSeeded: bigint, lockAmount: bigint): GraduationModel {
+  const [amount0, amount1] = usdcIs0 ? [usdcSeeded, POOL_SUPPLY] : [POOL_SUPPLY, usdcSeeded]
+  const sqrtPrice = V4.isqrt(V4.mulDiv(amount1, 1n << 192n, amount0))
+  const tick = V4.tickAtSqrt(sqrtPrice)
+  const pool: V4.PoolModel = { sqrtPrice, tick, liquidity: 0n, spacing: TICK_SPACING, ticks: new Map() }
+  const liquidity = V4.liquidityForAmounts(sqrtPrice, V4.sqrtAtTick(MIN_T), V4.sqrtAtTick(MAX_T), amount0, amount1)
+  const d = V4.modifyLiquidity(pool, MIN_T, MAX_T, liquidity)
+  const [used0, used1] = [-d.amount0, -d.amount1]
+  const [tokensUsed, usdcUsed] = usdcIs0 ? [used1, used0] : [used0, used1]
+  const toLock = lockAmount + (usdcSeeded - usdcUsed)
+  const bid = toLock !== 0n ? modelBid(pool, usdcIs0, tick, toLock) : undefined
+  return { sqrtPrice, tick, liquidity, tokensUsed, usdcUsed, burned: POOL_SUPPLY - tokensUsed, toLock, bid, pool }
+}
+
+/** LaunchTokenV14's dividend stream (V13-SPEC §3), as held in the token's storage. */
+interface TokenStream {
+  perShare: bigint
+  rate: bigint
+  eligible: bigint
+  lastAccrual: bigint
+  end: bigint
+}
+const paused = (s: TokenStream) => s.eligible < E18
+function perShareAt(s: TokenStream, t: bigint): bigint {
+  if (s.lastAccrual >= s.end || paused(s)) return s.perShare
+  return s.perShare + (s.rate * (minOf(t, s.end) - s.lastAccrual)) / s.eligible
+}
+const claimableAt = (s: TokenStream, t: bigint, balance: bigint, correction: bigint, claimed: bigint) => (perShareAt(s, t) * balance + correction) / MAGNITUDE - claimed
+function undistributedAt(s: TokenStream, t: bigint): bigint {
+  if (s.lastAccrual >= s.end) return 0n
+  const from = paused(s) ? s.lastAccrual : minOf(t, s.end)
+  return (s.rate * (s.end - from)) / MAGNITUDE
+}
+function accrueAt(s: TokenStream, t: bigint): TokenStream {
+  if (s.lastAccrual >= s.end || s.lastAccrual === t) return s
+  if (paused(s)) return { ...s, end: s.end + (t - s.lastAccrual), lastAccrual: t }
+  const upTo = minOf(t, s.end)
+  return { ...s, perShare: s.perShare + (s.rate * (upTo - s.lastAccrual)) / s.eligible, lastAccrual: upTo }
+}
+function distributeAt(s0: TokenStream, t: bigint, amount: bigint): TokenStream {
+  const s = accrueAt(s0, t)
+  const owed = s.end > t ? s.rate * (s.end - t) : 0n
+  const added = amount * MAGNITUDE
+  const from = maxOf(s.end, t)
+  const end = maxOf(from + (added * (t + DRIP_PERIOD - from)) / (owed + added), t + 1n)
+  return { ...s, rate: (owed + added) / (end - t), lastAccrual: t, end }
+}
+
+// ── Chain guard, signer, progress ─────────────────────────────────────────────
+
+const chainId = await retry(() => pub.getChainId())
+if (chainId === ARC_MAINNET || !(chainId === ARC_TESTNET || (LOCAL_RPC && chainId === 31337))) {
+  throw new Error(`Refusing to run on chain ${chainId}: this rehearsal is for Arc Testnet (${ARC_TESTNET}) only, or a local fork of it on chain 31337.`)
+}
+if (dep.chainId !== chainId) throw new Error(`${DEPLOYMENT} is for chain ${dep.chainId}, the RPC is chain ${chainId}`)
+
+type SignerMode = 'key' | 'anvil' | 'none'
+const SIGNER: SignerMode = (process.env.SIGNER as SignerMode | undefined) ?? (process.env.REHEARSAL_KEY ? 'key' : 'none')
+if (!['key', 'anvil', 'none'].includes(SIGNER)) throw new Error(`SIGNER must be key, anvil or unset, not "${SIGNER}"`)
+let account: ReturnType<typeof privateKeyToAccount> | undefined
+let me: Address = getAddress(process.env.ACTOR ?? dep.deployer)
+if (SIGNER === 'key') {
+  if (LOCAL_RPC && chainId === ARC_TESTNET) throw new Error('Refusing to sign for a local node that reports chain 5042002: those signatures would be valid on Arc Testnet. Run the fork with --chain-id 31337, or use SIGNER=anvil.')
+  const raw = process.env.REHEARSAL_KEY?.trim()
+  if (!raw) throw new Error('SIGNER=key needs REHEARSAL_KEY')
+  const key = raw.startsWith('0x') ? raw : `0x${raw}`
+  if (!/^0x[0-9a-fA-F]{64}$/.test(key)) throw new Error('REHEARSAL_KEY is not a 32-byte hex private key')
+  account = privateKeyToAccount(key as Hex)
+  me = account.address
+}
+/** A raw JSON-RPC call, for anvil's own methods. */
+async function rpc(method: string, params: unknown[]): Promise<unknown> {
+  const res = await fetch(RPC, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) })
+  const body = (await res.json()) as { result?: unknown; error?: { message: string } }
+  if (body.error) throw new Error(`${method}: ${body.error.message}`)
+  return body.result
+}
+if (SIGNER === 'anvil') {
+  if (!LOCAL_RPC) throw new Error('SIGNER=anvil needs a local anvil RPC (http://127.0.0.1:<port>)')
+  const client = String(await rpc('web3_clientVersion', []))
+  if (!/anvil/i.test(client)) throw new Error(`SIGNER=anvil needs anvil, the node is "${client}"`)
+}
+const DRIVING = SIGNER !== 'none'
+const chain = defineChain({ id: chainId, name: 'arc', nativeCurrency: { name: 'USDC', symbol: 'USDC', decimals: 18 }, rpcUrls: { default: { http: [RPC] } } })
+const wallet = createWalletClient({ chain, transport: http(RPC, { retryCount: 0, timeout: 30_000 }) })
+
+const SPECS = specsFor(me)
+const KINDS = Object.keys(SPECS) as Kind[]
+const spec = (k: Kind): Spec => {
+  const s = SPECS[k]
+  if (!s) throw new Error(`no spec for ${k}`)
+  return s
+}
+const sym = (k: Kind) => spec(k).symbol
+
+interface TxRecord {
+  step: string
+  what: string
+  hash: Hex
+  block: string
+  gasUsed: string
+  gasPrice: string
+  status: string
+}
+interface StepResult {
+  step: string
+  ok: boolean
+  checks: number
+  failed: string[]
+  at: string
+}
+interface PosChange {
+  id: string
+  owner: Address
+  lower: number
+  upper: number
+  salt: Hex
+  block: string
+  delta: string
+}
+interface PoolRec {
+  poolId: Hex
+  usdcIs0: boolean
+  open: boolean
+  creatorBps: string
+  openBlock: string
+  graduationTick: number
+  changes: PosChange[]
+}
+interface Progress {
+  launchpad: Address
+  actor?: Address
+  raw?: Address
+  rawBlock?: string
+  tokens: Partial<Record<Kind, Address>>
+  tokenBlocks: Partial<Record<Kind, string>>
+  planned: Partial<Record<Kind, { address: Address; usdcIs0: boolean }>>
+  features: Kind[]
+  openLp?: Kind
+  closedLp?: Kind
+  pools: Partial<Record<Kind, PoolRec>>
+  done: Record<string, string>
+  txs: TxRecord[]
+  results: StepResult[]
+  notes: Record<string, string>
+  pending?: { step: string; what: string; hash: Hex; nonce: number }
+}
+const progressExists = existsSync(PROGRESS)
+const progress: Progress = progressExists
+  ? (JSON.parse(readFileSync(PROGRESS, 'utf8')) as Progress)
+  : { launchpad: LP, tokens: {}, tokenBlocks: {}, planned: {}, features: [], pools: {}, done: {}, txs: [], results: [], notes: {} }
+if (getAddress(progress.launchpad) !== LP) throw new Error(`${PROGRESS} belongs to launchpad ${progress.launchpad}, not ${LP}`)
+if (DRIVING && progress.actor && getAddress(progress.actor) !== me) throw new Error(`${PROGRESS} was driven by ${progress.actor}, not ${me}`)
+function save() {
+  if (!DRIVING) return // read-only runs never write
+  const tmp = `${PROGRESS}.tmp`
+  writeFileSync(tmp, `${JSON.stringify(progress, null, 2)}\n`)
+  renameSync(tmp, PROGRESS)
+}
+const tokenOf = (k: Kind): Address => {
+  const t = progress.tokens[k]
+  if (!t) throw new Error(`no ${k} token yet`)
+  return getAddress(t)
+}
+const RAW = () => {
+  if (!progress.raw) throw new Error('no RawSwapper yet')
+  return getAddress(progress.raw)
+}
+for (const [a, l] of [
+  [LP, 'launchpad'], [HOOK, 'hook'], [ROUTER, 'router'], [POOL_MANAGER, 'PoolManager'], [USDC, U], [SPLIT, 'Split'],
+  [HOLDERS, 'Holders'], [COMBO, 'Combo'], [me, 'actor'],
+] as const) LABELS.set(getAddress(a), l)
+
+/** The block every "current state" read uses: the latest receipt this run has seen (never behind our own writes). */
+let head = await retry(() => pub.getBlockNumber({ cacheTime: 0 }))
+const latest = () => retry(() => pub.getBlockNumber({ cacheTime: 0 }))
+const timeOf = async (block: bigint) => (await retry(() => pub.getBlock({ blockNumber: block }))).timestamp
+const deadline = async () => (await timeOf(head)) + 3600n
+async function rd<T>(address: Address, abi: Abi, functionName: string, args: readonly unknown[] = [], blockNumber?: bigint): Promise<T> {
+  return (await retry(() => pub.readContract({ address, abi, functionName, args, blockNumber }))) as T
+}
+const nativeOf = (who: Address, block: bigint) => retry(() => pub.getBalance({ address: who, blockNumber: block }))
+const nonceOf = (who: Address, block: bigint) => retry(() => pub.getTransactionCount({ address: who, blockNumber: block }))
+/** Waits until the chain has mined `target` (interval-mined anvil and Arc both mine on their own). */
+async function waitForBlock(target: bigint) {
+  for (;;) {
+    const b = await latest()
+    if (b >= target) {
+      if (b > head) head = b
+      return
+    }
+    await sleep(250)
+  }
+}
+
+// ── Sending ───────────────────────────────────────────────────────────────────
+
+let nextNonce = 0
+let tipCache: bigint | undefined
+const spentWei = () => progress.txs.reduce((sum, t) => sum + BigInt(t.gasUsed) * BigInt(t.gasPrice), 0n)
+function recordTx(step: string, what: string, r: TransactionReceipt) {
+  progress.txs.push({ step, what, hash: r.transactionHash, block: r.blockNumber.toString(), gasUsed: r.gasUsed.toString(), gasPrice: r.effectiveGasPrice.toString(), status: r.status })
+  if (r.blockNumber > head) head = r.blockNumber
+}
+
+/** Sends a signed transaction; 'taken' if its nonce went to another transaction. */
+async function broadcast(serialized: Hex, hash: Hex): Promise<'sent' | 'taken'> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await pub.sendRawTransaction({ serializedTransaction: serialized })
+      return 'sent'
+    } catch (e) {
+      const text = errorText(e)
+      if (/already known|known transaction|already imported|already exists/i.test(text)) return 'sent'
+      if (/nonce too low|nonce is too low|invalid nonce|replacement transaction underpriced/i.test(text)) {
+        for (let i = 0; i < 10; i++) {
+          if (await pub.getTransaction({ hash }).catch(() => undefined)) return 'sent'
+          await sleep(1000)
+        }
+        return 'taken'
+      }
+      if (attempt >= 8 || !transient(e)) throw e
+      await sleep(500 * 2 ** attempt)
+    }
+  }
+}
+
+/** Simulates, then signs (key) or asks anvil to send (anvil) one transaction; `to` undefined deploys `data`. Waits for
+ *  the receipt and records it. `usdcOut` (Run B) is what the transaction takes from the actor, for the floor. */
+async function sendRaw(step: string, what: string, to: Address | undefined, data: Hex, usdcOut = 0n): Promise<TransactionReceipt> {
+  if (!DRIVING) throw new Error('SIGNER is needed to send transactions')
+  try {
+    await retry(() => pub.call({ account: me, to, data, blockNumber: head }))
+  } catch (e) {
+    throw new Error(`${what} would revert: ${revertName(e)}`)
+  }
+  const estimate = await retry(() => pub.estimateGas({ account: me, to, data, blockNumber: head }))
+  const gas = estimate + estimate / 4n + 25_000n
+  const block = await retry(() => pub.getBlock({ blockNumber: head }))
+  tipCache ??= await retry(() => pub.estimateMaxPriorityFeePerGas())
+  const tip = tipCache
+  const maxFeePerGas = (block.baseFeePerGas ?? 0n) * 2n + tip
+  const worst = gas * maxFeePerGas
+  if (spentWei() + worst > GAS_CAP_WEI) {
+    throw new Error(`${what}: gas cap reached (${fmt18(spentWei())} USDC spent, cap ${fmt18(GAS_CAP_WEI)}; raise GAS_CAP to go on)`)
+  }
+  if (REAL) {
+    const native = await nativeOf(me, head)
+    if (native - worst - usdcOut * WEI_PER_UNIT < FLOOR_WEI) {
+      throw new Error(`${what}: would take the actor below ${fmt18(FLOOR_WEI)} USDC (it holds ${fmt18(native)})`)
+    }
+  }
+  for (let attempt = 1; ; attempt++) {
+    const pendingNonce = await retry(() => pub.getTransactionCount({ address: me, blockTag: 'pending' }))
+    const nonce = Math.max(pendingNonce, nextNonce)
+    let hash: Hex
+    if (account) {
+      const serialized = await account.signTransaction({ type: 'eip1559', chainId, to, data, gas, nonce, maxFeePerGas, maxPriorityFeePerGas: tip })
+      hash = keccak256(serialized)
+      progress.pending = { step, what, hash, nonce }
+      save()
+      if ((await broadcast(serialized, hash)) === 'taken') {
+        if (attempt >= 3) throw new Error(`${what}: nonce ${nonce} keeps being taken by another transaction from the actor`)
+        note(`nonce ${nonce} was taken by another transaction from the actor; re-signing`)
+        continue
+      }
+    } else {
+      hash = await wallet.sendTransaction({ account: me, to, data, gas, nonce, maxFeePerGas, maxPriorityFeePerGas: tip, chain })
+      progress.pending = { step, what, hash, nonce }
+      save()
+    }
+    nextNonce = nonce + 1
+    const receipt = await retry(() => pub.waitForTransactionReceipt({ hash, pollingInterval: 250, timeout: 180_000 }))
+    recordTx(step, what, receipt)
+    progress.pending = undefined
+    save()
+    console.log(`     ${what}: ${hash} (block ${receipt.blockNumber}, gas ${receipt.gasUsed}, ${receipt.status})`)
+    if (receipt.status !== 'success') throw new Error(`${what} reverted on chain: ${hash}`)
+    return receipt
+  }
+}
+
+const minedTx = (step: string, what: string) => progress.txs.find((t) => t.step === step && t.what === what && t.status === 'success')
+interface Sent {
+  receipt: TransactionReceipt
+  args: readonly unknown[]
+}
+/** Sends a step's call once: a transaction this step already mined (an earlier run) is re-used, not re-sent. Returns the
+ *  receipt and the arguments the mined transaction actually carried. */
+async function tx(step: string, what: string, to: Address, abi: Abi, functionName: string, args: readonly unknown[] | (() => Promise<readonly unknown[]>), usdcOut = 0n): Promise<Sent> {
+  const mined = minedTx(step, what)
+  if (!mined) {
+    const a = typeof args === 'function' ? await args() : args
+    return { receipt: await sendRaw(step, what, to, encodeFunctionData({ abi, functionName, args: a }), usdcOut), args: a }
+  }
+  const receipt = await retry(() => pub.getTransactionReceipt({ hash: mined.hash }))
+  const sent = await retry(() => pub.getTransaction({ hash: mined.hash }))
+  if (receipt.blockNumber > head) head = receipt.blockNumber
+  console.log(`     ${what}: ${mined.hash} (mined in an earlier run; re-checking)`)
+  return { receipt, args: decodeFunctionData({ abi, data: sent.input }).args ?? [] }
+}
+/** A transaction left in flight by an interrupted run: record it if it was mined, so it is neither lost nor repeated. */
+async function recoverPending() {
+  const p = progress.pending
+  if (!p) return
+  note(`recovering ${p.what} (${p.hash}) from an interrupted run`)
+  let receipt: TransactionReceipt | undefined
+  for (let i = 0; i < 40 && !receipt; i++) {
+    receipt = await pub.getTransactionReceipt({ hash: p.hash }).catch(() => undefined)
+    if (!receipt) await sleep(3000)
+  }
+  if (receipt) recordTx(p.step, p.what, receipt)
+  else note('it was never mined; the step will send it again')
+  progress.pending = undefined
+  save()
+}
+
+// ── Events ────────────────────────────────────────────────────────────────────
+
+function logsOf<T>(receipt: TransactionReceipt, address: Address, abi: Abi, eventName: string): { args: T; logIndex: number }[] {
+  const logs = receipt.logs.filter((l) => getAddress(l.address) === address)
+  return parseEventLogs({ abi, logs, eventName }).map((l) => ({ args: (l as unknown as { args: T }).args, logIndex: l.logIndex }))
+}
+const eventsOf = <T>(receipt: TransactionReceipt, address: Address, abi: Abi, eventName: string): T[] => logsOf<T>(receipt, address, abi, eventName).map((l) => l.args)
+
+interface CurveView extends CurveState {
+  token: Address
+  creator: Address
+  createdAt: bigint
+  createdBlock: bigint
+  graduated: boolean
+  openPool: boolean
+  creatorFeeBps: number
+  pluginHooks: boolean
+  plugin: Address
+  metadataURI: string
+}
+interface TradeEvent {
+  token: Address
+  trader: Address
+  isBuy: boolean
+  usdcAmount: bigint
+  tokenAmount: bigint
+  platformFee: bigint
+  creatorFee: bigint
+  snipeFee: bigint
+  virtualUsdc: bigint
+  virtualTokens: bigint
+}
+interface PoolTradeEvent {
+  token: Address
+  sender: Address
+  isBuy: boolean
+  usdcAmount: bigint
+  tokenAmount: bigint
+  platformFee: bigint
+  creatorFee: bigint
+  snipeFee: bigint
+}
+interface SwapEvent {
+  id: Hex
+  sender: Address
+  amount0: bigint
+  amount1: bigint
+  sqrtPriceX96: bigint
+  liquidity: bigint
+  tick: number
+  fee: number
+}
+interface ModifyEvent {
+  id: Hex
+  sender: Address
+  tickLower: number
+  tickUpper: number
+  liquidityDelta: bigint
+  salt: Hex
+}
+interface ClaimEvent {
+  caller: Address
+  from: Address
+  to: Address
+  id: bigint
+  amount: bigint
+}
+const curveAt = (token: Address, block: bigint) => rd<CurveView>(LP, ABI.pad, 'curves', [token], block)
+const USDC_ID = BigInt(USDC)
+/** The hook's ERC-6909 claim mints (+) and burns (-) in a receipt, in order. */
+const claimMoves = (r: TransactionReceipt) =>
+  eventsOf<ClaimEvent>(r, POOL_MANAGER, ABI.pm, 'Transfer')
+    .filter((e) => e.id === USDC_ID && (getAddress(e.to) === HOOK || getAddress(e.from) === HOOK))
+    .map((e) => (getAddress(e.to) === HOOK ? e.amount : -e.amount))
+
+// ── Snapshots: every tracked balance and accrual, one Multicall3 call per block ──
+
+type Snap = Map<string, bigint>
+const snapCache = new Map<bigint, Snap>()
+const tokensAt = (b: bigint) => KINDS.filter((k) => progress.tokenBlocks[k] !== undefined && BigInt(progress.tokenBlocks[k]) <= b)
+const graduatedAt = (k: Kind, b: bigint) => progress.pools[k] !== undefined && BigInt(progress.pools[k].openBlock) <= b
+const rawAt = (b: bigint) => progress.rawBlock !== undefined && BigInt(progress.rawBlock) <= b
+
+interface Read {
+  key: string
+  to: Address
+  abi: Abi
+  fn: string
+  args?: readonly unknown[]
+}
+async function multiread(reads: Read[], block: bigint): Promise<unknown[]> {
+  const out: unknown[] = []
+  for (let i = 0; i < reads.length; i += 150) {
+    const chunk = reads.slice(i, i + 150)
+    const calls = chunk.map((r) => ({ target: r.to, allowFailure: true, callData: encodeFunctionData({ abi: r.abi, functionName: r.fn, args: r.args ?? [] }) }))
+    const res = await retry(() => pub.call({ to: MULTICALL3, data: encodeFunctionData({ abi: multicall3Abi, functionName: 'aggregate3', args: [calls] }), blockNumber: block }))
+    const decoded = decodeFunctionResult({ abi: multicall3Abi, functionName: 'aggregate3', data: res.data ?? '0x' }) as readonly { success: boolean; returnData: Hex }[]
+    decoded.forEach((d, j) => {
+      if (!d.success) throw new Error(`multicall: ${chunk[j].key} reverted at block ${block}: ${decodeRevert(d.returnData)}`)
+      out.push(decodeFunctionResult({ abi: chunk[j].abi, functionName: chunk[j].fn, data: d.returnData }))
+    })
+  }
+  return out
+}
+
+/** Addresses whose USDC is tracked, by label. The actor's is left out in Run B, where gas moves it (checked apart). */
+function usdcHoldersAt(b: bigint): [string, Address][] {
+  const list: [string, Address][] = [['launchpad', LP], ['hook', HOOK], ['poolManager', POOL_MANAGER], ['split', SPLIT], ['holders', HOLDERS], ['combo', COMBO]]
+  if (!REAL) list.push(['burner', me])
+  if (FEE_TO !== me) list.push(['feeTo', FEE_TO])
+  if (rawAt(b)) list.push(['raw', RAW()])
+  if (!REAL) {
+    list.push(['creatorWallet', CREATOR_WALLET], ['zeroWallet', ZERO_WALLET], ['comboWallet', COMBO_WALLET])
+    PAYEES.forEach((p, i) => list.push([`payee${i + 1}`, p]))
+    COMBO_PAYEES.forEach((p, i) => list.push([`comboPayee${i + 1}`, p]))
+  }
+  for (const k of tokensAt(b)) list.push([`tok:${sym(k)}`, tokenOf(k)])
+  return list
+}
+/** Addresses whose launch tokens are tracked. Every token lives with one of them (checked as an invariant). */
+function tokenHoldersAt(b: bigint): [string, Address][] {
+  const list: [string, Address][] = [['launchpad', LP], ['burner', me], ['poolManager', POOL_MANAGER], ['hook', HOOK]]
+  if (rawAt(b)) list.push(['raw', RAW()])
+  return list
+}
+
+async function snapshot(b: bigint): Promise<Snap> {
+  const hit = snapCache.get(b)
+  if (hit) return hit
+  const reads: Read[] = []
+  const add = (key: string, to: Address, abi: Abi, fn: string, args: readonly unknown[] = []) => reads.push({ key, to, abi, fn, args })
+  for (const [l, who] of usdcHoldersAt(b)) add(`usdc:${l}`, USDC, ABI.erc20, 'balanceOf', [who])
+  add('lp.pendingFees', LP, ABI.pad, 'pendingFees')
+  add('hook.claims', POOL_MANAGER, ABI.pm, 'balanceOf', [HOOK, USDC_ID])
+  for (const k of tokensAt(b)) {
+    const t = tokenOf(k)
+    const s = sym(k)
+    add(`lp.creator:${s}`, LP, ABI.pad, 'pendingCreatorFees', [t])
+    add(`lp.snipe:${s}`, LP, ABI.pad, 'pendingSnipe', [t])
+    add(`curve:${s}`, LP, ABI.pad, 'curves', [t])
+    add(`tok.supply:${s}`, t, ABI.token, 'totalSupply')
+    for (const [l, who] of tokenHoldersAt(b)) add(`tok.${l}:${s}`, t, ABI.token, 'balanceOf', [who])
+    add(`tok.distributed:${s}`, t, ABI.token, 'totalDistributed')
+    add(`tok.claimed.burner:${s}`, t, ABI.token, 'claimed', [me])
+    if (rawAt(b)) add(`tok.claimed.raw:${s}`, t, ABI.token, 'claimed', [RAW()])
+    if (usesSplit(k) && !REAL) {
+      add(`split.received:${s}`, SPLIT, ABI.split, 'totalReceived', [t])
+      add(`split.released:${s}`, SPLIT, ABI.split, 'totalReleased', [t])
+    }
+    if (usesHolders(k) && !REAL) add(`holders.distributed:${s}`, HOLDERS, ABI.holders, 'totalDistributed', [t])
+    add(`hook.platform:${s}`, HOOK, ABI.hook, 'pendingPlatform', [t])
+    add(`hook.creator:${s}`, HOOK, ABI.hook, 'pendingCreator', [t])
+    add(`hook.lockHeld:${s}`, HOOK, ABI.hook, 'lockHeld', [t])
+    add(`hook.bids:${s}`, HOOK, ABI.hook, 'bidCount', [t])
+    if (graduatedAt(k, b)) {
+      const id = (progress.pools[k] as PoolRec).poolId
+      add(`pool.slot0:${s}`, STATE_VIEW, ABI.stateView, 'getSlot0', [id])
+      add(`pool.liquidity:${s}`, STATE_VIEW, ABI.stateView, 'getLiquidity', [id])
+    }
+  }
+  const results = await multiread(reads, b)
+  const snap: Snap = new Map()
+  reads.forEach((r, i) => {
+    const v = results[i]
+    const [kind, s] = r.key.split(':')
+    if (kind === 'curve') {
+      const c = v as CurveView
+      snap.set(`curve.vU:${s}`, c.virtualUsdc)
+      snap.set(`curve.vT:${s}`, c.virtualTokens)
+      snap.set(`curve.sold:${s}`, c.tokensSold)
+      snap.set(`curve.grad:${s}`, c.graduated ? 1n : 0n)
+    } else if (kind === 'pool.slot0') {
+      const [sqrtP, tick] = v as readonly [bigint, number, number, number]
+      snap.set(`pool.sqrtP:${s}`, sqrtP)
+      snap.set(`pool.tick:${s}`, BigInt(tick))
+    } else {
+      snap.set(r.key, BigInt(v as bigint | number))
+    }
+  })
+  snapCache.set(b, snap)
+  return snap
+}
+const symsIn = (s: Snap) => [...s.keys()].filter((k) => k.startsWith('tok.supply:')).map((k) => k.slice('tok.supply:'.length))
+
+type Moves = Record<string, bigint>
+/** Every tracked quantity must move by exactly `expected` (0 when listed as 0) and every other one must not move. */
+function moves(what: string, s0: Snap, s1: Snap, expected: Moves) {
+  const keys = new Set([...s0.keys(), ...s1.keys()])
+  const delta = (k: string) => (s1.get(k) ?? 0n) - (s0.get(k) ?? 0n)
+  const named = Object.entries(expected).filter(([, v]) => v !== 0n)
+  if (named.length) {
+    const missing = named.filter(([k]) => !keys.has(k)).map(([k]) => k)
+    if (missing.length) check(`${what}: tracked quantities`, missing, [])
+    check(`${what}: ${named.map(([k]) => k).join(', ')} moved by`, Object.fromEntries(named.map(([k]) => [k, delta(k)])), Object.fromEntries(named))
+  }
+  const others = [...keys].filter((k) => !(k in expected) || expected[k] === 0n).filter((k) => delta(k) !== 0n).map((k) => `${k} ${delta(k)}`)
+  check(`${what}: nothing else moved (${keys.size - named.length} other tracked quantities)`, others, [])
+}
+
+/** The books to the unit (V14-SPEC §11 invariants), at one snapshot; `s0` is the block before, for the supply rule. */
+function invariants(what: string, s: Snap, s0?: Snap) {
+  const get = (k: string) => s.get(k) ?? 0n
+  const syms = symsIn(s)
+  let owed = get('lp.pendingFees')
+  for (const x of syms) {
+    owed += get(`lp.creator:${x}`) + get(`lp.snipe:${x}`)
+    if (get(`curve.grad:${x}`) === 0n) owed += get(`curve.vU:${x}`) - VIRTUAL_USDC_0
+  }
+  check(`${what}: launchpad ${U} == pendingFees + Σ pendingCreatorFees + Σ pendingSnipe + Σ live curve floats`, get('usdc:launchpad'), owed)
+  check(`${what}: the hook holds no ${U}`, get('usdc:hook'), 0n)
+  const hookOwes = syms.reduce((sum, x) => sum + get(`hook.platform:${x}`) + get(`hook.creator:${x}`) + get(`hook.lockHeld:${x}`), 0n)
+  check(`${what}: hook claims == Σ (pendingPlatform + pendingCreator + lockHeld)`, get('hook.claims'), hookOwes)
+  check(`${what}: the hook holds no launch token`, syms.filter((x) => get(`tok.hook:${x}`) !== 0n), [])
+  if (s0) {
+    const grew = syms.filter((x) => s0.has(`tok.supply:${x}`) && get(`tok.supply:${x}`) > (s0.get(`tok.supply:${x}`) ?? 0n))
+    check(`${what}: no token's supply grew`, grew, [])
+  }
+  const holders = [...s.keys()].filter((k) => k.startsWith('tok.') && !k.startsWith('tok.supply') && !k.startsWith('tok.distributed') && !k.startsWith('tok.claimed'))
+  const unaccounted = syms.map((x) => get(`tok.supply:${x}`) - holders.filter((k) => k.endsWith(`:${x}`)).reduce((sum, k) => sum + get(k), 0n))
+  check(`${what}: every token's supply sits with the tracked holders`, unaccounted, syms.map(() => 0n))
+}
+
+/** The actor's side of a transaction, on its native balance with the gas added back: 0 on rUSDC (gas only); on Arc's
+ *  USDC the native balance is the USDC balance, so it moves by `usdc` too. Skipped if the actor sent two in one block. */
+async function gasSide(what: string, receipt: TransactionReceipt, usdc: bigint) {
+  const B = receipt.blockNumber
+  const gas = receipt.gasUsed * receipt.effectiveGasPrice
+  const sentInBlock = (await nonceOf(me, B)) - (await nonceOf(me, B - 1n))
+  if (sentInBlock !== 1) {
+    note(`${what}: ${sentInBlock} actor transactions in block ${B}; native-balance check skipped`)
+    return
+  }
+  const moved = (await nativeOf(me, B)) - (await nativeOf(me, B - 1n)) + gas
+  check(`${what}: actor's native balance, gas added back`, moved, REAL ? usdc * WEI_PER_UNIT : 0n)
+}
+
+/** One transaction's books: the tracked quantities move exactly as `expected`, the invariants hold, the gas adds up. */
+async function books(what: string, receipt: TransactionReceipt, expected: Moves) {
+  const B = receipt.blockNumber
+  const s0 = await snapshot(B - 1n)
+  const s1 = await snapshot(B)
+  const actorUsdc = expected['usdc:burner'] ?? 0n
+  const tracked = { ...expected }
+  if (REAL) delete tracked['usdc:burner']
+  moves(what, s0, s1, tracked)
+  invariants(what, s1, s0)
+  await gasSide(what, receipt, actorUsdc)
+  return { s0, s1 }
+}
+
+// ── Pools: the model's positions, checked against StateView ───────────────────
+
+const poolRec = (k: Kind): PoolRec => {
+  const p = progress.pools[k]
+  if (!p) throw new Error(`${k} has no pool yet`)
+  return p
+}
+function recordChange(k: Kind, c: Omit<PosChange, 'id'> & { id: string }) {
+  const rec = poolRec(k)
+  rec.changes = rec.changes.filter((x) => x.id !== c.id).concat(c)
+  snapCache.clear()
+  save()
+}
+interface Position {
+  owner: Address
+  lower: number
+  upper: number
+  salt: Hex
+  liquidity: bigint
+}
+function positionsAt(k: Kind, b: bigint): Position[] {
+  const m = new Map<string, Position>()
+  for (const c of poolRec(k).changes) {
+    if (BigInt(c.block) > b) continue
+    const key = `${c.owner}|${c.lower}|${c.upper}|${c.salt}`
+    const p = m.get(key) ?? { owner: c.owner, lower: c.lower, upper: c.upper, salt: c.salt, liquidity: 0n }
+    p.liquidity += BigInt(c.delta)
+    m.set(key, p)
+  }
+  return [...m.values()].filter((p) => p.liquidity !== 0n)
+}
+/** The pool at block `b`: price, tick and active liquidity from StateView, ticks from the model's own positions. The
+ *  positions, the active liquidity, every tick and both fees are checked against the chain. */
+async function poolAt(what: string, k: Kind, b: bigint): Promise<V4.PoolModel> {
+  const rec = poolRec(k)
+  const pos = positionsAt(k, b)
+  const pool: V4.PoolModel = { sqrtPrice: 0n, tick: 0, liquidity: 0n, spacing: TICK_SPACING, ticks: new Map() }
+  for (const p of pos) {
+    for (const [t, net] of [[p.lower, p.liquidity], [p.upper, -p.liquidity]] as const) {
+      const s = pool.ticks.get(t) ?? { gross: 0n, net: 0n }
+      pool.ticks.set(t, { gross: s.gross + p.liquidity, net: s.net + net })
+    }
+  }
+  const tickList = [...pool.ticks.keys()].sort((a, b2) => a - b2)
+  const reads: Read[] = [
+    { key: 'slot0', to: STATE_VIEW, abi: ABI.stateView, fn: 'getSlot0', args: [rec.poolId] },
+    { key: 'liquidity', to: STATE_VIEW, abi: ABI.stateView, fn: 'getLiquidity', args: [rec.poolId] },
+    ...tickList.map((t) => ({ key: `tick ${t}`, to: STATE_VIEW, abi: ABI.stateView, fn: 'getTickLiquidity', args: [rec.poolId, t] as const })),
+    ...pos.map((p) => ({ key: `pos`, to: STATE_VIEW, abi: ABI.stateView, fn: 'getPositionInfo', args: [rec.poolId, p.owner, p.lower, p.upper, p.salt] as const })),
+  ]
+  const res = await multiread(reads, b)
+  const [sqrtPrice, tick, protocolFee, lpFee] = res[0] as readonly [bigint, number, number, number]
+  pool.sqrtPrice = sqrtPrice
+  pool.tick = tick
+  const active = pos.filter((p) => p.lower <= tick && tick < p.upper).reduce((s, p) => s + p.liquidity, 0n)
+  pool.liquidity = res[1] as bigint
+  const chainTicks = tickList.map((t, i) => {
+    const [gross, net] = res[2 + i] as readonly [bigint, bigint]
+    return { t, gross, net }
+  })
+  const chainPos = pos.map((p, i) => (res[2 + tickList.length + i] as readonly [bigint, bigint, bigint])[0])
+  check(`${what}: pool model at block ${b} == chain (fees, active liquidity, ${tickList.length} ticks, ${pos.length} positions)`, {
+    fees: [protocolFee, lpFee], active: pool.liquidity, ticks: chainTicks, positions: chainPos,
+  }, {
+    fees: [0, 0], active, ticks: tickList.map((t) => ({ t, gross: pool.ticks.get(t)?.gross, net: pool.ticks.get(t)?.net })), positions: pos.map((p) => p.liquidity),
+  })
+  return pool
+}
+const poolKeyOf = (token: Address) => {
+  const [c0, c1] = BigInt(USDC) < BigInt(token) ? [USDC, token] : [token, USDC]
+  return { currency0: c0, currency1: c1, fee: 0, tickSpacing: TICK_SPACING, hooks: HOOK }
+}
+const poolIdOf = (token: Address) => {
+  const k = poolKeyOf(token)
+  return keccak256(encodeAbiParameters([{ type: 'address' }, { type: 'address' }, { type: 'uint24' }, { type: 'int24' }, { type: 'address' }], [k.currency0, k.currency1, k.fee, k.tickSpacing, k.hooks]))
+}
+const LIMIT = (zeroForOne: boolean) => (zeroForOne ? V4.MIN_SQRT_PRICE + 1n : V4.MAX_SQRT_PRICE - 1n)
+
+type Side = 'buy' | 'sell'
+interface PoolTradeModel {
+  isBuy: boolean
+  /** gross USDC: what the pool took on a buy (fees on top), or paid out on a sell (fees taken from it) */
+  gross: bigint
+  fees: Fees
+  tokenAmount: bigint
+  /** what the trader paid (buy: USDC, sell: tokens) and received (buy: tokens, sell: USDC) */
+  paid: bigint
+  received: bigint
+  swap: V4.SwapResult
+  snipeBps: bigint
+}
+/** V14-SPEC §3 on top of Uniswap's pool math: the hook's fees and the pool's swap for one trade in `pool` (updated). */
+function modelPoolTrade(pool: V4.PoolModel, usdcIs0: boolean, creatorBps: bigint, snipeBps: bigint, side: Side, exact: 'in' | 'out', amount: bigint): PoolTradeModel {
+  const isBuy = side === 'buy'
+  const zeroForOne = isBuy === usdcIs0
+  const usdcOf = (r: V4.SwapResult) => (usdcIs0 ? r.amount0 : r.amount1)
+  const tokOf = (r: V4.SwapResult) => (usdcIs0 ? r.amount1 : r.amount0)
+  if (isBuy && exact === 'in') {
+    const fees = feesOnGross(amount, creatorBps, snipeBps)
+    const swap = V4.swap(pool, zeroForOne, -(amount - fees.total), LIMIT(zeroForOne))
+    if (-usdcOf(swap) !== amount - fees.total) throw new Error('model: PartialFill')
+    return { isBuy, gross: amount, fees, tokenAmount: tokOf(swap), paid: amount, received: tokOf(swap), swap, snipeBps }
+  }
+  if (!isBuy && exact === 'in') {
+    const swap = V4.swap(pool, zeroForOne, -amount, LIMIT(zeroForOne))
+    const gross = usdcOf(swap)
+    const fees = feesOnGross(gross, creatorBps, 0n)
+    return { isBuy, gross, fees, tokenAmount: amount, paid: amount, received: gross - fees.platform - fees.creator, swap, snipeBps: 0n }
+  }
+  if (isBuy) {
+    const swap = V4.swap(pool, zeroForOne, amount, LIMIT(zeroForOne))
+    const net = -usdcOf(swap)
+    const fees = feesOnNet(net, creatorBps, snipeBps)
+    return { isBuy, gross: net + fees.total, fees, tokenAmount: tokOf(swap), paid: net + fees.total, received: tokOf(swap), swap, snipeBps }
+  }
+  const fees = feesOnNet(amount, creatorBps, 0n)
+  const swap = V4.swap(pool, zeroForOne, amount + fees.total, LIMIT(zeroForOne))
+  if (usdcOf(swap) !== amount + fees.total) throw new Error('model: PartialFill')
+  return { isBuy, gross: amount + fees.total, fees, tokenAmount: -tokOf(swap), paid: -tokOf(swap), received: amount, swap, snipeBps: 0n }
+}
+
+/** Checks one pool trade (router or RawSwapper) at its block against the model: events, pool state, books. */
+async function checkPoolTrade(what: string, k: Kind, sent: Sent, side: Side, exact: 'in' | 'out', amount: bigint, trader: 'burner' | 'raw'): Promise<PoolTradeModel> {
+  const { receipt } = sent
+  const B = receipt.blockNumber
+  const B0 = B - 1n
+  const rec = poolRec(k)
+  const s = sym(k)
+  const token = tokenOf(k)
+  const c = BigInt(rec.creatorBps)
+  const bps = side === 'buy' ? snipeBpsAt(BigInt(rec.openBlock), B, c) : 0n
+  const pool = await poolAt(what, k, B0)
+  const before = { sqrtPrice: pool.sqrtPrice, tick: pool.tick, liquidity: pool.liquidity }
+  const m = modelPoolTrade(pool, rec.usdcIs0, c, bps, side, exact, amount)
+  const sender = trader === 'raw' ? RAW() : ROUTER
+  if (side === 'buy') {
+    check(`${what}: the surcharge is the window's at the block it landed in (${B - BigInt(rec.openBlock)} blocks after graduation)`, await rd<bigint>(HOOK, ABI.hook, 'snipeBpsOf', [token], B), bps)
+  }
+  check(`${what}: PoolTrade == model`, eventsOf<PoolTradeEvent>(receipt, HOOK, ABI.hook, 'PoolTrade'), [{
+    token, sender, isBuy: side === 'buy', usdcAmount: m.gross, tokenAmount: m.tokenAmount, platformFee: m.fees.platform, creatorFee: m.fees.creator, snipeFee: m.fees.snipe,
+  }])
+  check(`${what}: Uniswap Swap event == pool model (deltas, price, liquidity, tick, fee 0)`, eventsOf<SwapEvent>(receipt, POOL_MANAGER, ABI.pm, 'Swap'), [{
+    id: rec.poolId, sender, amount0: m.swap.amount0, amount1: m.swap.amount1, sqrtPriceX96: m.swap.sqrtPrice, liquidity: m.swap.liquidity, tick: m.swap.tick, fee: 0,
+  }])
+  check(`${what}: the fees became the hook's claims (ERC-6909 mint)`, claimMoves(receipt), [m.fees.total])
+  if (m.swap.crossed.length) note(`${what}: crossed ticks ${m.swap.crossed.join(', ')} in ${m.swap.steps} steps`)
+  const holder = trader === 'raw' ? 'raw' : 'burner'
+  const usdcKey = `usdc:${holder}`
+  const tokKey = `tok.${holder}:${s}`
+  const expected: Moves = {
+    [usdcKey]: side === 'buy' ? -m.paid : m.received,
+    [tokKey]: side === 'buy' ? m.received : -m.paid,
+    'usdc:poolManager': side === 'buy' ? m.paid : -m.received,
+    [`tok.poolManager:${s}`]: side === 'buy' ? -m.received : m.paid,
+    [`hook.platform:${s}`]: m.fees.platform,
+    [`hook.creator:${s}`]: m.fees.creator,
+    [`hook.lockHeld:${s}`]: m.fees.snipe,
+    'hook.claims': m.fees.total,
+    [`pool.sqrtP:${s}`]: m.swap.sqrtPrice - before.sqrtPrice,
+    [`pool.tick:${s}`]: BigInt(m.swap.tick - before.tick),
+    [`pool.liquidity:${s}`]: m.swap.liquidity - before.liquidity,
+  }
+  await books(what, receipt, expected)
+  return m
+}
+
+// ── Steps ─────────────────────────────────────────────────────────────────────
+
+async function step(id: string, fn: () => Promise<void>, always = false) {
+  if (progress.done[id] && !always) return
+  console.log(`\n── ${id}`)
+  const failuresBefore = failures
+  const checksBefore = checks
+  stepFailed = []
+  await fn()
+  const ok = failures === failuresBefore
+  const result: StepResult = { step: id, ok, checks: checks - checksBefore, failed: stepFailed, at: new Date().toISOString() }
+  progress.results = progress.results.filter((r) => r.step !== id).concat(result)
+  if (ok && !always) progress.done[id] = result.at
+  save()
+  if (!ok) {
+    console.log(`\nstep ${id}: ${stepFailed.length} check(s) failed. Stopping; a re-run re-checks it without re-sending its transactions.`)
+    await summary()
+    process.exit(1)
+  }
+}
+
+const FEE_PLUGIN_ID = (() => {
+  const a = parseInt(toFunctionSelector('onLaunch(address,address,bytes)').slice(2), 16)
+  const b = parseInt(toFunctionSelector('onFees(address,uint256)').slice(2), 16)
+  return `0x${((a ^ b) >>> 0).toString(16).padStart(8, '0')}` as const
+})()
+
+/** The runtime code at an address equals the local build, immutables and metadata hashes masked on both sides
+ *  (scripts/verify-bytecode.ts). */
+async function verifyBytecode(name: string, art: Artifact, address: Address) {
+  const onchain = (await retry(() => pub.getCode({ address, blockNumber: head }))) ?? '0x'
+  const strip = (hex: string) => hex.replace(/^0x/, '').toLowerCase()
+  let local = strip(art.deployedBytecode.object)
+  let remote = strip(onchain)
+  if (local.length !== remote.length) return check(`bytecode: ${name} size`, `${remote.length / 2} bytes on chain`, `${local.length / 2} bytes local`)
+  const mask = (hex: string, start: number, length: number) => hex.slice(0, start * 2) + '0'.repeat(length * 2) + hex.slice((start + length) * 2)
+  let immutables = 0
+  for (const refs of Object.values(art.deployedBytecode.immutableReferences ?? {})) {
+    for (const { start, length } of refs) {
+      local = mask(local, start, length)
+      remote = mask(remote, start, length)
+      immutables++
+    }
+  }
+  const METADATA = /a264697066735822[0-9a-f]{68}64736f6c6343[0-9a-f]{6}0033/g
+  const blank = (hex: string) => hex.replace(METADATA, (m) => m.slice(0, 16) + '0'.repeat(68) + m.slice(84))
+  const sections = (local.match(METADATA) ?? []).length
+  return checkThat(`bytecode: ${name} at ${address} equals the local build`, blank(local) === blank(remote), `${local.length / 2} bytes, ${immutables} immutable slots and ${sections} metadata hash(es) masked`)
+}
+
+/** Step 1: the deployment made by the Foundry script, read back: wiring, constants, the hook's address and salt, and
+ *  every contract byte for byte against the local build. Read-only; also runs without a signer. */
+async function deployment() {
+  await step('deploy', async () => {
+    const at = head
+    const a = (x: unknown) => getAddress(x as string)
+    console.log(`launchpad ${LP}, hook ${HOOK}, router ${ROUTER}, ${U} ${USDC}, chain ${chainId}, block ${at}`)
+    const pmCode = await retry(() => pub.getCode({ address: POOL_MANAGER, blockNumber: at }))
+    const fixture = readFileSync(resolve(ROOT, 'contracts-v14/test/fixtures/PoolManager.arc.hex'), 'utf8').trim()
+    check("Uniswap's PoolManager: its code on this chain is the tests' fixture, byte for byte", keccak256(pmCode ?? '0x'), keccak256(fixture as Hex))
+    check('PoolManager.protocolFeeController (none: no protocol fee on new pools)', a(await rd(POOL_MANAGER, ABI.pm, 'protocolFeeController', [], at)), zeroAddress)
+    for (const [n, addr] of [['StateView', STATE_VIEW], ['CREATE2 deployer', CREATE2_DEPLOYER], ['Multicall3', MULTICALL3]] as const) {
+      checkThat(`${n} has code`, ((await retry(() => pub.getCode({ address: addr, blockNumber: at }))) ?? '0x').length > 2, addr)
+    }
+    // Wiring.
+    check('launchpad wiring', {
+      usdc: a(await rd(LP, ABI.pad, 'usdc', [], at)), poolManager: a(await rd(LP, ABI.pad, 'poolManager', [], at)), hook: a(await rd(LP, ABI.pad, 'hook', [], at)),
+      router: a(await rd(LP, ABI.pad, 'router', [], at)), pairFactory: a(await rd(LP, ABI.pad, 'pairFactory', [], at)), feeTo: a(await rd(LP, ABI.pad, 'feeTo', [], at)),
+      feeToSetter: a(await rd(LP, ABI.pad, 'feeToSetter', [], at)), launchFee: await rd(LP, ABI.pad, 'launchFee', [], at),
+    }, { usdc: USDC, poolManager: POOL_MANAGER, hook: HOOK, router: ROUTER, pairFactory: HOOK, feeTo: FEE_TO, feeToSetter: getAddress(dep.feeToSetter), launchFee: BigInt(dep.launchFee) })
+    check('launchpad.isLaunchPair: PoolManager and hook yes, router no', [
+      await rd(LP, ABI.pad, 'isLaunchPair', [POOL_MANAGER], at), await rd(LP, ABI.pad, 'isLaunchPair', [HOOK], at), await rd(LP, ABI.pad, 'isLaunchPair', [ROUTER], at),
+    ], [true, true, false])
+    check('hook wiring', { launchpad: a(await rd(HOOK, ABI.hook, 'launchpad', [], at)), usdc: a(await rd(HOOK, ABI.hook, 'usdc', [], at)), poolManager: a(await rd(HOOK, ABI.hook, 'poolManager', [], at)) }, { launchpad: LP, usdc: USDC, poolManager: POOL_MANAGER })
+    check('router wiring', { launchpad: a(await rd(ROUTER, ABI.router, 'launchpad', [], at)), usdc: a(await rd(ROUTER, ABI.router, 'usdc', [], at)), poolManager: a(await rd(ROUTER, ABI.router, 'poolManager', [], at)) }, { launchpad: LP, usdc: USDC, poolManager: POOL_MANAGER })
+    // Constants.
+    const padConst = ['TOTAL_SUPPLY', 'CURVE_SUPPLY', 'POOL_SUPPLY', 'VIRTUAL_TOKENS_0', 'VIRTUAL_USDC_0', 'FEE_BPS', 'MAX_LAUNCH_FEE', 'MAX_CREATOR_FEE_BPS', 'SNIPE_BLOCKS', 'SNIPE_START_BPS', 'MAX_TOTAL_FEE_BPS']
+    const padWant = [TOTAL_SUPPLY, CURVE_SUPPLY, POOL_SUPPLY, VIRTUAL_TOKENS_0, VIRTUAL_USDC_0, FEE_BPS, 100_000_000n, 1000n, SNIPE_BLOCKS, SNIPE_START_BPS, MAX_TOTAL_FEE_BPS]
+    const padGot: bigint[] = []
+    for (const n of padConst) padGot.push(await rd<bigint>(LP, ABI.pad, n, [], at))
+    check(`launchpad constants (${padConst.join(', ')})`, padGot, padWant)
+    const hookConst = ['LP_FEE', 'TICK_SPACING', 'FEE_BPS', 'SNIPE_BLOCKS', 'SNIPE_START_BPS', 'MAX_TOTAL_FEE_BPS', 'BID_DISCOUNT_TICKS', 'BID_SPAN_TICKS']
+    const hookGot: string[] = []
+    for (const n of hookConst) hookGot.push(String(await rd(HOOK, ABI.hook, n, [], at)))
+    check(`hook constants (${hookConst.join(', ')})`, hookGot, ['0', String(TICK_SPACING), String(FEE_BPS), String(SNIPE_BLOCKS), String(SNIPE_START_BPS), String(MAX_TOTAL_FEE_BPS), String(BID_DISCOUNT_TICKS), String(BID_SPAN_TICKS)])
+    // The hook's address: its low 14 bits are exactly its permissions, and it is CREATE2 of the recorded salt and init code.
+    check("the hook address's low 14 bits (its permission flags)", `0x${(BigInt(HOOK) & 0x3fffn).toString(16)}`, `0x${HOOK_FLAGS.toString(16)}`)
+    const perms = await rd<Record<string, boolean>>(HOOK, ABI.hook, 'getHookPermissions', [], at)
+    check('getHookPermissions()', perms, {
+      beforeInitialize: true, afterInitialize: false, beforeAddLiquidity: true, afterAddLiquidity: false, beforeRemoveLiquidity: false, afterRemoveLiquidity: false,
+      beforeSwap: true, afterSwap: true, beforeDonate: true, afterDonate: false, beforeSwapReturnDelta: true, afterSwapReturnDelta: true,
+      afterAddLiquidityReturnDelta: false, afterRemoveLiquidityReturnDelta: false,
+    })
+    const hookTx = await retry(() => pub.getTransaction({ hash: dep.txs.hook }))
+    check('the hook was deployed through the deterministic CREATE2 deployer', getAddress(hookTx.to ?? zeroAddress), CREATE2_DEPLOYER)
+    const salt = slice(hookTx.input, 0, 32)
+    const initCode = slice(hookTx.input, 32)
+    check('hook salt == the recorded salt', salt, dep.hookSalt)
+    check('hook address == CREATE2(deployer, salt, keccak256(init code))', getContractAddress({ opcode: 'CREATE2', from: CREATE2_DEPLOYER, salt, bytecodeHash: keccak256(initCode) }), HOOK)
+    const args = encodeAbiParameters([{ type: 'address' }, { type: 'address' }, { type: 'address' }], [POOL_MANAGER, LP, USDC])
+    const METADATA = /a264697066735822[0-9a-f]{68}64736f6c6343[0-9a-f]{6}0033/g
+    const blank = (hex: string) => hex.toLowerCase().replace(METADATA, (m) => m.slice(0, 16) + '0'.repeat(68) + m.slice(84))
+    check("hook init code == the local build's creation code + (PoolManager, launchpad, USDC)", blank(initCode), blank(ART.hook.bytecode.object + args.slice(2)))
+    // Plugins.
+    for (const [n, addr, abi] of [['split', SPLIT, ABI.split], ['holders', HOLDERS, ABI.holders], ['combo', COMBO, ABI.combo]] as const) {
+      check(`${n}: launchpad, usdc, IArchitexFeePlugin (${FEE_PLUGIN_ID}), IERC165, not 0xffffffff`, [
+        a(await rd(addr, abi, 'launchpad', [], at)), a(await rd(addr, abi, 'usdc', [], at)), await rd(addr, abi, 'supportsInterface', [FEE_PLUGIN_ID], at),
+        await rd(addr, abi, 'supportsInterface', ['0x01ffc9a7'], at), await rd(addr, abi, 'supportsInterface', ['0xffffffff'], at),
+      ], [LP, USDC, true, true, false])
+    }
+    check('split.MAX_PAYEES, combo.MAX_ENTRIES, combo.TOTAL_BPS', [await rd(SPLIT, ABI.split, 'MAX_PAYEES', [], at), await rd(COMBO, ABI.combo, 'MAX_ENTRIES', [], at), await rd(COMBO, ABI.combo, 'TOTAL_BPS', [], at)], [20n, 5n, 10_000n])
+    check(`${U}.decimals`, await rd(USDC, ABI.erc20, 'decimals', [], at), 6)
+    if (!REAL) {
+      check('rUSDC.symbol', await rd(USDC, ABI.erc20, 'symbol', [], at), 'rUSDC')
+      check('rUSDC.owner is the actor (it mints)', a(await rd(USDC, ABI.erc20, 'owner', [], at)), me)
+    }
+    // Byte for byte.
+    for (const [n, art, addr] of [
+      ['ArchitexLaunchpadV14', ART.pad, LP], ['ArchitexLaunchHook', ART.hook, HOOK], ['ArchitexV4Router', ART.router, ROUTER],
+      ['SplitPlugin', ART.split, SPLIT], ['HolderDistributionPlugin', ART.holders, HOLDERS], ['ComboPlugin', ART.combo, COMBO],
+    ] as const) await verifyBytecode(n, art, addr)
+    // The deployer kept no power: the wiring is set once, and only feeToSetter touches the fee settings.
+    const stranger = fixedAddress('stranger')
+    await expectRevert('initialize again, by the deployer', LP, ABI.pad, 'initialize', [HOOK, ROUTER], 'AlreadyInitialized', at, getAddress(dep.deployer))
+    await expectRevert('initialize by anyone else', LP, ABI.pad, 'initialize', [HOOK, ROUTER], 'Forbidden', at, stranger)
+    await expectRevert('setFeeTo by a stranger', LP, ABI.pad, 'setFeeTo', [stranger], 'Forbidden', at, stranger)
+    await expectRevert('hook.graduate by anyone but the launchpad', HOOK, ABI.hook, 'graduate', [LP, POOL_SUPPLY, 1n, 0n, false, 0], 'OnlyLaunchpad', at, stranger)
+    await expectRevert('hook.release by anyone but the launchpad', HOOK, ABI.hook, 'release', [LP], 'OnlyLaunchpad', at, stranger)
+    if (!progress.tokens[KINDS[0]]) check('no token launched yet', await rd(LP, ABI.pad, 'tokensLength', [], at), 0n)
+  }, !DRIVING)
+}
+
+/** Deploys the test RawSwapper (contracts-v14/test/V14Base.sol) and checks its code against the local build. */
+async function deployRaw() {
+  await step('raw', async () => {
+    let receipt: TransactionReceipt
+    const what = 'deploy RawSwapper'
+    const mined = minedTx('raw', what)
+    if (mined) receipt = await retry(() => pub.getTransactionReceipt({ hash: mined.hash }))
+    else receipt = await sendRaw('raw', what, undefined, encodeDeployData({ abi: ABI.raw, bytecode: ART.raw.bytecode.object, args: [POOL_MANAGER] }))
+    if (!receipt.contractAddress) throw new Error('no contract address in the RawSwapper receipt')
+    progress.raw = getAddress(receipt.contractAddress)
+    progress.rawBlock = receipt.blockNumber.toString()
+    LABELS.set(progress.raw, 'RawSwapper')
+    snapCache.clear()
+    save()
+    note(`RawSwapper at ${progress.raw}`)
+    check('RawSwapper.manager == the PoolManager', getAddress(await rd<string>(RAW(), ABI.raw, 'manager', [], receipt.blockNumber)), POOL_MANAGER)
+    await verifyBytecode('RawSwapper', ART.raw, RAW())
+    await books('deploy RawSwapper', receipt, {})
+  })
+}
+
+async function fund() {
+  await step('fund', async () => {
+    for (const [who, whoLabel, amount] of [[me, 'burner', A.burnerMint], [RAW(), 'raw', A.rawUsdc]] as const) {
+      const what = `mint ${fmt(amount)} rUSDC to the ${whoLabel}`
+      const { receipt } = await tx('fund', what, USDC, ABI.erc20, 'mint', [who, amount])
+      const B = receipt.blockNumber
+      check(`${what}: rUSDC supply`, (await rd<bigint>(USDC, ABI.erc20, 'totalSupply', [], B)) - (await rd<bigint>(USDC, ABI.erc20, 'totalSupply', [], B - 1n)), amount)
+      await books(what, receipt, { [`usdc:${whoLabel}`]: amount })
+    }
+  })
+}
+
+async function approvals() {
+  await step('approve', async () => {
+    // rUSDC: unlimited, it has no value. Arc's USDC: what the curve trades need, no more.
+    const want = REAL ? (A.windowBuy + A.curveBuy * 2n + BigInt(dep.launchFee)) * 2n : maxUint256
+    const spenders: [string, Address][] = REAL ? [['launchpad', LP]] : [['launchpad', LP], ['router', ROUTER]]
+    for (const [l, spender] of spenders) {
+      const { receipt } = await tx('approve', `approve the ${l}`, USDC, ABI.erc20, 'approve', [spender, want])
+      check(`approve the ${l}: allowance`, await rd<bigint>(USDC, ABI.erc20, 'allowance', [me, spender], receipt.blockNumber), want)
+      await books(`approve the ${l}`, receipt, {})
+    }
+  })
+}
+
+/** Predicts every launch token's address (CREATE from the launchpad) before any exists, so the run knows which pools
+ *  will have USDC as currency0 and which as currency1, and runs the exact-out, dump and bid scenarios on one of each. */
+async function plan() {
+  await step('plan', async () => {
+    const nonce = BigInt(await nonceOf(LP, head))
+    const made = await rd<bigint>(LP, ABI.pad, 'tokensLength', [], head)
+    check('launchpad nonce == 1 + tokens launched (EIP-161: contracts start at nonce 1)', nonce, 1n + made)
+    for (const [i, k] of KINDS.entries()) {
+      const address = getContractAddress({ from: LP, nonce: nonce + BigInt(i) - made })
+      progress.planned[k] = { address, usdcIs0: BigInt(USDC) < BigInt(address) }
+      note(`${sym(k)}: ${address}, USDC is currency${BigInt(USDC) < BigInt(address) ? '0' : '1'}`)
+    }
+    const hi = KINDS.find((k) => progress.planned[k]?.usdcIs0)
+    const lo = KINDS.find((k) => progress.planned[k]?.usdcIs0 === false)
+    progress.features = REAL ? [] : ([hi, lo].filter(Boolean) as Kind[])
+    progress.openLp = KINDS.find((k) => spec(k).open)
+    progress.closedLp = KINDS.find((k) => !spec(k).open)
+    if (!REAL) {
+      note(`exact-out, dump-and-bid scenarios on ${progress.features.map(sym).join(' and ')}; outside liquidity accepted by ${sym(progress.openLp as Kind)}, refused by ${sym(progress.closedLp as Kind)}`)
+      if (!hi || !lo) note(`every token sorts ${hi ? 'above' : 'below'} ${U}: only one pool orientation is covered (see --preview to pick a deploy nonce that covers both)`)
+    }
+    save()
+  })
+}
+
+/** The launch, and right after it (before any check reads the chain, so they land inside the 20-block window) the
+ *  curve buys that pay the surcharge. Then everything is checked at the blocks the transactions landed in. */
+async function create(k: Kind, first: boolean) {
+  const id = `create:${k}`
+  await step(id, async () => {
+    const s = spec(k)
+    const predicted = progress.planned[k]?.address
+    if (!predicted) throw new Error(`${k}: not planned`)
+    const fee = BigInt(dep.launchFee)
+    const created = await tx(id, `createToken ${s.symbol}`, LP, ABI.pad, 'createToken', [
+      s.name, s.symbol, '', Number(s.feeBps), s.plugin, s.data, s.open, s.firstBuy,
+      s.firstBuy > 0n ? modelCurveBuy(INITIAL_CURVE, s.firstBuy, s.feeBps, 0n).tokensOut : 0n, fee, // maxLaunchFee = launchFee
+    ], fee + s.firstBuy)
+    const window: Sent[] = []
+    for (let i = 0; i < s.windowBuys; i++) {
+      // The quote at the latest block is a floor: a later block pays a smaller surcharge.
+      window.push(await tx(id, `buy ${s.symbol} in the curve's window (${i + 1})`, LP, ABI.pad, 'buy', async () => {
+        const [out] = await simulate<readonly [bigint]>(LP, ABI.pad, 'quoteBuy', [predicted, A.windowBuy], head)
+        return [predicted, A.windowBuy, out, me, await deadline()]
+      }, A.windowBuy))
+    }
+
+    const { receipt, args } = created
+    const B = receipt.blockNumber
+    const e = eventsOf<{ token: Address; creator: Address; plugin: Address; openPool: boolean; creatorFeeBps: number; name: string; symbol: string; metadataURI: string }>(receipt, LP, ABI.pad, 'TokenCreated')
+    check('TokenCreated emitted once', e.length, 1)
+    const token = getAddress(e[0].token)
+    check('the token landed at its predicted address (CREATE from the launchpad)', token, predicted)
+    progress.tokens[k] = token
+    progress.tokenBlocks[k] = B.toString()
+    LABELS.set(token, s.symbol)
+    snapCache.clear()
+    save()
+    note(`${s.symbol} = ${token}; USDC is currency${progress.planned[k]?.usdcIs0 ? '0' : '1'} of its pool`)
+    check('TokenCreated', pick(e[0], ['creator', 'plugin', 'openPool', 'creatorFeeBps', 'name', 'symbol', 'metadataURI']), {
+      creator: me, plugin: s.plugin, openPool: s.open, creatorFeeBps: Number(s.feeBps), name: s.name, symbol: s.symbol, metadataURI: '',
+    })
+    const firstBuy = args[7] as bigint
+    const launchFee = args[9] as bigint
+    const m = firstBuy > 0n ? modelCurveBuy(INITIAL_CURVE, firstBuy, s.feeBps, 0n) : undefined
+    const c = await curveAt(token, B)
+    check('curves(token): registration', pick(c, ['token', 'creator', 'createdAt', 'createdBlock', 'graduated', 'openPool', 'creatorFeeBps', 'pluginHooks', 'plugin', 'metadataURI', 'virtualUsdc', 'virtualTokens', 'tokensSold']), {
+      token, creator: me, createdAt: await timeOf(B), createdBlock: B, graduated: false, openPool: s.open, creatorFeeBps: Number(s.feeBps), pluginHooks: s.hooks, plugin: s.plugin, metadataURI: '',
+      virtualUsdc: VIRTUAL_USDC_0 + (m?.net ?? 0n), virtualTokens: VIRTUAL_TOKENS_0 - (m?.tokensOut ?? 0n), tokensSold: m?.tokensOut ?? 0n,
+    })
+    check('token wiring and supply', {
+      launchpad: getAddress(await rd<string>(token, ABI.token, 'launchpad', [], B)), router: getAddress(await rd<string>(token, ABI.token, 'router', [], B)),
+      poolManager: getAddress(await rd<string>(token, ABI.token, 'poolManager', [], B)), hook: getAddress(await rd<string>(token, ABI.token, 'hook', [], B)),
+      usdc: getAddress(await rd<string>(token, ABI.token, 'usdc', [], B)), graduated: await rd<boolean>(token, ABI.token, 'graduated', [], B),
+      totalSupply: await rd<bigint>(token, ABI.token, 'totalSupply', [], B), decimals: await rd<number>(token, ABI.token, 'decimals', [], B),
+    }, { launchpad: LP, router: ROUTER, poolManager: POOL_MANAGER, hook: HOOK, usdc: USDC, graduated: false, totalSupply: TOTAL_SUPPLY, decimals: 18 })
+    check('dividends exclude the launchpad, the PoolManager, the hook, 0x…dEaD and 0; not the actor', await Promise.all(
+      [LP, POOL_MANAGER, HOOK, DEAD, zeroAddress, me].map((x) => rd<boolean>(token, ABI.token, 'isExcluded', [x], B)),
+    ), [true, true, true, true, true, false])
+    const key = await rd<{ currency0: Address; currency1: Address; fee: number; tickSpacing: number; hooks: Address }>(HOOK, ABI.hook, 'poolKeyOf', [token], B)
+    check("hook.poolKeyOf(token) == the model's key (sorted, fee 0, spacing 200, the hook)", { ...key, currency0: getAddress(key.currency0), currency1: getAddress(key.currency1), hooks: getAddress(key.hooks) }, poolKeyOf(token))
+    await expectRevert('hook.launchOf before graduation', HOOK, ABI.hook, 'launchOf', [token], 'UnknownLaunch', B)
+    const room = MAX_TOTAL_FEE_BPS - FEE_BPS - s.feeBps
+    check(`snipeBpsOf(token) in the creation block == min(9000, 9900 - 50 - creator fee = ${room})`, await rd<bigint>(LP, ABI.pad, 'snipeBpsOf', [token], B), snipeBpsAt(B, B, s.feeBps))
+    check('pairOf(token) is nothing before graduation', getAddress(await rd<string>(LP, ABI.pad, 'pairOf', [token], B)), zeroAddress)
+    const trades = eventsOf<TradeEvent>(receipt, LP, ABI.pad, 'Trade')
+    check("the creator's first buy: one Trade, or none", trades.length, m ? 1 : 0)
+    if (m) {
+      check("the creator's first buy pays no surcharge though its block's is 90% (V14-SPEC §5): Trade == model", trades.map((t) => pick(t, ['trader', 'isBuy', 'usdcAmount', 'tokenAmount', 'platformFee', 'creatorFee', 'snipeFee', 'virtualUsdc', 'virtualTokens'])), [{
+        trader: me, isBuy: true, usdcAmount: m.usdcSpent, tokenAmount: m.tokensOut, platformFee: m.platformFee, creatorFee: m.creatorFee, snipeFee: 0n,
+        virtualUsdc: VIRTUAL_USDC_0 + m.net, virtualTokens: VIRTUAL_TOKENS_0 - m.tokensOut,
+      }])
+    }
+    // Plugin configuration.
+    if (k === 'split') {
+      check('Split: payeesOf, totalShares', [await rd(SPLIT, ABI.split, 'payeesOf', [token], B), await rd(SPLIT, ABI.split, 'totalShares', [token], B)], [[PAYEES, SHARES], 10n])
+    }
+    if (k === 'combo') {
+      check('Combo: allocationOf (Holders and Split are plugins, the wallet is not)', await rd(COMBO, ABI.combo, 'allocationOf', [token], B), [COMBO_TARGETS, COMBO_BPS, [true, true, false]])
+      check('Combo configured its entries: Holders, and Split with its own payees', [
+        await rd(HOLDERS, ABI.holders, 'isConfigured', [token], B), await rd(SPLIT, ABI.split, 'isConfigured', [token], B), await rd(SPLIT, ABI.split, 'payeesOf', [token], B),
+      ], [true, true, [COMBO_PAYEES, COMBO_SHARES]])
+    }
+    if (s.hooks && s.plugin !== COMBO) check(`${k} plugin: isConfigured`, await rd(s.plugin, ABI.split, 'isConfigured', [token], B), true)
+    if (s.hooks) await expectRevert(`${k} plugin: a second onLaunch (write-once)`, s.plugin, ABI.split, 'onLaunch', [token, me, s.data], 'AlreadyConfigured', B, LP)
+    if (!s.hooks && !REAL) check(`${k}: the destination is a plain address (no code)`, (await retry(() => pub.getCode({ address: s.plugin }))) ?? '0x', '0x')
+    const expected: Moves = {
+      'usdc:launchpad': launchFee + (m?.usdcSpent ?? 0n), 'usdc:burner': -(launchFee + (m?.usdcSpent ?? 0n)), 'lp.pendingFees': launchFee + (m?.platformFee ?? 0n),
+      [`lp.creator:${s.symbol}`]: m?.creatorFee ?? 0n, [`curve.vU:${s.symbol}`]: VIRTUAL_USDC_0 + (m?.net ?? 0n), [`curve.vT:${s.symbol}`]: VIRTUAL_TOKENS_0 - (m?.tokensOut ?? 0n),
+      [`curve.sold:${s.symbol}`]: m?.tokensOut ?? 0n, [`tok.supply:${s.symbol}`]: TOTAL_SUPPLY, [`tok.launchpad:${s.symbol}`]: TOTAL_SUPPLY - (m?.tokensOut ?? 0n),
+      [`tok.burner:${s.symbol}`]: m?.tokensOut ?? 0n,
+    }
+    await books(`create ${s.symbol}`, receipt, expected)
+    if (first) await launchRefusals(token, B)
+
+    // The window buys, each at the block it landed in (V14-SPEC §5): the surcharge is SNIPE_START_BPS × (end - block) / 20.
+    let paid = 0
+    for (const [i, w] of window.entries()) {
+      const bps = await checkCurveBuy(`window buy ${i + 1}`, k, w)
+      if (bps > 0n) paid++
+    }
+    if (window.length) {
+      progress.notes[`${id}:windowPaid`] = String(paid)
+      if (paid < window.length) note(`${paid} of ${window.length} window buys landed inside the window (the rest after it, surcharge 0)`)
+    }
+  })
+}
+
+/** createToken's refusals and the pre-graduation locks, simulated for free once, where the first token exists. */
+async function launchRefusals(token: Address, B: bigint) {
+  const s = spec(KINDS[0])
+  const fee = BigInt(dep.launchFee)
+  const launch = (plugin: Address, data: Hex, feeBps = 0, maxFee = fee, name = 'Refused') => [name, 'NO', '', feeBps, plugin, data, false, 0n, 0n, maxFee] as const
+  if (fee > 0n) await expectRevert('createToken with maxLaunchFee below the fee', LP, ABI.pad, 'createToken', launch(s.plugin, s.data, Number(s.feeBps), fee - 1n), 'LaunchFeeAboveMax', B)
+  await expectRevert('createToken at a 10.01% creator fee', LP, ABI.pad, 'createToken', launch(s.plugin, s.data, 1001), 'CreatorFeeTooHigh', B)
+  await expectRevert('createToken with an empty name', LP, ABI.pad, 'createToken', launch(s.plugin, s.data, 0, fee, ''), 'InvalidName', B)
+  const next = getContractAddress({ from: LP, nonce: BigInt(await nonceOf(LP, B)) })
+  for (const [l, plugin] of [
+    ['the zero address', zeroAddress], ['the launchpad', LP], [U, USDC], ['the router', ROUTER], ['the hook', HOOK], ['the PoolManager', POOL_MANAGER],
+    ['an existing launch token', token], ['the new token itself (predicted address)', next],
+  ] as const) await expectRevert(`createToken paying ${l}`, LP, ABI.pad, 'createToken', launch(plugin, '0x'), 'InvalidPlugin', B)
+  await expectRevert('createToken with pluginData for a plain address', LP, ABI.pad, 'createToken', launch(fixedAddress('mistyped'), '0x01'), 'DataForNonPlugin', B)
+  if (!REAL) {
+    for (const [l, payee] of [['the PoolManager', POOL_MANAGER], ['the hook', HOOK]] as const) {
+      await expectRevert(`a Split paying ${l}`, LP, ABI.pad, 'createToken', launch(SPLIT, splitData([payee], [1n])), 'InvalidRecipient', B)
+    }
+  }
+  const key = poolKeyOf(token)
+  await expectRevert('anyone initializing the token\'s pool first', POOL_MANAGER, ABI.pm, 'initialize', [key, V4.sqrtAtTick(0)], 'WrappedError(hook: PoolCreationRestricted)', B)
+  await expectRevert('a transfer of the token into the PoolManager before graduation', token, ABI.token, 'transfer', [POOL_MANAGER, 0n], 'PoolLockedUntilGraduation', B, LP)
+  await expectRevert('router.quoteBuy before graduation', ROUTER, ABI.router, 'quoteBuy', [token, usd(1)], 'NotGraduated', B)
+  await expectRevert('hook.lock before graduation', HOOK, ABI.hook, 'lock', [token], 'UnknownLaunch', B)
+  check('syncPoolFees for a live curve books nothing', await simulate(LP, ABI.pad, 'syncPoolFees', [token], B), [0n, 0n])
+  await expectRevert('a curve buy past its deadline', LP, ABI.pad, 'buy', [token, usd(1), 0n, me, (await timeOf(B)) - 1n], 'Expired', B)
+  await expectRevert('accrueTradeFees (the v1.3 push path, gone)', LP, ABI.pad, 'accrueTradeFees', [token, 1n, 1n], 'Forbidden', B, HOOK)
+}
+
+/** A curve buy, at the block it landed in: the surcharge from createdBlock and that block, the Trade event, the quote at
+ *  the block before (with its own block's surcharge), pendingSnipe and the books. Returns the surcharge in bps. */
+async function checkCurveBuy(what: string, k: Kind, sent: Sent): Promise<bigint> {
+  const s = spec(k)
+  const { receipt, args } = sent
+  const B = receipt.blockNumber
+  const B0 = B - 1n
+  const token = tokenOf(k)
+  const usdcIn = args[1] as bigint
+  const c0 = await curveAt(token, B0)
+  const bps = snipeBpsAt(c0.createdBlock, B, s.feeBps)
+  const m = modelCurveBuy(c0, usdcIn, s.feeBps, bps)
+  check(`${what}: landed ${B - c0.createdBlock} blocks after the launch, surcharge ${bps} bps: snipeBpsOf at that block`, await rd<bigint>(LP, ABI.pad, 'snipeBpsOf', [token], B), bps)
+  const bps0 = snipeBpsAt(c0.createdBlock, B0, s.feeBps)
+  const [qOut, qPlat, qCreator, qSnipe, qSpent, qGrad] = await rd<readonly [bigint, bigint, bigint, bigint, bigint, boolean]>(LP, ABI.pad, 'quoteBuy', [token, usdcIn], B0)
+  const q0 = modelCurveBuy(c0, usdcIn, s.feeBps, bps0)
+  check(`${what}: quoteBuy at the block before (surcharge ${bps0} bps) == model`, { qOut, qPlat, qCreator, qSnipe, qSpent, qGrad }, {
+    qOut: q0.tokensOut, qPlat: q0.platformFee, qCreator: q0.creatorFee, qSnipe: q0.snipeFee, qSpent: q0.usdcSpent, qGrad: q0.graduates,
+  })
+  check(`${what}: fees are ceil(usdcIn × 50, × creator, × ${bps} / 1e4)`, [m.platformFee, m.creatorFee, m.snipeFee], [divCeil(usdcIn * FEE_BPS, BPS), divCeil(usdcIn * s.feeBps, BPS), divCeil(usdcIn * bps, BPS)])
+  check(`${what}: Trade == model`, eventsOf<TradeEvent>(receipt, LP, ABI.pad, 'Trade').map((t) => pick(t, ['trader', 'isBuy', 'usdcAmount', 'tokenAmount', 'platformFee', 'creatorFee', 'snipeFee', 'virtualUsdc', 'virtualTokens'])), [{
+    trader: me, isBuy: true, usdcAmount: m.usdcSpent, tokenAmount: m.tokensOut, platformFee: m.platformFee, creatorFee: m.creatorFee, snipeFee: m.snipeFee,
+    virtualUsdc: c0.virtualUsdc + m.net, virtualTokens: c0.virtualTokens - m.tokensOut,
+  }])
+  const x = s.symbol
+  await books(what, receipt, {
+    'usdc:launchpad': m.usdcSpent, 'usdc:burner': -m.usdcSpent, 'lp.pendingFees': m.platformFee, [`lp.creator:${x}`]: m.creatorFee, [`lp.snipe:${x}`]: m.snipeFee,
+    [`curve.vU:${x}`]: m.net, [`curve.vT:${x}`]: -m.tokensOut, [`curve.sold:${x}`]: m.tokensOut, [`tok.launchpad:${x}`]: -m.tokensOut, [`tok.burner:${x}`]: m.tokensOut,
+  })
+  return bps
+}
+
+/** After the curve's window: a buy (quote == fill) and a sell of half of it. */
+async function curveTrades(k: Kind, first: boolean) {
+  const id = `curve:${k}`
+  await step(id, async () => {
+    const s = spec(k)
+    const token = tokenOf(k)
+    await waitForBlock(BigInt(progress.tokenBlocks[k] as string) + SNIPE_BLOCKS)
+    const buy = await tx(id, `buy ${s.symbol} on the curve, after its window`, LP, ABI.pad, 'buy', async () => {
+      const [out] = await simulate<readonly [bigint]>(LP, ABI.pad, 'quoteBuy', [token, A.curveBuy], head)
+      return [token, A.curveBuy, out, me, await deadline()]
+    }, A.curveBuy)
+    const B = buy.receipt.blockNumber
+    const bps = await checkCurveBuy('curve buy', k, buy)
+    check('the window is over: no surcharge', bps, 0n)
+    const [q] = await rd<readonly [bigint]>(LP, ABI.pad, 'quoteBuy', [token, buy.args[1]], B - 1n)
+    const got = eventsOf<TradeEvent>(buy.receipt, LP, ABI.pad, 'Trade')[0]?.tokenAmount ?? 0n
+    check('quote at the block before == fill', got, q)
+    const [back] = await rd<readonly [bigint]>(LP, ABI.pad, 'quoteSell', [token, got], B)
+    checkThat('selling it straight back returns less than was paid (V13-SPEC §6.4)', back < (buy.args[1] as bigint), `${fmt(back)} < ${fmt(buy.args[1] as bigint)}`)
+
+    const sell = await tx(id, `sell ${s.symbol} on the curve (half)`, LP, ABI.pad, 'sell', async () => {
+      const half = got / 2n
+      const [out] = await simulate<readonly [bigint]>(LP, ABI.pad, 'quoteSell', [token, half], head)
+      return [token, half, out, me, await deadline()]
+    })
+    const S = sell.receipt.blockNumber
+    const tokensIn = sell.args[1] as bigint
+    const c0 = await curveAt(token, S - 1n)
+    const m = modelCurveSell(c0, tokensIn, s.feeBps)
+    const [usdcOut, platformFee, creatorFee] = await rd<readonly [bigint, bigint, bigint]>(LP, ABI.pad, 'quoteSell', [token, tokensIn], S - 1n)
+    check('quoteSell == model (both fees on the gross, rounded up)', { usdcOut, platformFee, creatorFee }, pick(m, ['usdcOut', 'platformFee', 'creatorFee']))
+    check('Trade == model (usdcAmount is gross; sells pay no surcharge)', eventsOf<TradeEvent>(sell.receipt, LP, ABI.pad, 'Trade').map((t) => pick(t, ['trader', 'isBuy', 'usdcAmount', 'tokenAmount', 'platformFee', 'creatorFee', 'snipeFee', 'virtualUsdc', 'virtualTokens'])), [{
+      trader: me, isBuy: false, usdcAmount: m.gross, tokenAmount: tokensIn, platformFee: m.platformFee, creatorFee: m.creatorFee, snipeFee: 0n,
+      virtualUsdc: c0.virtualUsdc - m.gross, virtualTokens: c0.virtualTokens + tokensIn,
+    }])
+    const x = s.symbol
+    await books('curve sell', sell.receipt, {
+      'usdc:launchpad': -m.usdcOut, 'usdc:burner': m.usdcOut, 'lp.pendingFees': m.platformFee, [`lp.creator:${x}`]: m.creatorFee,
+      [`curve.vU:${x}`]: -m.gross, [`curve.vT:${x}`]: tokensIn, [`curve.sold:${x}`]: -tokensIn, [`tok.launchpad:${x}`]: tokensIn, [`tok.burner:${x}`]: -tokensIn,
+    })
+    if (first) {
+      await expectRevert('a curve sell past its deadline', LP, ABI.pad, 'sell', [token, E18, 0n, me, (await timeOf(S)) - 1n], 'Expired', S)
+      await expectRevert('a curve sell of more than the curve sold', LP, ABI.pad, 'sell', [token, c0.tokensSold + 1n, 0n, me, (await timeOf(S)) + 3600n], 'ExceedsSold', S)
+      await expectRevert('a curve buy with minTokensOut above the quote', LP, ABI.pad, 'buy', [token, usd(1), E18 * 10n ** 12n, me, (await timeOf(S)) + 3600n], 'SlippageExceeded', S)
+    }
+  })
+}
+
+/** The sell-out buy (graduation, V14-SPEC §4), and right after it, inside the pool's 20-block window: a router buy (pays
+ *  the surcharge, held by the hook), a router sell (pays none); for the scenario tokens an exact-out buy through the
+ *  RawSwapper (the surcharge on a net amount), a dump that takes the price under the bid's top, and a `lock` that then
+ *  places nothing. Everything is checked afterwards at the blocks the transactions landed in. */
+async function graduate(k: Kind, first: boolean) {
+  const id = `graduate:${k}`
+  await step(id, async () => {
+    const s = spec(k)
+    const token = tokenOf(k)
+    const feature = progress.features.includes(k)
+    await waitForBlock(BigInt(progress.tokenBlocks[k] as string) + SNIPE_BLOCKS)
+    const sellOut = await tx(id, `buy ${s.symbol} out (graduation)`, LP, ABI.pad, 'buy', async () => {
+      const [out, , , , spent, grad] = await simulate<readonly [bigint, bigint, bigint, bigint, bigint, boolean]>(LP, ABI.pad, 'quoteBuy', [token, A.graduateOffer], head)
+      if (!grad) throw new Error(`${s.symbol}: ${fmt(A.graduateOffer)} would not sell out the curve`)
+      note(`the sell-out buy will pull ${fmt(spent)} rUSDC`)
+      return [token, A.graduateOffer, out, me, await deadline()]
+    }, A.graduateOffer)
+    const wBuy = await tx(id, `buy ${s.symbol} in the pool's window (router)`, ROUTER, ABI.router, 'buy', async () => {
+      const out = await simulate<bigint>(ROUTER, ABI.router, 'quoteBuy', [token, A.poolWindowBuy], head)
+      return [token, A.poolWindowBuy, out, me, await deadline()]
+    })
+    const wSell = await tx(id, `sell ${s.symbol} in the pool's window (router)`, ROUTER, ABI.router, 'sell', async () => {
+      const out = await simulate<bigint>(ROUTER, ABI.router, 'quoteSell', [token, A.poolWindowSell], head)
+      return [token, A.poolWindowSell, out, me, await deadline()]
+    })
+    let rawOut: Sent | undefined
+    let dump: Sent | undefined
+    let lock0: Sent | undefined
+    if (feature) {
+      const usdcIs0 = progress.planned[k]?.usdcIs0 as boolean
+      rawOut = await tx(id, `exact-out buy of ${fmt18(A.rawWindowOutBuy)} ${s.symbol} in the window (RawSwapper)`, RAW(), ABI.raw, 'swap', [
+        poolKeyOf(token), { zeroForOne: usdcIs0, amountSpecified: A.rawWindowOutBuy, sqrtPriceLimitX96: LIMIT(usdcIs0) },
+      ])
+      dump = await tx(id, `dump ${fmt18(A.dump)} ${s.symbol} under the bid's top (router)`, ROUTER, ABI.router, 'sell', async () => [token, A.dump, 0n, me, await deadline()])
+      lock0 = await tx(id, `lock ${s.symbol} while the price is under the bid's top`, HOOK, ABI.hook, 'lock', [token])
+    }
+
+    await checkGraduation(k, sellOut, first)
+    const wb = await checkPoolTrade(`window buy (router)`, k, wBuy, 'buy', 'in', wBuy.args[1] as bigint, 'burner')
+    progress.notes[`${id}:poolWindowBps`] = wb.snipeBps.toString()
+    if (wb.snipeBps === 0n) note("the pool's window buy landed after the window (surcharge 0)")
+    const quoted = await rd<bigint>(ROUTER, ABI.router, 'quoteBuy', [token, wBuy.args[1]], wBuy.receipt.blockNumber - 1n)
+    const rec = poolRec(k)
+    const q0 = modelPoolTrade(await poolAt('quote model', k, wBuy.receipt.blockNumber - 1n), rec.usdcIs0, BigInt(rec.creatorBps), snipeBpsAt(BigInt(rec.openBlock), wBuy.receipt.blockNumber - 1n, BigInt(rec.creatorBps)), 'buy', 'in', wBuy.args[1] as bigint)
+    check("window buy: router.quoteBuy at the block before == model with that block's surcharge", quoted, q0.received)
+    const sellModel = await checkPoolTrade('window sell (router): pays no surcharge', k, wSell, 'sell', 'in', wSell.args[1] as bigint, 'burner')
+    check('window sell: quote at the block before == fill (a sell has no surcharge to change)', await rd<bigint>(ROUTER, ABI.router, 'quoteSell', [token, wSell.args[1]], wSell.receipt.blockNumber - 1n), sellModel.received)
+    if (rawOut) await checkPoolTrade('exact-out buy in the window (RawSwapper)', k, rawOut, 'buy', 'out', A.rawWindowOutBuy, 'raw')
+    if (dump && lock0) {
+      const d = await checkPoolTrade('dump (router)', k, dump, 'sell', 'in', A.dump, 'burner')
+      const r = bidRange(rec.usdcIs0, rec.graduationTick, d.swap.tick)
+      checkThat("the dump took the price under the bid's top", !r.ok, `tick ${d.swap.tick}, bid top at tick ${rec.usdcIs0 ? r.lower : r.upper}`)
+      await checkLock('lock under the top', k, lock0)
+    }
+  })
+}
+
+/** Everything the sell-out buy does (V14-SPEC §4), against the model: the curve's exact fill, the pool opened at the
+ *  price where one full-range position takes both amounts, that position, the tokens burned, the graduation bid at the
+ *  anchored range, and the books (the launchpad's float leaves, the hook keeps only claims). */
+async function checkGraduation(k: Kind, sent: Sent, first: boolean) {
+  const s = spec(k)
+  const x = s.symbol
+  const token = tokenOf(k)
+  const { receipt, args } = sent
+  const B = receipt.blockNumber
+  const B0 = B - 1n
+  const usdcIn = args[1] as bigint
+  const c0 = await curveAt(token, B0)
+  const bps = snipeBpsAt(c0.createdBlock, B, s.feeBps)
+  const m = modelCurveBuy(c0, usdcIn, s.feeBps, bps)
+  const remaining = CURVE_SUPPLY - c0.tokensSold
+  check('the sell-out buy: all remaining tokens, graduates', [m.tokensOut, m.graduates], [remaining, true])
+  const [qOut, qPlat, qCreator, qSnipe, qSpent, qGrad] = await rd<readonly [bigint, bigint, bigint, bigint, bigint, boolean]>(LP, ABI.pad, 'quoteBuy', [token, usdcIn], B0)
+  check('quoteBuy at the block before == model (exact fill)', { qOut, qPlat, qCreator, qSnipe, qSpent, qGrad }, {
+    qOut: m.tokensOut, qPlat: m.platformFee, qCreator: m.creatorFee, qSnipe: m.snipeFee, qSpent: m.usdcSpent, qGrad: true,
+  })
+  checkThat('pulls only what the last tokens cost', m.usdcSpent < usdcIn, `${fmt(m.usdcSpent)} of ${fmt(usdcIn)} offered`)
+  check('Trade == model', eventsOf<TradeEvent>(receipt, LP, ABI.pad, 'Trade').map((t) => pick(t, ['trader', 'isBuy', 'usdcAmount', 'tokenAmount', 'platformFee', 'creatorFee', 'snipeFee', 'virtualUsdc', 'virtualTokens'])), [{
+    trader: me, isBuy: true, usdcAmount: m.usdcSpent, tokenAmount: remaining, platformFee: m.platformFee, creatorFee: m.creatorFee, snipeFee: m.snipeFee,
+    virtualUsdc: c0.virtualUsdc + m.net, virtualTokens: c0.virtualTokens - remaining,
+  }])
+  const usdcSeeded = c0.virtualUsdc + m.net - VIRTUAL_USDC_0
+  const snipeBefore = await rd<bigint>(LP, ABI.pad, 'pendingSnipe', [token], B0)
+  const lockAmount = snipeBefore + m.snipeFee
+  const usdcIs0 = BigInt(USDC) < BigInt(token)
+  const g = modelGraduation(usdcIs0, usdcSeeded, lockAmount)
+  const poolId = poolIdOf(token)
+  const key = poolKeyOf(token)
+  note(`${x} graduated: ${fmt(usdcSeeded)} rUSDC × 200M tokens at tick ${g.tick}; ${fmt(lockAmount)} rUSDC of curve surcharge to lock; ${fmt18(g.burned)} tokens left over`)
+  check('Graduated == model', eventsOf(receipt, LP, ABI.pad, 'Graduated'), [{ token, poolId, usdcSeeded, tokensSeeded: POOL_SUPPLY, liquidityLocked: g.liquidity, snipeLocked: lockAmount }])
+  check('PoolOpened == model', eventsOf(receipt, HOOK, ABI.hook, 'PoolOpened'), [{ token, poolId, sqrtPriceX96: g.sqrtPrice, tokensAdded: g.tokensUsed, usdcAdded: g.usdcUsed, liquidity: g.liquidity, open: s.open }])
+  check('Uniswap Initialize == model (sorted currencies, fee 0, spacing 200, the hook, the price, its tick)', eventsOf(receipt, POOL_MANAGER, ABI.pm, 'Initialize'), [{
+    id: poolId, currency0: key.currency0, currency1: key.currency1, fee: 0, tickSpacing: TICK_SPACING, hooks: HOOK, sqrtPriceX96: g.sqrtPrice, tick: g.tick,
+  }])
+  const modify = eventsOf<ModifyEvent>(receipt, POOL_MANAGER, ABI.pm, 'ModifyLiquidity')
+  const wantModify: ModifyEvent[] = [{ id: poolId, sender: HOOK, tickLower: MIN_T, tickUpper: MAX_T, liquidityDelta: g.liquidity, salt: pad('0x0', { size: 32 }) }]
+  if (g.bid) wantModify.push({ id: poolId, sender: HOOK, tickLower: g.bid.lower, tickUpper: g.bid.upper, liquidityDelta: g.bid.liquidity, salt: pad(toHex(1), { size: 32 }) })
+  check('Uniswap ModifyLiquidity: the full-range position (salt 0), then the graduation bid (salt 1)', modify, wantModify)
+  const [sqrtP, tick, protocolFee, lpFee] = await rd<readonly [bigint, number, number, number]>(STATE_VIEW, ABI.stateView, 'getSlot0', [poolId], B)
+  check('StateView.getSlot0: the pool opened at the model price, no protocol or LP fee', { sqrtP, tick, protocolFee, lpFee }, { sqrtP: g.sqrtPrice, tick: g.tick, protocolFee: 0, lpFee: 0 })
+  // The curve's final price, virtualUsdc / virtualTokens, against the pool's (USDC per token, both in base units).
+  const vU = c0.virtualUsdc + m.net
+  const vT = c0.virtualTokens - remaining
+  const Q192 = 1n << 192n
+  const poolScaled = usdcIs0 ? (Q192 * 10n ** 30n) / (sqrtP * sqrtP) : (sqrtP * sqrtP * 10n ** 30n) / Q192
+  const curveScaled = (vU * 10n ** 30n) / vT
+  const ppb = ((poolScaled > curveScaled ? poolScaled - curveScaled : curveScaled - poolScaled) * 10n ** 9n) / curveScaled
+  checkThat("the pool opened at the curve's final price (virtualUsdc / virtualTokens), within 1 ppm", ppb < 1000n, `${ppb} parts per billion apart`)
+  check('StateView.getLiquidity == the full-range liquidity (the bid is out of range)', await rd<bigint>(STATE_VIEW, ABI.stateView, 'getLiquidity', [poolId], B), g.liquidity)
+  const fullRange = await rd<readonly [bigint, bigint, bigint]>(STATE_VIEW, ABI.stateView, 'getPositionInfo', [poolId, HOOK, MIN_T, MAX_T, pad('0x0', { size: 32 })], B)
+  check("the hook's full-range position (owner the hook, salt 0): liquidity, no fees", fullRange, [g.liquidity, 0n, 0n])
+  check('the leftover tokens were burned (Transfer to 0 from the hook)', eventsOf<{ from: Address; to: Address; value: bigint }>(receipt, token, ABI.token, 'Transfer').filter((t) => getAddress(t.to) === zeroAddress), g.burned > 0n ? [{ from: HOOK, to: zeroAddress, value: g.burned }] : [])
+  if (g.bid) {
+    check('BidLocked == model: the anchored range from the graduation tick', eventsOf(receipt, HOOK, ABI.hook, 'BidLocked'), [{ token, usdc: g.bid.used, liquidity: g.bid.liquidity, tickLower: g.bid.lower, tickUpper: g.bid.upper }])
+    const bidPos = await rd<readonly [bigint, bigint, bigint]>(STATE_VIEW, ABI.stateView, 'getPositionInfo', [poolId, HOOK, g.bid.lower, g.bid.upper, pad(toHex(1), { size: 32 })], B)
+    check('the graduation bid position (owner the hook, salt 1)', bidPos, [g.bid.liquidity, 0n, 0n])
+    const topPrice = Math.pow(1.0001, usdcIs0 ? -g.bid.lower : g.bid.upper)
+    const gradPrice = Math.pow(1.0001, usdcIs0 ? -g.tick : g.tick)
+    checkThat("the bid's top is half the graduation price (V14-SPEC §5)", Math.abs(topPrice / gradPrice - 0.5) < 0.02, `${(topPrice / gradPrice).toFixed(4)} of it, ${BID_SPAN_TICKS} ticks deep`)
+  } else {
+    check('no graduation bid: nothing to lock bought any liquidity', eventsOf(receipt, HOOK, ABI.hook, 'BidLocked'), [])
+  }
+  check("the hook's claims: minted the USDC to lock, burned what the bid took", claimMoves(receipt), [...(g.toLock > 0n ? [g.toLock] : []), ...(g.bid ? [-g.bid.used] : [])])
+  const launch = await rd<readonly [Hex, Record<string, unknown>]>(HOOK, ABI.hook, 'launchOf', [token], B)
+  check('hook.launchOf(token)', [launch[0], launch[1]], [poolId, { token, usdcIs0, open: s.open, creatorFeeBps: Number(s.feeBps), openBlock: B, graduationTick: g.tick }])
+  check("hook.snipeBpsOf in the graduation block: the pool's window opens at 90% (capped)", await rd<bigint>(HOOK, ABI.hook, 'snipeBpsOf', [token], B), snipeBpsAt(B, B, s.feeBps))
+  check('isGraduated, token.graduated, pairOf == the PoolManager', [await rd(LP, ABI.pad, 'isGraduated', [token], B), await rd(token, ABI.token, 'graduated', [], B), getAddress(await rd<string>(LP, ABI.pad, 'pairOf', [token], B))], [true, true, POOL_MANAGER])
+
+  // Record the pool and its positions (the model), then the books.
+  progress.pools[k] = { poolId, usdcIs0, open: s.open, creatorBps: s.feeBps.toString(), openBlock: B.toString(), graduationTick: g.tick, changes: [] }
+  recordChange(k, { id: `${receipt.transactionHash}:full`, owner: HOOK, lower: MIN_T, upper: MAX_T, salt: pad('0x0', { size: 32 }), block: B.toString(), delta: g.liquidity.toString() })
+  if (g.bid) recordChange(k, { id: `${receipt.transactionHash}:bid`, owner: HOOK, lower: g.bid.lower, upper: g.bid.upper, salt: pad(toHex(1), { size: 32 }), block: B.toString(), delta: g.bid.liquidity.toString() })
+  const lockHeld = g.toLock - (g.bid?.used ?? 0n)
+  await books(`graduate ${x}`, receipt, {
+    'usdc:launchpad': m.usdcSpent - usdcSeeded - lockAmount, 'usdc:burner': -m.usdcSpent, 'usdc:poolManager': usdcSeeded + lockAmount,
+    'lp.pendingFees': m.platformFee, [`lp.creator:${x}`]: m.creatorFee, [`lp.snipe:${x}`]: -snipeBefore,
+    [`curve.vU:${x}`]: m.net, [`curve.vT:${x}`]: -remaining, [`curve.sold:${x}`]: remaining, [`curve.grad:${x}`]: 1n,
+    [`tok.launchpad:${x}`]: -(remaining + POOL_SUPPLY), [`tok.burner:${x}`]: remaining, [`tok.poolManager:${x}`]: g.tokensUsed, [`tok.supply:${x}`]: -g.burned,
+    'hook.claims': lockHeld, [`hook.lockHeld:${x}`]: lockHeld, [`hook.bids:${x}`]: g.bid ? 1n : 0n,
+    [`pool.sqrtP:${x}`]: g.sqrtPrice, [`pool.tick:${x}`]: BigInt(g.tick), [`pool.liquidity:${x}`]: g.liquidity,
+  })
+  if (first) {
+    await expectRevert('a curve buy after graduation', LP, ABI.pad, 'buy', [token, usd(1), 0n, me, (await timeOf(B)) + 3600n], 'CurveGraduated', B)
+    await expectRevert('a curve sell after graduation', LP, ABI.pad, 'sell', [token, E18, 0n, me, (await timeOf(B)) + 3600n], 'CurveGraduated', B)
+    await expectRevert('launchpad.quoteBuy after graduation', LP, ABI.pad, 'quoteBuy', [token, usd(1)], 'CurveGraduated', B)
+    await expectRevert('initializing the pool again', POOL_MANAGER, ABI.pm, 'initialize', [key, g.sqrtPrice], 'WrappedError(hook: PoolCreationRestricted)', B)
+    await expectRevert('a router buy past its deadline', ROUTER, ABI.router, 'buy', [token, usd(1), 0n, me, (await timeOf(B)) - 1n], 'Expired', B)
+  }
+}
+
+/** `lock` at its block: a fresh position (salt = the new bidCount) at the anchored range, paid by burning claims, the
+ *  price untouched; or, while the price is under the bid's top, nothing at all and the claims wait (V14-SPEC §5). */
+async function checkLock(what: string, k: Kind, sent: Sent) {
+  const { receipt } = sent
+  const B = receipt.blockNumber
+  const B0 = B - 1n
+  const rec = poolRec(k)
+  const x = sym(k)
+  const token = tokenOf(k)
+  const held = await rd<bigint>(HOOK, ABI.hook, 'lockHeld', [token], B0)
+  const count = await rd<bigint>(HOOK, ABI.hook, 'bidCount', [token], B0)
+  checkThat(`${what}: surcharge was waiting to be locked`, held > 0n, `${fmt(held)} rUSDC`)
+  const pool = await poolAt(what, k, B0)
+  const bid = modelBid(pool, rec.usdcIs0, rec.graduationTick, held)
+  check(`${what}: lock() at the block before returns the model's liquidity`, await simulate<bigint>(HOOK, ABI.hook, 'lock', [token], B0), bid?.liquidity ?? 0n)
+  if (!bid) {
+    check(`${what}: no bid, no position, nothing burned`, [eventsOf(receipt, HOOK, ABI.hook, 'BidLocked'), eventsOf(receipt, POOL_MANAGER, ABI.pm, 'ModifyLiquidity'), claimMoves(receipt)], [[], [], []])
+    await books(what, receipt, {})
+    return
+  }
+  const salt = pad(toHex(count + 1n), { size: 32 })
+  check(`${what}: BidLocked == model (the anchored range)`, eventsOf(receipt, HOOK, ABI.hook, 'BidLocked'), [{ token, usdc: bid.used, liquidity: bid.liquidity, tickLower: bid.lower, tickUpper: bid.upper }])
+  check(`${what}: Uniswap ModifyLiquidity: a fresh position, salt ${count + 1n}`, eventsOf(receipt, POOL_MANAGER, ABI.pm, 'ModifyLiquidity'), [{ id: rec.poolId, sender: HOOK, tickLower: bid.lower, tickUpper: bid.upper, liquidityDelta: bid.liquidity, salt }])
+  check(`${what}: paid by burning the hook's claims`, claimMoves(receipt), [-bid.used])
+  check(`${what}: the new position (owner the hook, salt ${count + 1n})`, await rd(STATE_VIEW, ABI.stateView, 'getPositionInfo', [rec.poolId, HOOK, bid.lower, bid.upper, salt], B), [bid.liquidity, 0n, 0n])
+  recordChange(k, { id: `${receipt.transactionHash}:bid`, owner: HOOK, lower: bid.lower, upper: bid.upper, salt, block: B.toString(), delta: bid.liquidity.toString() })
+  // A bid sits wholly on the USDC side of the price, so the pool's active liquidity and price do not move.
+  await books(what, receipt, { 'hook.claims': -bid.used, [`hook.lockHeld:${x}`]: -bid.used, [`hook.bids:${x}`]: 1n })
+}
+
+async function lockStep(k: Kind) {
+  const id = `lock:${k}`
+  await step(id, async () => {
+    const token = tokenOf(k)
+    const held = await rd<bigint>(HOOK, ABI.hook, 'lockHeld', [token], head)
+    if (held === 0n && !minedTx(id, `lock ${sym(k)}`)) {
+      await expectRevert(`lock ${sym(k)} with nothing held`, HOOK, ABI.hook, 'lock', [token], 'NothingToLock', head)
+      return
+    }
+    await checkLock(`lock ${sym(k)}`, k, await tx(id, `lock ${sym(k)}`, HOOK, ABI.hook, 'lock', [token]))
+  })
+}
+
+/** After the dump: a buy (after the pool's window) back above the bid's top, then `lock` places the waiting surcharge. */
+async function buyback(k: Kind) {
+  const id = `buyback:${k}`
+  await step(id, async () => {
+    const s = spec(k)
+    const token = tokenOf(k)
+    const rec = poolRec(k)
+    await waitForBlock(BigInt(rec.openBlock) + SNIPE_BLOCKS)
+    const back = await tx(id, `buy ${s.symbol} back above the bid's top (router)`, ROUTER, ABI.router, 'buy', async () => {
+      // Twice what the dump paid out, as the forge test does: enough to lift the price back over the top.
+      const dumped = progress.txs.find((t) => t.step === `graduate:${k}` && t.what.startsWith('dump'))
+      const r = dumped ? await retry(() => pub.getTransactionReceipt({ hash: dumped.hash })) : undefined
+      const out = r ? eventsOf<PoolTradeEvent>(r, HOOK, ABI.hook, 'PoolTrade')[0]?.usdcAmount ?? usd(20_000) : usd(20_000)
+      return [token, out * 2n, 0n, me, await deadline()]
+    })
+    const m = await checkPoolTrade('buy back (router, after the window: no surcharge)', k, back, 'buy', 'in', back.args[1] as bigint, 'burner')
+    check('buy back: no surcharge', m.fees.snipe, 0n)
+    const r = bidRange(rec.usdcIs0, rec.graduationTick, m.swap.tick)
+    checkThat("the price is back above the bid's top", r.ok, `tick ${m.swap.tick}, top at tick ${rec.usdcIs0 ? r.lower : r.upper}`)
+    await checkLock('lock above the top', k, await tx(id, `lock ${s.symbol} above the top`, HOOK, ABI.hook, 'lock', [token]))
+  })
+}
+
+/** After the pool's window: a router buy and sell, quote == fill both ways. */
+async function poolTrades(k: Kind) {
+  const id = `pool:${k}`
+  await step(id, async () => {
+    const s = spec(k)
+    const token = tokenOf(k)
+    await waitForBlock(BigInt(poolRec(k).openBlock) + SNIPE_BLOCKS)
+    const buy = await tx(id, `buy ${s.symbol} (router)`, ROUTER, ABI.router, 'buy', async () => [token, A.poolBuy, await simulate<bigint>(ROUTER, ABI.router, 'quoteBuy', [token, A.poolBuy], head), me, await deadline()])
+    const q = await rd<bigint>(ROUTER, ABI.router, 'quoteBuy', [token, buy.args[1]], buy.receipt.blockNumber - 1n)
+    const mb = await checkPoolTrade('router buy', k, buy, 'buy', 'in', buy.args[1] as bigint, 'burner')
+    check('router buy: quote at the block before == fill == model', [q, mb.received], [mb.received, mb.received])
+    const sell = await tx(id, `sell ${s.symbol} (router)`, ROUTER, ABI.router, 'sell', async () => [token, A.poolSell, await simulate<bigint>(ROUTER, ABI.router, 'quoteSell', [token, A.poolSell], head), me, await deadline()])
+    const qs = await rd<bigint>(ROUTER, ABI.router, 'quoteSell', [token, sell.args[1]], sell.receipt.blockNumber - 1n)
+    const ms = await checkPoolTrade('router sell', k, sell, 'sell', 'in', sell.args[1] as bigint, 'burner')
+    check('router sell: quote at the block before == fill == model; fees on the gross', [qs, ms.fees.platform, ms.fees.creator], [ms.received, divCeil(ms.gross * FEE_BPS, BPS), divCeil(ms.gross * BigInt(poolRec(k).creatorBps), BPS)])
+    await expectRevert('a router buy with minTokensOut above the quote', ROUTER, ABI.router, 'buy', [token, usd(1), E18 * 10n ** 12n, me, (await timeOf(sell.receipt.blockNumber)) + 3600n], 'SlippageExceeded', sell.receipt.blockNumber)
+  })
+}
+
+/** Launch tokens for the RawSwapper's exact-out sells and its outside liquidity. */
+async function fundRaw() {
+  await step('fund:raw', async () => {
+    const kinds = [...new Set([...progress.features, progress.openLp].filter(Boolean) as Kind[])]
+    for (const k of kinds) {
+      const what = `transfer ${fmt18(A.rawTokens)} ${sym(k)} to the RawSwapper`
+      const { receipt } = await tx('fund:raw', what, tokenOf(k), ABI.token, 'transfer', [RAW(), A.rawTokens])
+      await books(what, receipt, { [`tok.burner:${sym(k)}`]: -A.rawTokens, [`tok.raw:${sym(k)}`]: A.rawTokens })
+    }
+  })
+}
+
+/** Exact-out swaps through the RawSwapper after the window, and the swaps and donations the hook refuses. */
+async function rawSwaps(k: Kind) {
+  const id = `raw:${k}`
+  await step(id, async () => {
+    const s = spec(k)
+    const token = tokenOf(k)
+    const rec = poolRec(k)
+    const key = poolKeyOf(token)
+    const buy = await tx(id, `exact-out buy of ${fmt18(A.rawOutBuy)} ${s.symbol} (RawSwapper)`, RAW(), ABI.raw, 'swap', [key, { zeroForOne: rec.usdcIs0, amountSpecified: A.rawOutBuy, sqrtPriceLimitX96: LIMIT(rec.usdcIs0) }])
+    const mb = await checkPoolTrade('exact-out buy', k, buy, 'buy', 'out', A.rawOutBuy, 'raw')
+    check('exact-out buy: exactly the tokens asked for; fees on the net on top', [mb.received, mb.gross - mb.fees.total], [A.rawOutBuy, -(rec.usdcIs0 ? mb.swap.amount0 : mb.swap.amount1)])
+    const sell = await tx(id, `exact-out sell for ${fmt(A.rawOutSellUsdc)} rUSDC of ${s.symbol} (RawSwapper)`, RAW(), ABI.raw, 'swap', [key, { zeroForOne: !rec.usdcIs0, amountSpecified: A.rawOutSellUsdc, sqrtPriceLimitX96: LIMIT(!rec.usdcIs0) }])
+    const ms = await checkPoolTrade('exact-out sell', k, sell, 'sell', 'out', A.rawOutSellUsdc, 'raw')
+    check('exact-out sell: exactly the USDC asked for; the pool paid it plus the fees', [ms.received, ms.gross], [A.rawOutSellUsdc, A.rawOutSellUsdc + ms.fees.total])
+    const B = sell.receipt.blockNumber
+    await expectRevert('a donation of the token', RAW(), ABI.raw, 'donate', [key, rec.usdcIs0 ? 0n : E18, rec.usdcIs0 ? E18 : 0n], 'WrappedError(hook: DonationsRefused)', B)
+    await expectRevert(`a donation of ${U}`, RAW(), ABI.raw, 'donate', [key, rec.usdcIs0 ? usd(1) : 0n, rec.usdcIs0 ? 0n : usd(1)], 'WrappedError(hook: DonationsRefused)', B)
+    const [sqrtP] = await rd<readonly [bigint]>(STATE_VIEW, ABI.stateView, 'getSlot0', [rec.poolId], B)
+    await expectRevert('an exact-in buy a price limit stops early (fees fixed on the trader\'s USDC)', RAW(), ABI.raw, 'swap', [key, { zeroForOne: rec.usdcIs0, amountSpecified: -usd(1000), sqrtPriceLimitX96: rec.usdcIs0 ? sqrtP - 1n : sqrtP + 1n }], 'WrappedError(hook: PartialFill)', B)
+  })
+}
+
+/** Outside liquidity (V14-SPEC §6): refused by a closed pool, accepted by an open one, where the locked positions stay
+ *  put, trades still pay every fee, and the outside LP can take its own liquidity back out. */
+async function outsideLiquidity() {
+  const k = progress.openLp
+  const closed = progress.closedLp
+  if (!k || !closed) return
+  const id = 'lp'
+  await step(id, async () => {
+    const s = spec(k)
+    const token = tokenOf(k)
+    const rec = poolRec(k)
+    const key = poolKeyOf(token)
+    const closedKey = poolKeyOf(tokenOf(closed))
+    const cTick = floorTick((await rd<readonly [bigint, number]>(STATE_VIEW, ABI.stateView, 'getSlot0', [poolRec(closed).poolId], head))[1])
+    await expectRevert(`outside liquidity in the closed ${sym(closed)} pool`, RAW(), ABI.raw, 'addLiquidity', [closedKey, { tickLower: cTick - 2000, tickUpper: cTick + 2200, liquidityDelta: 10n ** 12n, salt: pad('0x0', { size: 32 }) }], 'WrappedError(hook: ClosedPool)', head)
+
+    const add = await tx(id, `add outside liquidity to the open ${s.symbol} pool (RawSwapper)`, RAW(), ABI.raw, 'addLiquidity', async () => {
+      const [sqrtP, tick] = await rd<readonly [bigint, number]>(STATE_VIEW, ABI.stateView, 'getSlot0', [rec.poolId], head)
+      const lower = floorTick(tick) - 2000
+      const upper = floorTick(tick) + 2200
+      const [a0, a1] = rec.usdcIs0 ? [A.lpUsdc, A.lpTokens] : [A.lpTokens, A.lpUsdc]
+      const liquidity = V4.liquidityForAmounts(sqrtP, V4.sqrtAtTick(lower), V4.sqrtAtTick(upper), a0, a1)
+      return [key, { tickLower: lower, tickUpper: upper, liquidityDelta: liquidity, salt: pad('0x0', { size: 32 }) }]
+    })
+    const p = add.args[1] as { tickLower: number; tickUpper: number; liquidityDelta: bigint; salt: Hex }
+    await checkLiquidity('outside add', k, add, p.tickLower, p.tickUpper, p.liquidityDelta)
+    const buy = await tx(id, `buy ${s.symbol} through the outside liquidity (router)`, ROUTER, ABI.router, 'buy', async () => [token, A.poolBuy, 0n, me, await deadline()])
+    const mb = await checkPoolTrade('router buy with outside liquidity in range', k, buy, 'buy', 'in', A.poolBuy, 'burner')
+    check('the trade still pays the platform and creator fees', [mb.fees.platform, mb.fees.creator], [divCeil(A.poolBuy * FEE_BPS, BPS), divCeil(A.poolBuy * s.feeBps, BPS)])
+    const remove = await tx(id, `remove half the outside liquidity (RawSwapper)`, RAW(), ABI.raw, 'addLiquidity', [key, { tickLower: p.tickLower, tickUpper: p.tickUpper, liquidityDelta: -(p.liquidityDelta / 2n), salt: p.salt }])
+    await checkLiquidity('outside remove', k, remove, p.tickLower, p.tickUpper, -(p.liquidityDelta / 2n))
+  })
+}
+async function checkLiquidity(what: string, k: Kind, sent: Sent, lower: number, upper: number, delta: bigint) {
+  const { receipt } = sent
+  const B = receipt.blockNumber
+  const rec = poolRec(k)
+  const x = sym(k)
+  const pool = await poolAt(what, k, B - 1n)
+  const before = pool.liquidity
+  const d = V4.modifyLiquidity(pool, lower, upper, delta)
+  const [usdcDelta, tokDelta] = rec.usdcIs0 ? [d.amount0, d.amount1] : [d.amount1, d.amount0]
+  const salt = pad('0x0', { size: 32 })
+  check(`${what}: Uniswap ModifyLiquidity (owner the RawSwapper)`, eventsOf<ModifyEvent>(receipt, POOL_MANAGER, ABI.pm, 'ModifyLiquidity'), [{ id: rec.poolId, sender: RAW(), tickLower: lower, tickUpper: upper, liquidityDelta: delta, salt }])
+  recordChange(k, { id: `${receipt.transactionHash}:lp`, owner: RAW(), lower, upper, salt, block: B.toString(), delta: delta.toString() })
+  const liq = positionsAt(k, B).find((p) => p.owner === RAW())?.liquidity ?? 0n
+  check(`${what}: the RawSwapper's position`, (await rd<readonly [bigint]>(STATE_VIEW, ABI.stateView, 'getPositionInfo', [rec.poolId, RAW(), lower, upper, salt], B))[0], liq)
+  note(`${what}: ${fmt(usdcDelta < 0n ? -usdcDelta : usdcDelta)} rUSDC and ${fmt18(tokDelta < 0n ? -tokDelta : tokDelta)} ${x}`)
+  await books(what, receipt, {
+    'usdc:raw': usdcDelta, 'usdc:poolManager': -usdcDelta, [`tok.raw:${x}`]: tokDelta, [`tok.poolManager:${x}`]: -tokDelta, [`pool.liquidity:${x}`]: pool.liquidity - before,
+  })
+}
+
+// ── Fees ──────────────────────────────────────────────────────────────────────
+
+/** The release part of a sync or collection: FeesReleased and PoolFeesAccrued equal what the hook held at the block
+ *  before, and the claims burn by exactly that. Returns (platform, creator). */
+async function checkRelease(what: string, k: Kind, receipt: TransactionReceipt) {
+  const token = tokenOf(k)
+  const B0 = receipt.blockNumber - 1n
+  const p = await rd<bigint>(HOOK, ABI.hook, 'pendingPlatform', [token], B0)
+  const c = await rd<bigint>(HOOK, ABI.hook, 'pendingCreator', [token], B0)
+  const releases = eventsOf(receipt, HOOK, ABI.hook, 'FeesReleased').filter((e) => getAddress((e as { token: Address }).token) === token)
+  check(`${what}: FeesReleased and PoolFeesAccrued == what the hook held`, [releases, eventsOf(receipt, LP, ABI.pad, 'PoolFeesAccrued').filter((e) => getAddress((e as { token: Address }).token) === token)],
+    p + c > 0n ? [[{ token, platformFee: p, creatorFee: c }], [{ token, platformFee: p, creatorFee: c }]] : [[], []])
+  return { p, c }
+}
+
+async function syncOne(k: Kind) {
+  await step(`sync:${k}`, async () => {
+    const x = sym(k)
+    const { receipt } = await tx(`sync:${k}`, `syncPoolFees ${x}`, LP, ABI.pad, 'syncPoolFees', [tokenOf(k)])
+    const { p, c } = await checkRelease('syncPoolFees', k, receipt)
+    checkThat('there were pool fees to book', p + c > 0n, `${fmt(p)} platform, ${fmt(c)} creator`)
+    check("the hook's claims burned by exactly that", claimMoves(receipt), [-(p + c)])
+    await books(`syncPoolFees ${x}`, receipt, {
+      'usdc:launchpad': p + c, 'usdc:poolManager': -(p + c), 'lp.pendingFees': p, [`lp.creator:${x}`]: c, [`hook.platform:${x}`]: -p, [`hook.creator:${x}`]: -c, 'hook.claims': -(p + c),
+    })
+    await expectRevert('hook.release by anyone but the launchpad', HOOK, ABI.hook, 'release', [tokenOf(k)], 'OnlyLaunchpad', receipt.blockNumber)
+    check('a second sync right after books nothing', await simulate(LP, ABI.pad, 'syncPoolFees', [tokenOf(k)], receipt.blockNumber), [0n, 0n])
+  })
+}
+
+async function syncBatch(kinds: Kind[]) {
+  await step('syncBatch', async () => {
+    const { receipt } = await tx('syncBatch', `syncPoolFeesBatch ${kinds.map(sym).join(', ')}`, LP, ABI.pad, 'syncPoolFeesBatch', [kinds.map(tokenOf)])
+    const expected: Moves = { 'usdc:launchpad': 0n, 'usdc:poolManager': 0n, 'lp.pendingFees': 0n, 'hook.claims': 0n }
+    const burns: bigint[] = []
+    for (const k of kinds) {
+      const x = sym(k)
+      const { p, c } = await checkRelease(`batch: ${x}`, k, receipt)
+      if (p + c > 0n) burns.push(-(p + c))
+      expected['usdc:launchpad'] += p + c
+      expected['usdc:poolManager'] -= p + c
+      expected['lp.pendingFees'] += p
+      expected[`lp.creator:${x}`] = c
+      expected[`hook.platform:${x}`] = -p
+      expected[`hook.creator:${x}`] = -c
+      expected['hook.claims'] -= p + c
+    }
+    check("the hook's claims burned token by token", claimMoves(receipt), burns)
+    await books('syncPoolFeesBatch', receipt, expected)
+  })
+}
+
+/** collectCreatorFees (V13-SPEC §2.1): syncs the pool's fees first, then pays the token's plugin exactly what is booked. */
+async function collect(k: Kind) {
+  const id = `collect:${k}`
+  await step(id, async () => {
+    const s = spec(k)
+    const x = s.symbol
+    const token = tokenOf(k)
+    const { receipt } = await tx(id, `collectCreatorFees ${x}`, LP, ABI.pad, 'collectCreatorFees', [token])
+    const B = receipt.blockNumber
+    const B0 = B - 1n
+    const { p, c } = await checkRelease('collectCreatorFees syncs first', k, receipt)
+    const booked = await rd<bigint>(LP, ABI.pad, 'pendingCreatorFees', [token], B0)
+    const amount = booked + c
+    note(`${x}: ${fmt(booked)} booked (curve and synced pool fees) + ${fmt(c)} released now = ${fmt(amount)} to ${label(s.plugin)}`)
+    check('CreatorFeesCollected', eventsOf(receipt, LP, ABI.pad, 'CreatorFeesCollected'), amount > 0n ? [{ token, plugin: s.plugin, amount }] : [])
+    if (s.feeBps === 0n) check('a 0% creator fee collects nothing', amount, 0n)
+    else checkThat('there were creator fees to collect', amount > 0n, fmt(amount))
+    const expected: Moves = {
+      'usdc:launchpad': p + c - amount, 'usdc:poolManager': -(p + c), 'lp.pendingFees': p, [`lp.creator:${x}`]: -booked,
+      [`hook.platform:${x}`]: -p, [`hook.creator:${x}`]: -c, 'hook.claims': -(p + c),
+    }
+    if (REAL) {
+      expected['usdc:burner'] = amount // the actor is Run B's creator-fee destination
+    } else if (k === 'wallet' || k === 'zero') {
+      expected[`usdc:${k === 'wallet' ? 'creatorWallet' : 'zeroWallet'}`] = amount
+    } else if (k === 'split') {
+      check('Split: FeesReceived from the launchpad', eventsOf(receipt, SPLIT, ABI.split, 'FeesReceived'), [{ token, from: LP, amount }])
+      Object.assign(expected, { 'usdc:split': amount, [`split.received:${x}`]: amount })
+    } else if (k === 'holders') {
+      await holdersCredited('holders', receipt, token, LP, amount)
+      Object.assign(expected, { [`usdc:tok:${x}`]: amount, [`holders.distributed:${x}`]: amount, [`tok.distributed:${x}`]: amount })
+    } else {
+      const slices = [(amount * 5000n) / BPS, (amount * 3000n) / BPS]
+      slices.push(amount - slices[0] - slices[1])
+      check('Combo: previewSplit == 50/30/20, the last taking the remainder', await rd(COMBO, ABI.combo, 'previewSplit', [token, amount], B0), slices)
+      check('Combo: FeesForwarded', eventsOf(receipt, COMBO, ABI.combo, 'FeesForwarded'), [
+        { token, target: HOLDERS, amount: slices[0], viaHook: true }, { token, target: SPLIT, amount: slices[1], viaHook: true }, { token, target: COMBO_WALLET, amount: slices[2], viaHook: false },
+      ])
+      check('Combo → Split: FeesReceived from the Combo', eventsOf(receipt, SPLIT, ABI.split, 'FeesReceived'), [{ token, from: COMBO, amount: slices[1] }])
+      await holdersCredited('Combo → holders', receipt, token, COMBO, slices[0])
+      Object.assign(expected, {
+        [`usdc:tok:${x}`]: slices[0], [`holders.distributed:${x}`]: slices[0], [`tok.distributed:${x}`]: slices[0],
+        'usdc:split': slices[1], [`split.received:${x}`]: slices[1], 'usdc:comboWallet': slices[2],
+      })
+    }
+    await books(`collectCreatorFees ${x}`, receipt, expected)
+  })
+}
+
+async function releaseSplit() {
+  const token = tokenOf('split')
+  for (const [i, payee] of PAYEES.entries()) {
+    const id = `release:split:${i + 1}`
+    await step(id, async () => {
+      const { receipt } = await tx(id, `Split release to payee ${i + 1}`, SPLIT, ABI.split, 'release', [token, payee])
+      const B0 = receipt.blockNumber - 1n
+      const received = await rd<bigint>(SPLIT, ABI.split, 'totalReceived', [token], B0)
+      const paid = await rd<bigint>(SPLIT, ABI.split, 'released', [token, payee], B0)
+      const owed = (received * SHARES[i]) / 10n - paid
+      check(`payee ${i + 1}: releasable == totalReceived × ${SHARES[i]}/10 - released`, await rd<bigint>(SPLIT, ABI.split, 'releasable', [token, payee], B0), owed)
+      check('Released', eventsOf(receipt, SPLIT, ABI.split, 'Released'), [{ token, payee, amount: owed }])
+      await books(`release payee ${i + 1}`, receipt, { 'usdc:split': -owed, [`usdc:payee${i + 1}`]: owed, 'split.released:RSPL': owed })
+    })
+  }
+}
+
+// ── The dividend stream (LaunchTokenV14, V13-SPEC §3) ────────────────────────
+
+const storageAt = async (address: Address, slot: bigint, block: bigint): Promise<bigint> => {
+  const word = await retry(() => pub.getStorageAt({ address, slot: `0x${slot.toString(16).padStart(64, '0')}`, blockNumber: block }))
+  return word ? hexToBigInt(word) : 0n
+}
+async function streamAt(token: Address, block: bigint): Promise<TokenStream> {
+  const packed = await storageAt(token, SLOT.stream, block)
+  return {
+    perShare: await storageAt(token, SLOT.perShare, block),
+    rate: await storageAt(token, SLOT.rate, block),
+    eligible: packed & (2n ** 128n - 1n),
+    lastAccrual: (packed >> 128n) & (2n ** 64n - 1n),
+    end: packed >> 192n,
+  }
+}
+async function correctionOf(token: Address, holder: Address, block: bigint): Promise<bigint> {
+  const slot = hexToBigInt(keccak256(encodeAbiParameters([{ type: 'address' }, { type: 'uint256' }], [holder, SLOT.corrections])))
+  const raw = await storageAt(token, slot, block)
+  return raw >= 2n ** 255n ? raw - 2n ** 256n : raw
+}
+interface HolderView {
+  holder: Address
+  stream: TokenStream
+  balance: bigint
+  correction: bigint
+  claimed: bigint
+  claimable: bigint
+  undistributed: bigint
+  streamRate: bigint
+  streamEnd: bigint
+  lastAccrual: bigint
+  totalDistributed: bigint
+  time: bigint
+}
+async function holderAt(token: Address, holder: Address, block: bigint): Promise<HolderView> {
+  return {
+    holder,
+    stream: await streamAt(token, block),
+    balance: await rd<bigint>(token, ABI.token, 'balanceOf', [holder], block),
+    correction: await correctionOf(token, holder, block),
+    claimed: await rd<bigint>(token, ABI.token, 'claimed', [holder], block),
+    claimable: await rd<bigint>(token, ABI.token, 'claimable', [holder], block),
+    undistributed: await rd<bigint>(token, ABI.token, 'undistributed', [], block),
+    streamRate: await rd<bigint>(token, ABI.token, 'streamRate', [], block),
+    streamEnd: await rd<bigint>(token, ABI.token, 'streamEnd', [], block),
+    lastAccrual: await rd<bigint>(token, ABI.token, 'lastAccrual', [], block),
+    totalDistributed: await rd<bigint>(token, ABI.token, 'totalDistributed', [], block),
+    time: await timeOf(block),
+  }
+}
+function viewsMatchModel(what: string, v: HolderView) {
+  check(`${what}: claimable, undistributed, streamRate, streamEnd, lastAccrual == model of the stored stream`, {
+    claimable: v.claimable, undistributed: v.undistributed, streamRate: v.streamRate, streamEnd: v.streamEnd, lastAccrual: v.lastAccrual,
+  }, {
+    claimable: claimableAt(v.stream, v.time, v.balance, v.correction, v.claimed), undistributed: undistributedAt(v.stream, v.time),
+    streamRate: v.stream.rate / MAGNITUDE, streamEnd: v.stream.end, lastAccrual: v.stream.lastAccrual,
+  })
+}
+/** The eligible holders of a token here: the actor, and the RawSwapper while it holds some. */
+async function eligibleHolders(token: Address, block: bigint): Promise<Address[]> {
+  const list: Address[] = [me]
+  if (rawAt(block) && (await rd<bigint>(token, ABI.token, 'balanceOf', [RAW()], block)) > 0n) list.push(RAW())
+  return list
+}
+/** The Holders plugin receiving `amount` for `token`: it forwards all of it to the token's distribute, which streams it
+ *  over 24 hours; the token's stored stream moves exactly as the model says. */
+async function holdersCredited(what: string, receipt: TransactionReceipt, token: Address, from: Address, amount: bigint) {
+  const B = receipt.blockNumber
+  const now = await timeOf(B)
+  check(`${what}: FeesReceived, Distributed, DividendsDistributed`, [
+    eventsOf(receipt, HOLDERS, ABI.holders, 'FeesReceived'), eventsOf(receipt, HOLDERS, ABI.holders, 'Distributed'), eventsOf(receipt, token, ABI.token, 'DividendsDistributed'),
+  ], [[{ token, from, amount }], [{ token, amount }], [{ from: HOLDERS, amount }]])
+  const s0 = await streamAt(token, B - 1n)
+  const expected = distributeAt(s0, now, amount)
+  check(`${what}: the token's stream (per-share, rate, eligible, lastAccrual, end) == model`, await streamAt(token, B), expected)
+  if (s0.end === 0n) check(`${what}: a first stream runs exactly DRIP_PERIOD`, expected.end - now, DRIP_PERIOD)
+  for (const h of await eligibleHolders(token, B)) viewsMatchModel(`${what} (${label(h)})`, await holderAt(token, h, B))
+}
+/** Everyone eligible has earned everything the stream paid out: Σ (claimed + claimable) + undistributed ==
+ *  totalDistributed, less a unit or two of rounding per holder. */
+async function conservation(what: string, token: Address, block: bigint) {
+  const hs = await eligibleHolders(token, block)
+  const views = await Promise.all(hs.map((h) => holderAt(token, h, block)))
+  for (const v of views) viewsMatchModel(`${what} (${label(v.holder)})`, v)
+  const earned = views.reduce((s, v) => s + v.claimed + v.claimable, 0n)
+  const dust = views[0].totalDistributed - earned - views[0].undistributed
+  checkThat(`${what}: Σ (claimed + claimable) + undistributed == totalDistributed, within ${hs.length + 1} units`, dust >= 0n && dust <= BigInt(hs.length + 1), `${dust} unit(s) of dust over ${hs.length} holder(s)`)
+  check(`${what}: token ${U} == distributed - Σ claimed`, await rd<bigint>(USDC, ABI.erc20, 'balanceOf', [token], block), views[0].totalDistributed - views.reduce((s, v) => s + v.claimed, 0n))
+}
+
+async function sample() {
+  const kinds = KINDS.filter(usesHolders)
+  if (!kinds.length) return
+  await step('sample', async () => {
+    const b1 = maxOf(await latest(), head)
+    const first = new Map<Kind, HolderView>()
+    for (const k of kinds) first.set(k, await holderAt(tokenOf(k), me, b1))
+    note(`waiting ${SAMPLE_SECONDS} s for the streams to pay out`)
+    await sleep(SAMPLE_SECONDS * 1000)
+    const b2 = maxOf(await latest(), b1 + 1n)
+    for (const k of kinds) {
+      const v1 = first.get(k) as HolderView
+      const v2 = await holderAt(tokenOf(k), me, b2)
+      const dt = v2.time - v1.time
+      check(`${sym(k)}: nothing touched the token between the readings`, [v2.stream, v2.balance, v2.correction], [v1.stream, v1.balance, v1.correction])
+      viewsMatchModel(`${sym(k)} at t1`, v1)
+      viewsMatchModel(`${sym(k)} at t2 (${dt} s later)`, v2)
+      const grew = v2.claimable - v1.claimable
+      const approx = (v1.streamRate * dt * v1.balance) / v1.stream.eligible
+      checkThat(`${sym(k)}: the Holders stream accrues: claimable grows with time`, grew > 0n, `${fmt(v1.claimable)} → ${fmt(v2.claimable)} ${U} in ${dt} s`)
+      checkThat(`${sym(k)}: by ≈ streamRate × dt × share (within dt + 2 units)`, grew - approx <= dt + 2n && approx - grew <= dt + 2n, `${grew} vs ${approx}`)
+      checkThat(`${sym(k)}: undistributed never rises`, v2.undistributed <= v1.undistributed, `${fmt(v1.undistributed)} → ${fmt(v2.undistributed)}`)
+    }
+  })
+}
+
+async function claim(k: Kind) {
+  const id = `claim:${k}`
+  await step(id, async () => {
+    const token = tokenOf(k)
+    const x = sym(k)
+    const { receipt } = await tx(id, `claim ${x} dividends`, token, ABI.token, 'claim', [])
+    const B = receipt.blockNumber
+    const v0 = await holderAt(token, me, B - 1n)
+    const v1 = await holderAt(token, me, B)
+    const due = claimableAt(v0.stream, v1.time, v0.balance, v0.correction, v0.claimed)
+    viewsMatchModel('the block before the claim', v0)
+    check("DividendClaimed == claimable at the claim's block", eventsOf(receipt, token, ABI.token, 'DividendClaimed'), [{ holder: me, amount: due }])
+    checkThat('the claim pays > 0', due > 0n, `${fmt(due)} ${U}`)
+    check('the claim accrued the stream first (stored stream == model)', v1.stream, accrueAt(v0.stream, v1.time))
+    await books(`claim ${x}`, receipt, { [`usdc:tok:${x}`]: -due, 'usdc:burner': due, [`tok.claimed.burner:${x}`]: due })
+    await conservation(`after the ${x} claim`, token, B)
+  })
+}
+
+async function collectPlatformFees() {
+  await step('collectFees', async () => {
+    const { receipt } = await tx('collectFees', 'collectFees', LP, ABI.pad, 'collectFees', [])
+    const B0 = receipt.blockNumber - 1n
+    const pending = await rd<bigint>(LP, ABI.pad, 'pendingFees', [], B0)
+    checkThat('platform fees were waiting', pending > 0n, `${fmt(pending)} ${U}`)
+    check('FeesCollected to feeTo', eventsOf(receipt, LP, ABI.pad, 'FeesCollected'), [{ feeTo: FEE_TO, amount: pending }])
+    await books('collectFees', receipt, { 'usdc:launchpad': -pending, 'lp.pendingFees': -pending, [FEE_TO === me ? 'usdc:burner' : 'usdc:feeTo']: pending })
+  })
+}
+
+// ── Run B: sell what is left, so the curve float comes back ─────────────────
+
+async function sellAll(k: Kind) {
+  const id = `sellAll:${k}`
+  await step(id, async () => {
+    const s = spec(k)
+    const token = tokenOf(k)
+    const sell = await tx(id, `sell all ${s.symbol} back to the curve`, LP, ABI.pad, 'sell', async () => {
+      const all = await rd<bigint>(token, ABI.token, 'balanceOf', [me], head)
+      const [out] = await simulate<readonly [bigint]>(LP, ABI.pad, 'quoteSell', [token, all], head)
+      return [token, all, out, me, await deadline()]
+    })
+    const S = sell.receipt.blockNumber
+    const tokensIn = sell.args[1] as bigint
+    const c0 = await curveAt(token, S - 1n)
+    const m = modelCurveSell(c0, tokensIn, s.feeBps)
+    check('Trade == model', eventsOf<TradeEvent>(sell.receipt, LP, ABI.pad, 'Trade').map((t) => pick(t, ['usdcAmount', 'tokenAmount', 'platformFee', 'creatorFee', 'snipeFee'])), [{ usdcAmount: m.gross, tokenAmount: tokensIn, platformFee: m.platformFee, creatorFee: m.creatorFee, snipeFee: 0n }])
+    const x = s.symbol
+    await books('sell all', sell.receipt, {
+      'usdc:launchpad': -m.usdcOut, 'usdc:burner': m.usdcOut, 'lp.pendingFees': m.platformFee, [`lp.creator:${x}`]: m.creatorFee,
+      [`curve.vU:${x}`]: -m.gross, [`curve.vT:${x}`]: tokensIn, [`curve.sold:${x}`]: -tokensIn, [`tok.launchpad:${x}`]: tokensIn, [`tok.burner:${x}`]: -tokensIn,
+    })
+  })
+}
+
+// ── Final state ───────────────────────────────────────────────────────────────
+
+async function finalState() {
+  await step('final', async () => {
+    const B = maxOf(await latest(), head)
+    const s = await snapshot(B)
+    invariants('final', s)
+    const made = KINDS.filter((k) => progress.tokens[k])
+    let windowBuys = 0
+    let windowPaid = 0
+    for (const k of made) {
+      const token = tokenOf(k)
+      const x = sym(k)
+      const supply = s.get(`tok.supply:${x}`) ?? 0n
+      const burned = progress.pools[k] ? TOTAL_SUPPLY - supply : 0n
+      check(`${x}: supply == 1e9 less only the graduation's leftover burn`, supply, TOTAL_SUPPLY - burned)
+      windowBuys += spec(k).windowBuys
+      windowPaid += Number(progress.notes[`create:${k}:windowPaid`] ?? '0')
+      const line = [`${x}: ${progress.pools[k] ? 'graduated' : `on the curve (${fmt((s.get(`curve.vU:${x}`) ?? 0n) - VIRTUAL_USDC_0)} ${U} float)`}`]
+      if (progress.pools[k]) {
+        const rec = poolRec(k)
+        const pool = await poolAt(`${x} final`, k, B)
+        const pos = positionsAt(k, B)
+        line.push(`tick ${pool.tick}, ${pos.filter((p) => p.owner === HOOK).length} hook positions (${(s.get(`hook.bids:${x}`) ?? 0n).toString()} bids)`)
+        check(`${x}: hook.bidCount == the bid positions`, s.get(`hook.bids:${x}`), BigInt(pos.filter((p) => p.owner === HOOK && p.lower !== MIN_T).length))
+        line.push(`lockHeld ${fmt(s.get(`hook.lockHeld:${x}`) ?? 0n)}, USDC is currency${rec.usdcIs0 ? '0' : '1'}`)
+      }
+      if (usesHolders(k) && !REAL) await conservation(`${x} final`, token, B)
+      note(line.join('; '))
+    }
+    if (!REAL) {
+      check('the Split plugin holds Σ usdcHeld of its tokens', s.get('usdc:split'), (await rd<bigint>(SPLIT, ABI.split, 'usdcHeld', [tokenOf('split')], B)) + (await rd<bigint>(SPLIT, ABI.split, 'usdcHeld', [tokenOf('combo')], B)))
+      check('the Holders plugin and the Combo hold nothing (they forward it all)', [s.get('usdc:holders'), s.get('usdc:combo')], [0n, 0n])
+    }
+    checkThat('the curve surcharge was exercised: window buys landed inside the window', windowPaid > 0, `${windowPaid} of ${windowBuys} window buys paid it`)
+    if (!REAL) {
+      const bps = made.map((k) => BigInt(progress.notes[`graduate:${k}:poolWindowBps`] ?? '0'))
+      checkThat("the pool's surcharge was exercised: window buys paid it", bps.some((b) => b > 0n), `window buys paid ${bps.join(', ')} bps`)
+    }
+  }, true)
+}
+
+// ── Summary and record ────────────────────────────────────────────────────────
+
+interface Row {
+  step: string
+  what: string
+  hash: string
+  gasUsed: bigint
+  costWei: bigint
+}
+async function summary() {
+  const rows: Row[] = []
+  for (const [what, hash] of Object.entries(dep.txs)) {
+    const r = await retry(() => pub.getTransactionReceipt({ hash }))
+    rows.push({ step: 'deploy', what, hash, gasUsed: r.gasUsed, costWei: r.gasUsed * r.effectiveGasPrice })
+  }
+  for (const t of progress.txs) rows.push({ step: t.step, what: t.what, hash: t.hash, gasUsed: BigInt(t.gasUsed), costWei: BigInt(t.gasUsed) * BigInt(t.gasPrice) })
+  const usdcOfWei = (wei: bigint) => Number(formatUnits(wei, 18)).toFixed(6)
+  const live = (gas: bigint) => usdcOfWei(gas * LIVE_GAS_PRICE)
+  const result = (id: string) => (id === 'deploy' ? 'deployed' : progress.done[id] ? 'pass' : progress.results.find((r) => r.step === id)?.ok === false ? 'FAIL' : '…')
+  const stepChecks = (id: string) => progress.results.find((r) => r.step === id)?.checks ?? 0
+  console.log(`\n── gas (${rows.length} transactions; "at 25 gwei" is what Arc Testnet charges)`)
+  if (MARKDOWN) {
+    console.log('| step | transaction | gas | USDC at 25 gwei |\n| --- | --- | ---: | ---: |')
+    for (const r of rows) console.log(`| ${r.step} | ${r.what} | ${r.gasUsed.toLocaleString('en-US')} | ${live(r.gasUsed)} |`)
+    const steps = [...new Set(rows.map((r) => r.step))]
+    console.log('\n| step | transactions | checks | gas | USDC at 25 gwei | result |\n| --- | ---: | ---: | ---: | ---: | --- |')
+    for (const st of steps) {
+      const rs = rows.filter((r) => r.step === st)
+      const g = rs.reduce((sum, r) => sum + r.gasUsed, 0n)
+      console.log(`| ${st} | ${rs.length} | ${stepChecks(st) || ''} | ${g.toLocaleString('en-US')} | ${live(g)} | ${result(st)} |`)
+    }
+    const noTx = progress.results.filter((r) => !rows.some((x) => x.step === r.step))
+    for (const r of noTx) console.log(`| ${r.step} | 0 | ${r.checks} | 0 | 0 | ${r.ok ? 'pass' : 'FAIL'} |`)
+  } else {
+    for (const r of rows) console.log(`${r.step.padEnd(18)} ${r.what.slice(0, 58).padEnd(58)} ${r.hash.slice(0, 18)}…  ${r.gasUsed.toString().padStart(9)}  ${live(r.gasUsed)}`)
+  }
+  const deployGas = rows.filter((r) => r.step === 'deploy').reduce((s, r) => s + r.gasUsed, 0n)
+  const driveGas = rows.filter((r) => r.step !== 'deploy').reduce((s, r) => s + r.gasUsed, 0n)
+  const driveWei = rows.filter((r) => r.step !== 'deploy').reduce((s, r) => s + r.costWei, 0n)
+  console.log(`deploy: ${deployGas} gas, ${live(deployGas)} USDC at 25 gwei`)
+  console.log(`drive:  ${driveGas} gas, ${live(driveGas)} USDC at 25 gwei (${usdcOfWei(driveWei)} USDC at this chain's prices)`)
+  console.log(`total:  ${deployGas + driveGas} gas, ${live(deployGas + driveGas)} USDC at 25 gwei`)
+  const totalChecks = progress.results.reduce((s, r) => s + r.checks, 0)
+  const failedSteps = progress.results.filter((r) => !r.ok)
+  console.log(`steps: ${Object.keys(progress.done).length} done${failedSteps.length ? `, failing: ${failedSteps.map((r) => r.step).join(', ')}` : ''}; checks across steps: ${totalChecks}; this run: ${checks} checks, ${failures} failed, ${rpcRetries} RPC retries`)
+  return { deployGas, driveGas, totalChecks, txs: rows.length }
+}
+
+async function writeRecord() {
+  if (!DRIVING) return
+  const s = await summary()
+  const record = JSON.parse(readFileSync(DEPLOYMENT, 'utf8')) as Record<string, unknown>
+  record.rehearsal = {
+    actor: me,
+    signer: SIGNER,
+    rawSwapper: progress.raw ?? null,
+    tokens: Object.fromEntries(KINDS.filter((k) => progress.tokens[k]).map((k) => [sym(k), {
+      address: tokenOf(k), kind: k, creatorFeeBps: Number(spec(k).feeBps), open: spec(k).open, usdcIsCurrency0: BigInt(USDC) < BigInt(tokenOf(k)),
+      poolId: progress.pools[k]?.poolId ?? null,
+    }])),
+    steps: Object.keys(progress.done).length,
+    transactions: s.txs,
+    checks: s.totalChecks,
+    gas: { deploy: s.deployGas.toString(), drive: s.driveGas.toString() },
+    usdcAt25Gwei: Number(formatUnits((s.deployGas + s.driveGas) * LIVE_GAS_PRICE, 18)).toFixed(6),
+    finishedAt: new Date().toISOString(),
+  }
+  writeFileSync(DEPLOYMENT, `${JSON.stringify(record, null, 2)}\n`)
+  console.log(`\nwrote the rehearsal record into ${DEPLOYMENT}`)
+}
+
+// ── Run ───────────────────────────────────────────────────────────────────────
+
+try {
+  console.log(`${dep.network}, chain ${chainId}, ${REAL ? "Run B (Arc's USDC)" : 'Run A (rUSDC)'}, signer ${SIGNER}${DRIVING ? `, actor ${me}` : ''}`)
+  if (SIGNER === 'anvil') {
+    await rpc('anvil_impersonateAccount', [me])
+    const bal = await nativeOf(me, await latest())
+    if (bal < 100n * E18) await rpc('anvil_setBalance', [me, toHex(100n * E18)])
+    note(`anvil: impersonating ${me}; native balance ${fmt18(bal)} → ${fmt18(await nativeOf(me, await latest()))}`)
+  }
+  await deployment()
+  if (!DRIVING) {
+    if (progressExists && Object.keys(progress.tokens).length) await finalState()
+    else console.log('\nSIGNER not set and nothing driven yet: read-only checks only.')
+    await summary()
+    process.exit(failures ? 1 : 0)
+  }
+  progress.actor = me
+  save()
+  console.log(`\nactor ${me}: ${fmt18(await nativeOf(me, head))} USDC native${REAL ? '' : `, ${fmt(await rd<bigint>(USDC, ABI.erc20, 'balanceOf', [me], head))} rUSDC`}`)
+  await recoverPending()
+  if (!REAL) {
+    await deployRaw()
+    await fund()
+  }
+  await approvals()
+  await plan()
+  for (const [i, k] of KINDS.entries()) await create(k, i === 0)
+  for (const [i, k] of KINDS.entries()) await curveTrades(k, i === 0)
+  if (REAL) {
+    for (const k of KINDS) {
+      await collect(k)
+      await sellAll(k)
+    }
+  } else {
+    for (const [i, k] of KINDS.entries()) await graduate(k, i === 0)
+    await fundRaw()
+    for (const k of KINDS) {
+      if (progress.features.includes(k)) await buyback(k)
+      else await lockStep(k)
+    }
+    for (const k of KINDS) await poolTrades(k)
+    for (const k of progress.features) await rawSwaps(k)
+    await outsideLiquidity()
+    await syncOne('wallet')
+    await syncBatch(['split', 'zero', 'wallet'])
+    for (const k of KINDS) {
+      await collect(k)
+      if (k === 'split') await releaseSplit()
+    }
+    await sample()
+    for (const k of KINDS.filter(usesHolders)) await claim(k)
+  }
+  await collectPlatformFees()
+  await finalState()
+  await writeRecord()
+  console.log(failures ? `\n${failures} check(s) FAILED` : '\nall checks passed')
+  process.exit(failures ? 1 : 0)
+} catch (e) {
+  console.log(`\nERROR: ${errorText(e).split('\n').slice(0, 8).join('\n')}`)
+  save()
+  await summary().catch(() => undefined)
+  process.exit(1)
+}
