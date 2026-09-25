@@ -365,6 +365,25 @@ abstract contract LaunchpadV14Test is V14Base {
         _assertSolvent();
     }
 
+    function test_aBlocklistedLaunchpadCannotStopThePool() public {
+        address token = _graduated(300, false);
+        usdc.setBlocked(address(pad), true); // Circle can blocklist any address
+        vm.startPrank(carol);
+        uint256 got = router.buy(token, 1_000e6, 0, carol, MAX);
+        router.sell(token, got / 2, 0, carol, MAX);
+        vm.stopPrank();
+        assertGt(hook.pendingCreator(token), 0, "the fees wait as the hook's claims");
+        _assertHookClean(token);
+
+        vm.expectRevert();
+        pad.syncPoolFees(token); // only the payout to the launchpad waits
+        usdc.setBlocked(address(pad), false);
+        pad.syncPoolFees(token);
+        assertEq(hook.pendingCreator(token), 0);
+        _assertHookClean(token);
+        _assertSolvent();
+    }
+
     // ─── Bids ─────────────────────────────────────────────────────────────────
 
     function test_nobodyCanDonate() public {

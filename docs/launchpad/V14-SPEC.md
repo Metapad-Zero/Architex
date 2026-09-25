@@ -189,6 +189,9 @@ the BUSL `Position.sol`, so the hook reads the pool's price with its own copy of
 - **Nothing that unlocks runs inside someone else's unlock.** A graduating buy, `lock` and `syncPoolFees` revert
   `AlreadyUnlocked` when called from inside a v4 unlock; `collectCreatorFees` then skips the sync and pays what the
   launchpad already holds.
+- **A USDC blocklist.** Circle can blocklist any address. On the launchpad it stops only payouts: pools keep trading
+  and their fees wait as the hook's claims. On the hook it stops graduations (the hook passes the curve's USDC into the
+  pool), while the curve keeps trading both ways.
 - **Sells need no approval.** The router pulls a seller's tokens through the token itself, always from its own caller
   (v1.3's launch router did the same). A contract that holds launch tokens and relays arbitrary calls to targets other
   than the token can be made to sell them through the router; wallets and ordinary contracts cannot.
