@@ -33,8 +33,9 @@ interface IImmutableStateLite {
 /// both rounded up. They are ACCRUED here (`pendingFees`, `pendingCreatorFees[token]`) and never pushed during a
 /// trade: `collectFees()` sends the platform's to `feeTo`, `collectCreatorFees(token)` pays the token's plugin, both
 /// permissionless. A trade never calls a plugin or `feeTo`, so neither can stop a trade, a launch or a graduation.
-/// Pool trades pay the same fees through the hook, which takes them here from the PoolManager and calls
-/// `accrueTradeFees`. USDC held == pendingFees + Σ pendingCreatorFees + Σ pendingSnipe + Σ(virtualUsdc -
+/// Pool trades pay the same fees through the hook, which keeps them in the PoolManager as its claims (a swap never moves
+/// USDC) until the launchpad releases and books them: `syncPoolFees(token)`, permissionless, and first thing in
+/// `collectCreatorFees(token)`. USDC held == pendingFees + Σ pendingCreatorFees + Σ pendingSnipe + Σ(virtualUsdc -
 /// VIRTUAL_USDC_0) over live curves, to the unit (absent donations).
 ///
 /// Graduation: the buy that sells the last curve token sends the hook POOL_SUPPLY tokens, exactly
@@ -124,7 +125,7 @@ contract ArchitexLaunchpadV14 is IArchitexLaunchpadV14, ReentrancyGuard {
 
     // ─── Constructor ─────────────────────────────────────────────────────────
 
-    /// @dev Deploy order (V14-SPEC §10): this, then the hook (at a mined address, naming this launchpad), then the
+    /// @dev Deploy order (V14-SPEC §11): this, then the hook (at a mined address, naming this launchpad), then the
     ///      router, then initialize(hook, router) from the same deployer.
     constructor(address _usdc, address _poolManager, address _feeTo, address _feeToSetter, uint256 _launchFee) {
         if (_usdc == address(0) || _poolManager == address(0)) revert ZeroAddress();
@@ -141,8 +142,13 @@ contract ArchitexLaunchpadV14 is IArchitexLaunchpadV14, ReentrancyGuard {
 
     // ─── No native receive ───────────────────────────────────────────────────
 
-    receive() external payable { revert(); }
-    fallback() external payable { revert(); }
+    receive() external payable {
+        revert();
+    }
+
+    fallback() external payable {
+        revert();
+    }
 
     // ─── Wiring ──────────────────────────────────────────────────────────────
 
@@ -227,12 +233,18 @@ contract ArchitexLaunchpadV14 is IArchitexLaunchpadV14, ReentrancyGuard {
     ///      changes cannot be paid in a way it does not credit): approve exactly `amount`, call onFees, then require
     ///      that exactly `amount` left this contract and the allowance is back to zero; otherwise revert and the fees
     ///      stay accrued. Every other address gets a plain transfer. The two balance readings sit inside one
-    ///      non-reentrant call that no other launchpad function can interleave with (every value-moving entry point,
-    ///      including the hook's accrueTradeFees, holds the same guard).
+    ///      non-reentrant call that no other launchpad function can interleave with (every value-moving entry point
+    ///      holds the same guard). First it books the token's pool fees, best effort: if the hook cannot release them
+    ///      (say this runs inside someone's PoolManager unlock), they stay with the hook and what is here is paid.
     function collectCreatorFees(address token) external nonReentrant returns (uint256 amount) {
         Curve storage c = _curves[token];
         address plugin = c.plugin;
         if (plugin == address(0)) revert UnknownToken();
+        if (c.graduated) {
+            try IArchitexLaunchHook(hook).release(token) returns (uint256 platformFee, uint256 creatorFee) {
+                _bookPoolFees(token, platformFee, creatorFee);
+            } catch {}
+        }
         amount = pendingCreatorFees[token];
         if (amount == 0) return 0;
         pendingCreatorFees[token] = 0;
@@ -247,7 +259,8 @@ contract ArchitexLaunchpadV14 is IArchitexLaunchpadV14, ReentrancyGuard {
             // leave only through the plugin's allowance (exactly `amount`), and every launchpad entry point that moves
             // USDC or accounting holds this call's reentrancy guard. Anything sent in makes the check fail.
             // slither-disable-next-line reentrancy-balance
-            if (usdc_.balanceOf(address(this)) + amount != balanceBefore || usdc_.allowance(address(this), plugin) != 0) {
+            if (usdc_.balanceOf(address(this)) + amount != balanceBefore || usdc_.allowance(address(this), plugin) != 0)
+            {
                 revert PluginPullMismatch();
             }
         } else {
@@ -255,15 +268,35 @@ contract ArchitexLaunchpadV14 is IArchitexLaunchpadV14, ReentrancyGuard {
         }
     }
 
+    /// @inheritdoc IArchitexLaunchpadV14
+    function syncPoolFees(address token) external nonReentrant returns (uint256 platformFee, uint256 creatorFee) {
+        (platformFee, creatorFee) = _syncPoolFees(token);
+    }
+
+    /// @inheritdoc IArchitexLaunchpadV14
+    function syncPoolFeesBatch(address[] calldata tokens) external nonReentrant {
+        for (uint256 i; i < tokens.length; ++i) {
+            _syncPoolFees(tokens[i]);
+        }
+    }
+
     /// @inheritdoc IArchitexLaunchpadLite
-    /// @dev Hook only, after it has taken exactly these fees here from the PoolManager. Graduated tokens only: before
-    ///      graduation the pool does not exist and every trade runs on the curve.
-    function accrueTradeFees(address token, uint256 platformFee, uint256 creatorFee) external nonReentrant {
-        // Before initialize() the hook is zero, which no caller can be.
-        if (msg.sender != hook) revert Forbidden();
-        Curve storage c = _curves[token];
-        if (c.token == address(0)) revert UnknownToken();
-        if (!c.graduated) revert NotGraduated();
+    /// @dev Unused in v1.4: the hook keeps pool fees as its claims and the launchpad pulls them (syncPoolFees). Always
+    ///      reverts; kept because plugins compile against IArchitexLaunchpadLite.
+    function accrueTradeFees(address, uint256, uint256) external pure {
+        revert Forbidden();
+    }
+
+    /// @dev Has the hook pay `token`'s pool fees here, then books them. Nothing for a token that has not graduated.
+    function _syncPoolFees(address token) private returns (uint256 platformFee, uint256 creatorFee) {
+        if (!_curves[token].graduated) return (0, 0);
+        (platformFee, creatorFee) = IArchitexLaunchHook(hook).release(token);
+        _bookPoolFees(token, platformFee, creatorFee);
+    }
+
+    /// @dev Books pool fees the hook has just paid here (release pays exactly what it returns).
+    function _bookPoolFees(address token, uint256 platformFee, uint256 creatorFee) private {
+        if (platformFee + creatorFee == 0) return;
         pendingFees += platformFee;
         if (creatorFee != 0) pendingCreatorFees[token] += creatorFee;
         emit PoolFeesAccrued(token, platformFee, creatorFee);
@@ -442,9 +475,8 @@ contract ArchitexLaunchpadV14 is IArchitexLaunchpadV14, ReentrancyGuard {
         uint256 creatorFee;
         uint256 snipeFee;
         bool graduates;
-        (tokensOut, platformFee, creatorFee, snipeFee, usdcSpent, graduates) = _calcBuy(
-            vUsdc, vTokens, CURVE_SUPPLY - sold, usdcIn, c.creatorFeeBps, firstBuy ? 0 : _curveSnipeBps(c)
-        );
+        (tokensOut, platformFee, creatorFee, snipeFee, usdcSpent, graduates) =
+            _calcBuy(vUsdc, vTokens, CURVE_SUPPLY - sold, usdcIn, c.creatorFeeBps, firstBuy ? 0 : _curveSnipeBps(c));
 
         if (tokensOut < minTokensOut) revert SlippageExceeded();
 
@@ -461,7 +493,9 @@ contract ArchitexLaunchpadV14 is IArchitexLaunchpadV14, ReentrancyGuard {
         if (creatorFee != 0) pendingCreatorFees[token] += creatorFee;
         if (snipeFee != 0) pendingSnipe[token] += snipeFee;
 
-        emit Trade(token, msg.sender, true, usdcSpent, tokensOut, platformFee, creatorFee, snipeFee, newVUsdc, newVTokens);
+        emit Trade(
+            token, msg.sender, true, usdcSpent, tokensOut, platformFee, creatorFee, snipeFee, newVUsdc, newVTokens
+        );
 
         // ── Interactions ─────────────────────────────────────────────────────
         // Pull exact usdcSpent from the buyer (never pull-then-refund; usdcSpent <= usdcIn)

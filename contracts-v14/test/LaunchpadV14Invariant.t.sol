@@ -13,7 +13,8 @@ import {MockUSDC} from "./utils/MockUSDC.sol";
 import {RawSwapper, V14Base} from "./V14Base.sol";
 
 /// @dev Drives random launches, curve and pool trades (exact in through the router, exact out through a raw swapper),
-///      graduations, locks and collections across a few tokens, in blocks inside and after both snipe windows.
+///      graduations, locks, donation attempts, syncs and collections across a few tokens, in blocks inside and after
+///      both snipe windows.
 contract V14Handler is Test {
     ArchitexLaunchpadV14 internal immutable pad;
     ArchitexLaunchHook internal immutable hook;
@@ -21,9 +22,16 @@ contract V14Handler is Test {
     RawSwapper internal immutable raw;
     MockUSDC internal immutable usdc;
     address[] public tokens;
+    uint256 public lockReverts;
+    uint256 public donations;
 
-    constructor(ArchitexLaunchpadV14 pad_, ArchitexLaunchHook hook_, ArchitexV4Router router_, RawSwapper raw_, MockUSDC usdc_)
-    {
+    constructor(
+        ArchitexLaunchpadV14 pad_,
+        ArchitexLaunchHook hook_,
+        ArchitexV4Router router_,
+        RawSwapper raw_,
+        MockUSDC usdc_
+    ) {
         (pad, hook, router, raw, usdc) = (pad_, hook_, router_, raw_, usdc_);
         usdc.mint(address(this), 1e18);
         usdc.approve(address(pad), type(uint256).max);
@@ -103,7 +111,8 @@ contract V14Handler is Test {
                 amountSpecified: specified,
                 sqrtPriceLimitX96: zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
             })
-        ) {} catch {}
+        ) {}
+            catch {}
     }
 
     function graduate(uint256 i) external {
@@ -117,7 +126,36 @@ contract V14Handler is Test {
         if (tokens.length == 0) return;
         address t = tokens[i % tokens.length];
         if (!pad.isGraduated(t) || hook.lockHeld(t) == 0) return;
-        hook.lock(t);
+        try hook.lock(t) {}
+        catch {
+            ++lockReverts;
+        }
+    }
+
+    /// @dev Always refused; counted if one ever lands.
+    function donate(uint256 i, uint256 amount, bool usdcSide) external {
+        if (tokens.length == 0) return;
+        address t = tokens[i % tokens.length];
+        if (!pad.isGraduated(t)) return;
+        bool usdcIs0 = address(usdc) < t;
+        if (usdcSide) {
+            amount = bound(amount, 1, 1_000e6);
+            usdc.mint(address(raw), amount);
+        } else {
+            uint256 bal = IERC20(t).balanceOf(address(this));
+            if (bal == 0) return;
+            amount = bound(amount, 1, bal);
+            IERC20(t).transfer(address(raw), amount);
+        }
+        bool zero = usdcSide == usdcIs0;
+        try raw.donate(hook.poolKeyOf(t), zero ? amount : 0, zero ? 0 : amount) {
+            ++donations;
+        } catch {}
+    }
+
+    function sync(uint256 i) external {
+        if (tokens.length == 0) return;
+        pad.syncPoolFees(tokens[i % tokens.length]);
     }
 
     function collect(uint256 i) external {
@@ -127,7 +165,7 @@ contract V14Handler is Test {
     }
 }
 
-/// @notice V14-SPEC §10 invariants, under random sequences.
+/// @notice V14-SPEC §11 invariants, under random sequences.
 contract LaunchpadV14InvariantTest is V14Base {
     V14Handler internal handler;
 
@@ -146,16 +184,24 @@ contract LaunchpadV14InvariantTest is V14Base {
         _assertSolvent();
     }
 
-    /// @dev The hook keeps no launch token, and its USDC is exactly what it holds for bids.
-    function invariant_hookHoldsOnlyItsBids() public view {
+    /// @dev The hook keeps no launch token and no USDC; its claims are exactly what it owes: pool fees not yet released
+    ///      and USDC waiting for a bid.
+    function invariant_hookHoldsOnlyWhatItOwes() public view {
         uint256 n = handler.tokensLength();
-        uint256 held;
+        uint256 owed;
         for (uint256 i; i < n; ++i) {
             address t = handler.tokens(i);
             assertEq(IERC20(t).balanceOf(address(hook)), 0, "hook keeps no token");
-            held += hook.lockHeld(t);
+            owed += hook.pendingPlatform(t) + hook.pendingCreator(t) + hook.lockHeld(t);
         }
-        assertEq(usdc.balanceOf(address(hook)), held, "hook USDC == sum of lockHeld");
+        assertEq(usdc.balanceOf(address(hook)), 0, "hook keeps no USDC");
+        assertEq(_hookClaims(), owed, "hook claims == what it owes");
+    }
+
+    /// @dev lock() never reverts once there is something to lock (it waits instead), and no donation ever lands.
+    function invariant_lockNeverRevertsAndNobodyDonates() public view {
+        assertEq(handler.lockReverts(), 0, "lock reverted");
+        assertEq(handler.donations(), 0, "a donation landed");
     }
 
     /// @dev A graduated token's curve inventory is gone and its supply never grows.

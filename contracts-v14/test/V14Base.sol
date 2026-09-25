@@ -17,29 +17,46 @@ import {ArchitexV4Router} from "../src/ArchitexV4Router.sol";
 import {IArchitexLaunchHook} from "../src/interfaces/IArchitexLaunchHook.sol";
 import {MockUSDC} from "./utils/MockUSDC.sol";
 
-/// @dev Swaps with any SwapParams (exact in or out, any direction) and adds liquidity, paying from its own balances.
-///      The v1.4 router only does exact-in; this drives the hook's other branches.
+/// @dev Swaps with any SwapParams (exact in or out, any direction), changes liquidity and donates, paying from its own
+///      balances. The v1.4 router only does exact-in; this drives the hook's other branches.
 contract RawSwapper is IUnlockCallback {
     IPoolManager public immutable manager;
+
+    uint8 private constant _SWAP = 0;
+    uint8 private constant _MODIFY = 1;
+    uint8 private constant _DONATE = 2;
 
     constructor(IPoolManager manager_) {
         manager = manager_;
     }
 
     function swap(PoolKey memory key, SwapParams memory params) external returns (BalanceDelta delta) {
-        delta = abi.decode(manager.unlock(abi.encode(true, key, abi.encode(params))), (BalanceDelta));
+        delta = abi.decode(manager.unlock(abi.encode(_SWAP, key, abi.encode(params))), (BalanceDelta));
     }
 
-    function addLiquidity(PoolKey memory key, ModifyLiquidityParams memory params) external returns (BalanceDelta delta) {
-        delta = abi.decode(manager.unlock(abi.encode(false, key, abi.encode(params))), (BalanceDelta));
+    function addLiquidity(PoolKey memory key, ModifyLiquidityParams memory params)
+        external
+        returns (BalanceDelta delta)
+    {
+        delta = abi.decode(manager.unlock(abi.encode(_MODIFY, key, abi.encode(params))), (BalanceDelta));
+    }
+
+    function donate(PoolKey memory key, uint256 amount0, uint256 amount1) external returns (BalanceDelta delta) {
+        delta = abi.decode(manager.unlock(abi.encode(_DONATE, key, abi.encode(amount0, amount1))), (BalanceDelta));
     }
 
     function unlockCallback(bytes calldata data) external returns (bytes memory) {
         require(msg.sender == address(manager), "only manager");
-        (bool isSwap, PoolKey memory key, bytes memory inner) = abi.decode(data, (bool, PoolKey, bytes));
+        (uint8 op, PoolKey memory key, bytes memory inner) = abi.decode(data, (uint8, PoolKey, bytes));
         BalanceDelta delta;
-        if (isSwap) delta = manager.swap(key, abi.decode(inner, (SwapParams)), "");
-        else (delta,) = manager.modifyLiquidity(key, abi.decode(inner, (ModifyLiquidityParams)), "");
+        if (op == _SWAP) {
+            delta = manager.swap(key, abi.decode(inner, (SwapParams)), "");
+        } else if (op == _MODIFY) {
+            (delta,) = manager.modifyLiquidity(key, abi.decode(inner, (ModifyLiquidityParams)), "");
+        } else {
+            (uint256 amount0, uint256 amount1) = abi.decode(inner, (uint256, uint256));
+            delta = manager.donate(key, amount0, amount1, "");
+        }
         _square(key.currency0, delta.amount0());
         _square(key.currency1, delta.amount1());
         return abi.encode(delta);
@@ -61,8 +78,9 @@ contract RawSwapper is IUnlockCallback {
 ///         launchpad, the hook at an address carrying its permission bits, and the router.
 abstract contract V14Base is Test {
     address internal constant POOL_MANAGER = 0x8366a39CC670B4001A1121B8F6A443A643e40951;
-    /// @dev beforeInitialize, beforeAddLiquidity, beforeSwap, afterSwap, beforeSwapReturnDelta, afterSwapReturnDelta.
-    uint160 internal constant HOOK_FLAGS = 0x28CC;
+    /// @dev beforeInitialize, beforeAddLiquidity, beforeSwap, afterSwap, beforeDonate, beforeSwapReturnDelta,
+    ///      afterSwapReturnDelta.
+    uint160 internal constant HOOK_FLAGS = 0x28EC;
     uint256 internal constant CURVE_RAISE = 24_999_999_968; // what every curve raises (V13-SPEC vectors)
     uint256 internal constant MAX = type(uint256).max;
 
@@ -150,9 +168,19 @@ abstract contract V14Base is Test {
         return a == 0 ? 0 : (a - 1) / b + 1;
     }
 
+    /// @dev Books `token`'s pool fees in the launchpad (the hook holds them as claims until then).
+    function _sync(address token) internal {
+        pad.syncPoolFees(token);
+    }
+
+    /// @dev The hook's USDC claims in the PoolManager.
+    function _hookClaims() internal view returns (uint256) {
+        return manager.balanceOf(address(hook), uint256(uint160(address(usdc))));
+    }
+
     // ─── Invariants ───────────────────────────────────────────────────────────
 
-    /// @dev V14-SPEC §6: the launchpad's USDC is exactly its books.
+    /// @dev V13-SPEC §6, carried over: the launchpad's USDC is exactly its books.
     function _assertSolvent() internal view {
         uint256 owed = pad.pendingFees();
         uint256 n = pad.tokensLength();
@@ -164,9 +192,17 @@ abstract contract V14Base is Test {
         assertEq(usdc.balanceOf(address(pad)), owed, "launchpad USDC == its books");
     }
 
-    /// @dev The hook keeps no launch token, and its USDC is exactly what it holds for bids.
+    /// @dev The hook keeps no launch token and no USDC: all it holds is USDC claims in the PoolManager, exactly what it
+    ///      owes over every token (pool fees not yet released, USDC waiting for a bid).
     function _assertHookClean(address token) internal view {
         assertEq(IERC20(token).balanceOf(address(hook)), 0, "hook keeps no token");
-        assertEq(usdc.balanceOf(address(hook)), hook.lockHeld(token), "hook USDC == held for bids");
+        assertEq(usdc.balanceOf(address(hook)), 0, "hook keeps no USDC");
+        uint256 owed;
+        uint256 n = pad.tokensLength();
+        for (uint256 i; i < n; ++i) {
+            address t = pad.tokenAt(i);
+            owed += hook.pendingPlatform(t) + hook.pendingCreator(t) + hook.lockHeld(t);
+        }
+        assertEq(_hookClaims(), owed, "hook claims == what it owes");
     }
 }

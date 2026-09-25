@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {Vm} from "forge-std/Vm.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
@@ -8,6 +9,7 @@ import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {SwapParams, ModifyLiquidityParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {IArchitexLaunchHook} from "../src/interfaces/IArchitexLaunchHook.sol";
+import {IArchitexLaunchpadV14} from "../src/interfaces/IArchitexLaunchpadV14.sol";
 import {ILaunchTokenV14} from "../src/interfaces/ILaunchTokenV14.sol";
 import {V14Base} from "./V14Base.sol";
 
@@ -74,8 +76,15 @@ abstract contract LaunchpadV14Test is V14Base {
         assertEq(got, quoted, "quote is exact");
         assertEq(IERC20(token).balanceOf(carol), got);
         assertEq(usdc0 - usdc.balanceOf(carol), usdcIn, "paid exactly usdcIn");
+        // The hook holds the fees as claims; the launchpad books them on a sync.
+        assertEq(hook.pendingPlatform(token), _ceil(usdcIn * 50, 1e4), "platform fee held");
+        assertEq(hook.pendingCreator(token), _ceil(usdcIn * 250, 1e4), "creator fee held");
+        assertEq(pad.pendingFees(), pf0, "not booked before a sync");
+        _assertHookClean(token);
+        _sync(token);
         assertEq(pad.pendingFees() - pf0, _ceil(usdcIn * 50, 1e4), "platform fee");
         assertEq(pad.pendingCreatorFees(token) - cf0, _ceil(usdcIn * 250, 1e4), "creator fee");
+        assertEq(hook.pendingPlatform(token) + hook.pendingCreator(token), 0, "released");
         _assertHookClean(token);
         _assertSolvent();
     }
@@ -91,6 +100,7 @@ abstract contract LaunchpadV14Test is V14Base {
 
         vm.prank(carol);
         uint256 out = router.sell(token, tokensIn, 0, carol, MAX); // no approval: the token lets the router pull
+        _sync(token);
 
         assertEq(out, quoted, "quote is exact");
         uint256 pf = pad.pendingFees() - pf0;
@@ -143,6 +153,7 @@ abstract contract LaunchpadV14Test is V14Base {
             })
         );
         assertEq(uint256(int256(usdcIs0 ? d.amount1() : d.amount0())), tokensWanted, "exactly the tokens asked for");
+        _sync(token);
         uint256 paid = usdc0 - usdc.balanceOf(address(raw));
         uint256 pf = pad.pendingFees() - pf0;
         uint256 cf = pad.pendingCreatorFees(token) - cf0;
@@ -175,6 +186,7 @@ abstract contract LaunchpadV14Test is V14Base {
             })
         );
         assertEq(usdc.balanceOf(address(raw)) - usdc0, usdcWanted, "exactly the USDC asked for");
+        _sync(token);
         uint256 total = _ceil(usdcWanted * 350, 1e4 - 350);
         assertEq((pad.pendingFees() - pf0) + (pad.pendingCreatorFees(token) - cf0), total, "fees on top of the net");
         _assertHookClean(token);
@@ -245,12 +257,15 @@ abstract contract LaunchpadV14Test is V14Base {
         router.sell(token, 1_000_000e18, 0, bob, MAX);
         assertEq(hook.lockHeld(token), held, "sells pay no snipe fee");
 
+        // The surcharge never left the PoolManager: the lock turns the hook's claims into liquidity.
         uint256 pmUsdc = usdc.balanceOf(POOL_MANAGER);
+        uint256 claims = _hookClaims();
         vm.prank(dave);
         uint128 liquidity = hook.lock(token);
         assertGt(liquidity, 0, "locked as liquidity");
         assertLe(hook.lockHeld(token), 2);
-        assertApproxEqAbs(usdc.balanceOf(POOL_MANAGER) - pmUsdc, held, 2, "into the pool");
+        assertApproxEqAbs(claims - _hookClaims(), held, 2, "claims into the pool");
+        assertEq(usdc.balanceOf(POOL_MANAGER), pmUsdc, "no USDC moved");
         _assertHookClean(token);
         _assertSolvent();
     }
@@ -292,10 +307,183 @@ abstract contract LaunchpadV14Test is V14Base {
         uint256 pf0 = pad.pendingFees();
         vm.prank(carol);
         router.buy(token, 100e6, 0, carol, MAX);
+        _sync(token);
         assertEq(pad.pendingFees() - pf0, _ceil(100e6 * 50, 1e4));
     }
 
+    // ─── Pool fees: held as claims, released to the launchpad ─────────────────
+
+    function test_collectingCreatorFeesReleasesThePoolsFirst() public {
+        address token = _graduated(500, false);
+        uint256 curveFees = pad.pendingCreatorFees(token); // from the curve
+        vm.prank(carol);
+        router.buy(token, 10_000e6, 0, carol, MAX);
+        uint256 poolFees = hook.pendingCreator(token);
+        assertEq(poolFees, _ceil(10_000e6 * 500, 1e4));
+
+        uint256 before = usdc.balanceOf(creatorWallet);
+        uint256 paid = pad.collectCreatorFees(token); // anyone may call it
+        assertEq(paid, curveFees + poolFees, "curve and pool fees together");
+        assertEq(usdc.balanceOf(creatorWallet) - before, paid);
+        assertEq(hook.pendingCreator(token), 0);
+        // The platform's share was booked on the way.
+        assertEq(hook.pendingPlatform(token), 0);
+        pad.collectFees();
+        assertEq(pad.pendingFees(), 0);
+        _assertHookClean(token);
+        _assertSolvent();
+    }
+
+    function test_syncIsPermissionlessAndOnlyTheLaunchpadReleases() public {
+        address a = _graduated(100, false);
+        address b = _graduated(200, true);
+        address live = _launch(0, creatorWallet, "", false, 0);
+        vm.startPrank(carol);
+        router.buy(a, 1_000e6, 0, carol, MAX);
+        router.buy(b, 2_000e6, 0, carol, MAX);
+        vm.stopPrank();
+
+        vm.prank(carol);
+        vm.expectRevert(IArchitexLaunchHook.OnlyLaunchpad.selector);
+        hook.release(a);
+        vm.prank(address(hook));
+        vm.expectRevert(IArchitexLaunchpadV14.Forbidden.selector);
+        pad.accrueTradeFees(a, 1, 1); // the v1.3 push path is gone
+
+        (uint256 p, uint256 c) = pad.syncPoolFees(live);
+        assertEq(p + c, 0, "nothing for a live curve");
+
+        uint256 pf0 = pad.pendingFees();
+        address[] memory both = new address[](2);
+        (both[0], both[1]) = (a, b);
+        vm.prank(dave);
+        pad.syncPoolFeesBatch(both);
+        assertEq(pad.pendingFees() - pf0, _ceil(1_000e6 * 50, 1e4) + _ceil(2_000e6 * 50, 1e4));
+        (p, c) = pad.syncPoolFees(a);
+        assertEq(p + c, 0, "released once");
+        _assertHookClean(a);
+        _assertSolvent();
+    }
+
+    function test_aBlocklistedLaunchpadCannotStopThePool() public {
+        address token = _graduated(300, false);
+        usdc.setBlocked(address(pad), true); // Circle can blocklist any address
+        vm.startPrank(carol);
+        uint256 got = router.buy(token, 1_000e6, 0, carol, MAX);
+        router.sell(token, got / 2, 0, carol, MAX);
+        vm.stopPrank();
+        assertGt(hook.pendingCreator(token), 0, "the fees wait as the hook's claims");
+        _assertHookClean(token);
+
+        vm.expectRevert();
+        pad.syncPoolFees(token); // only the payout to the launchpad waits
+        usdc.setBlocked(address(pad), false);
+        pad.syncPoolFees(token);
+        assertEq(hook.pendingCreator(token), 0);
+        _assertHookClean(token);
+        _assertSolvent();
+    }
+
+    // ─── Bids ─────────────────────────────────────────────────────────────────
+
+    function test_nobodyCanDonate() public {
+        address token = _graduated(0, true);
+        vm.prank(bob);
+        IERC20(token).transfer(address(raw), 1e18);
+        bool usdcIs0 = _usdcIs0(token);
+        PoolKey memory key = _key(token);
+        vm.expectRevert();
+        raw.donate(key, usdcIs0 ? 0 : 1e18, usdcIs0 ? 1e18 : 0);
+        vm.expectRevert();
+        raw.donate(key, usdcIs0 ? 1e6 : 0, usdcIs0 ? 0 : 1e6);
+    }
+
+    function test_everyBidIsItsOwnPositionAnchoredToTheGraduationPrice() public {
+        address token = _launch(0, creatorWallet, "", false, 0);
+        _step(pad.SNIPE_BLOCKS());
+        vm.prank(bob);
+        pad.buy(token, 1_000_000e6, 0, bob, MAX);
+        (, IArchitexLaunchHook.Launch memory l) = hook.launchOf(token);
+        (int24 lower, int24 upper) = _expectedBid(l);
+
+        vm.prank(carol);
+        router.buy(token, 2_000e6, 0, carol, MAX); // opening block: 90% held
+        vm.recordLogs();
+        hook.lock(token);
+        _assertBid(vm.getRecordedLogs(), token, 1, lower, upper);
+
+        _step(5);
+        vm.prank(carol);
+        router.buy(token, 2_000e6, 0, carol, MAX); // still in the window
+        vm.recordLogs();
+        hook.lock(token);
+        _assertBid(vm.getRecordedLogs(), token, 2, lower, upper);
+        assertEq(hook.bidCount(token), 2, "two bids, two positions");
+        _assertHookClean(token);
+    }
+
+    function test_aBidWaitsWhileThePriceIsBelowItsTop() public {
+        address token = _launch(0, creatorWallet, "", false, 0);
+        _step(pad.SNIPE_BLOCKS());
+        vm.prank(bob);
+        pad.buy(token, 1_000_000e6, 0, bob, MAX);
+        vm.prank(carol);
+        router.buy(token, 3_000e6, 0, carol, MAX);
+        uint256 held = hook.lockHeld(token);
+        assertGt(held, 0);
+
+        // A dump takes the price under half the graduation price: the bid's range would not be USDC only.
+        uint256 dumped = 150_000_000e18;
+        vm.prank(bob);
+        uint256 got = router.sell(token, dumped, 0, bob, MAX);
+        assertEq(hook.lock(token), 0, "nothing locked");
+        assertEq(hook.lockHeld(token), held, "the claims wait");
+        assertEq(hook.bidCount(token), 0);
+
+        // Back above it (after the window, so the buy-back pays no surcharge), the bid goes in.
+        _step(hook.SNIPE_BLOCKS());
+        vm.prank(bob);
+        router.buy(token, got * 2, 0, bob, MAX);
+        assertGt(hook.lock(token), 0, "locked");
+        assertLe(hook.lockHeld(token), 2);
+        _assertHookClean(token);
+    }
+
     // ─── Helpers ──────────────────────────────────────────────────────────────
+
+    /// @dev The hook's bid range for a launch, recomputed from V14-SPEC §5: its top about half the graduation price,
+    ///      BID_SPAN_TICKS deep.
+    function _expectedBid(IArchitexLaunchHook.Launch memory l) internal view returns (int24 lower, int24 upper) {
+        int24 d = hook.BID_DISCOUNT_TICKS();
+        int24 span = hook.BID_SPAN_TICKS();
+        if (l.usdcIs0) {
+            int256 t = int256(l.graduationTick) + d + 1;
+            int256 c = t / 200;
+            if (t > 0 && t % 200 != 0) c++;
+            lower = int24(c * 200);
+            upper = lower + span;
+        } else {
+            int256 t = int256(l.graduationTick) - d;
+            int256 c = t / 200;
+            if (t < 0 && t % 200 != 0) c--;
+            upper = int24(c * 200);
+            lower = upper - span;
+        }
+    }
+
+    function _assertBid(Vm.Log[] memory logs, address token, uint256 salt, int24 lower, int24 upper) internal view {
+        bytes32 sig = keccak256("BidLocked(address,uint256,uint128,int24,int24)");
+        bool found;
+        for (uint256 i; i < logs.length; ++i) {
+            if (logs[i].topics[0] != sig || address(uint160(uint256(logs[i].topics[1]))) != token) continue;
+            (,, int24 lo, int24 hi) = abi.decode(logs[i].data, (uint256, uint128, int24, int24));
+            assertEq(lo, lower, "bid lower tick");
+            assertEq(hi, upper, "bid upper tick");
+            found = true;
+        }
+        assertTrue(found, "a bid was locked");
+        assertEq(hook.bidCount(token), salt, "fresh salt");
+    }
 
     function _slot0(PoolKey memory key) internal view returns (uint160 sqrtP, int24 tick, uint24 a, uint24 b) {
         bytes32 data = manager.extsload(keccak256(abi.encodePacked(PoolId.unwrap(key.toId()), bytes32(uint256(6)))));

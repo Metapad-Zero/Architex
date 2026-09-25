@@ -143,8 +143,9 @@ contract LaunchTokenV14 is ERC20, ILaunchTokenV14 {
 
     /// @inheritdoc ILaunchTokenExtensions
     function isExcluded(address account) public view returns (bool) {
-        return account == launchpad || account == poolManager || account == hook || account == _DEAD
-            || account == address(0);
+        return
+            account == launchpad || account == poolManager || account == hook || account == _DEAD
+                || account == address(0);
     }
 
     /// @inheritdoc ILaunchTokenExtensions

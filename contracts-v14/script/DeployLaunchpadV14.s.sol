@@ -12,7 +12,7 @@ import {SplitPlugin} from "../../contracts/plugins/launch/SplitPlugin.sol";
 import {HolderDistributionPlugin} from "../../contracts/plugins/launch/HolderDistributionPlugin.sol";
 import {ComboPlugin} from "../../contracts/plugins/launch/ComboPlugin.sol";
 
-/// @notice Deploys launchpad v1.4 (V14-SPEC §10): the launchpad, the Uniswap v4 hook at a mined address, the router,
+/// @notice Deploys launchpad v1.4 (V14-SPEC §11): the launchpad, the Uniswap v4 hook at a mined address, the router,
 ///         the wiring, and the three plugins v1.3 lists that run unchanged (Split, Distribute to holders, Combo). The
 ///         deployer gets no role; `feeTo` and `feeToSetter` hold the only admin power (the platform fee's destination
 ///         and the launch fee), as in v1.3.
@@ -30,7 +30,7 @@ contract DeployLaunchpadV14 is Script {
     address internal constant ARC_POOL_MANAGER = 0x8366a39CC670B4001A1121B8F6A443A643e40951;
     uint160 internal constant HOOK_FLAGS = uint160(
         Hooks.BEFORE_INITIALIZE_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG
-            | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG
+            | Hooks.BEFORE_DONATE_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG
     );
 
     struct Deployment {
@@ -79,9 +79,19 @@ contract DeployLaunchpadV14 is Script {
         // solhint-disable-next-line no-console
         console.log(
             string.concat(
-                '{"launchpad":"', vm.toString(d.launchpad), '","hook":"', vm.toString(d.hook), '","router":"',
-                vm.toString(d.router), '","split":"', vm.toString(d.split), '","holders":"', vm.toString(d.holders),
-                '","combo":"', vm.toString(d.combo), '"}'
+                '{"launchpad":"',
+                vm.toString(d.launchpad),
+                '","hook":"',
+                vm.toString(d.hook),
+                '","router":"',
+                vm.toString(d.router),
+                '","split":"',
+                vm.toString(d.split),
+                '","holders":"',
+                vm.toString(d.holders),
+                '","combo":"',
+                vm.toString(d.combo),
+                '"}'
             )
         );
     }
