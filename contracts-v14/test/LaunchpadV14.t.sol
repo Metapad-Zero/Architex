@@ -15,7 +15,8 @@ import {V14Base} from "./V14Base.sol";
 
 /// @notice The v1.4 core: graduation into Uniswap v4, the hook's fees on every kind of swap, both snipe windows and
 ///         their locked bids, open and closed pools. Run for USDC on either side of the token (the two contracts at the
-///         bottom), since Arc's USDC sorts below about a fifth of token addresses and above the rest.
+///         bottom), since Arc's USDC (0x36...) sorts below about four in five token addresses (currency0 in most pools)
+///         and above the rest.
 abstract contract LaunchpadV14Test is V14Base {
     using PoolIdLibrary for PoolKey;
 
