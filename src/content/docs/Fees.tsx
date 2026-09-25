@@ -64,6 +64,27 @@ export function DocsFees() {
         burned straight away.
       </p>
       <p>
+        <span className="font-semibold text-ink">Deepen pool</span> does Buyback &amp; burn's job and
+        one more, under one budget. While the token is on its curve, every run buys the token and
+        burns it. Once it graduates, each run splits in two: the burn share buys the token and burns
+        it, and the rest buys the token and adds it to the launch pool with USDC, as new liquidity
+        that's locked at the burn address for good. The creator picks the burn share at launch, from
+        0% (everything goes into the pool) to 100% (everything is burned), 50% to start, and it's
+        locked like the rest. Anyone can run it, paced like a buyback: at most 0.25% of the curve's
+        USDC side per hour, and after graduation of the pool's locked USDC, the part that belongs to
+        liquidity at the burn address. Liquidity that can be taken back out doesn't count, so parking
+        some in the pool for a moment can't make a run spend more.
+      </p>
+      <p>
+        Burning takes tokens out of the pool and leaves the USDC in, so per USDC it lifts the price
+        about twice as much as adding liquidity does. That cuts both ways: a higher burn share lifts
+        the price faster, and a lower one makes buying ahead of the runs take longer to pay off. At a
+        1% creator fee, a trader doing that has to hold about five hours at 100%, seven at the default
+        50% and eleven at 0%; on the curve, where every run burns, the hours are Buyback &amp; burn's.
+        It's also why a Combo can't hold both Deepen pool and Buyback &amp; burn: each paces its own
+        spending, so together they'd spend twice as fast and cut those hours by more than half.
+      </p>
+      <p>
         <span className="font-semibold text-ink">Distribute to holders</span> pays the fees to
         the token's holders in USDC. It passes each collection straight to the token, which
         streams it out over about 24 hours, and you earn for every second you hold, in proportion
@@ -82,8 +103,9 @@ export function DocsFees() {
       <p>
         <span className="font-semibold text-ink">Combo</span> splits the fees across up to five
         of these destinations by percentage, adding up to exactly 100%: wallets, a Split, Buyback
-        &amp; burn, or Distribute to holders, each plugin at most once. Every collection is split
-        on the spot; the last destination takes any rounding.
+        &amp; burn, Deepen pool, or Distribute to holders, each plugin at most once, and never
+        Deepen pool beside Buyback &amp; burn. Every collection is split on the spot; the last
+        destination takes any rounding.
       </p>
       <p>
         Plugins are listed in the builder after their code has been reviewed by pull request.

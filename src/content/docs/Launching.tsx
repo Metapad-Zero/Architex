@@ -10,8 +10,8 @@ export function DocsLaunching() {
       <p>
         You also set the token's creator fee, from 0% to 10% of every buy and sell (it starts at
         0%), and where that fee goes: your wallet, another wallet, a Split, Buyback &amp; burn
-        (paused for new launches for now), Distribute to holders, a Combo of those, or any
-        address you paste. The builder checks a plugin's settings the way the plugin itself will, so a Split with a duplicate payee or a
+        (paused for new launches for now), Deepen pool, Distribute to holders, a Combo of those,
+        or any address you paste. The builder checks a plugin's settings the way the plugin itself will, so a Split with a duplicate payee or a
         Combo that doesn't add up to 100% is caught before you sign. See{' '}
         <span className="font-semibold">Creator fees &amp; plugins</span> for what each one does.
         Your own first buy pays the creator fee like any other buy.

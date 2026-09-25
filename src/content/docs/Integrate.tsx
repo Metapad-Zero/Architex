@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import { zeroAddress } from 'viem'
 import mainnet from '../../deployments/arc-mainnet.json'
 import testnet from '../../deployments/arc-testnet.json'
 import { LAUNCH_TOPICS, MAINNET_USDC_EURC_PAIR, PAIR_INIT_CODE_HASH, UNISWAP_V2_TOPICS } from '../../lib/integration'
@@ -61,11 +62,13 @@ interface Deployment {
   buybackPlugin: string
   holderPlugin: string
   comboPlugin: string
+  deepenPlugin: string
   tokens: ReadonlyArray<{ symbol: string; address: string; decimals: number }>
 }
 
 function contractRows(deployment: Deployment, extra: ReadonlyArray<readonly [string, string]> = []): ReadonlyArray<readonly [string, ReactNode]> {
-  const address = (value: string) => <Address address={value} explorer={deployment.explorerBase} />
+  // A contract listed before it is deployed sits at the zero address in the deployment file.
+  const address = (value: string) => (value === zeroAddress ? 'Not deployed yet' : <Address address={value} explorer={deployment.explorerBase} />)
   return [
     ['Core factory', address(deployment.factory)],
     ['Core router', address(deployment.router)],
@@ -75,6 +78,7 @@ function contractRows(deployment: Deployment, extra: ReadonlyArray<readonly [str
     ['Launch router', address(deployment.launchRouter)],
     ['Plugin: Split', address(deployment.splitPlugin)],
     ['Plugin: Buyback & burn', address(deployment.buybackPlugin)],
+    ['Plugin: Deepen pool', address(deployment.deepenPlugin)],
     ['Plugin: Holders', address(deployment.holderPlugin)],
     ['Plugin: Combo', address(deployment.comboPlugin)],
     ...extra.map(([name, value]) => [name, address(value)] as const),
