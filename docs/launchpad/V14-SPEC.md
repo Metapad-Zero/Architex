@@ -21,7 +21,8 @@ graduates into Uniswap, where the trading already is, with a hook that keeps cha
   the first seconds, both when a token opens on the curve and when its Uniswap pool opens. What it collects becomes
   permanent liquidity in that token's pool.
 - **D3 [decided]: outside liquidity is the creator's choice.** At launch the creator picks an open pool (anyone may add
-  and remove their own liquidity) or a closed one (only the locked launch liquidity and listed liquidity plugins).
+  and remove their own liquidity) or a closed one (only the liquidity the hook adds: the locked launch position and the
+  bids; a listed liquidity plugin such as Deepen pool v1.4 will add through the hook).
   Fixed forever, like the creator fee.
 - **Carried over from v1.3 unchanged:** every curve identical (same constants); 0.5% platform fee and the creator's
   0 to 10% on every buy and sell, both in USDC and rounded up; the creator fee's destination chosen at launch from the
@@ -41,8 +42,9 @@ Mainnet (developers.uniswap.org, code confirmed on chain 2026-09-25):
 | Universal Router | `0x4fcA4a51Ab4F23A7447b3284fBd7D73289A89Fb1` |
 | Permit2 | `0x000000000022D473030F116dDEE9F6B43aC78BA3` |
 
-A PoolManager with the same code is at the same address on Arc Testnet; whether the periphery is there too is
-**[research]** (if not, the rehearsal deploys its own).
+The whole v4 stack is on Arc Testnet at the same addresses (PoolManager, StateView and Quoter with identical code; the
+PositionManager, the Universal Routers and Permit2 at the same addresses with their own immutables), so the rehearsal
+uses Uniswap's own contracts there.
 
 **Routing [researched 2026-09-25].** Uniswap's app and API route through a v4 hook only if it is on Uniswap's
 per-chain routing allowlist; a hook that uses delta flags or dynamic fees (any fee hook, ours included) has to be
@@ -65,9 +67,10 @@ the BUSL `Position.sol`, so the hook reads the pool's price with its own copy of
 - **`beforeInitialize`:** v4 skips a hook's own callbacks when the hook itself is the caller, so the hook opens pools as
   itself (in `graduate`, launchpad only) and refuses every other initializer. Nobody can open one of our pools early or
   at the wrong price.
-- **`beforeAddLiquidity` / `beforeRemoveLiquidity`:** closed pools accept liquidity only from the launchpad (the
-  graduation position) and listed liquidity plugins; open pools accept anyone. The locked positions belong to the
-  hook, which has no function that removes them. Outside LPs in an open pool can remove their own liquidity.
+- **`beforeAddLiquidity`:** closed pools accept liquidity only from the hook itself (v4 skips the callback when the hook
+  is the caller, so reaching it at all means an outsider); open pools accept anyone. There is no remove callback: v4
+  keys every position by its owner, the locked positions belong to the hook, and the hook has no code that removes
+  liquidity. Outside LPs in an open pool can remove their own.
 - **`beforeSwap` / `afterSwap` with return deltas:** take the platform fee and the creator fee **in USDC on both
   sides**, computed on the swap's USDC amount and rounded up, whichever side is exact:
   - a buy pays them out of the USDC in; a sell out of the USDC out (the v1.3 rule);
@@ -78,9 +81,8 @@ the BUSL `Position.sol`, so the hook reads the pool's price with its own copy of
     fees on USDC the pool did not take or give (`PartialFill`).
 - **LP fee [proposed]:** 0 for closed pools, as in v1.3's launch pools; the trading cost is the platform and creator
   fees. For open pools see §6.
-- **PoolKey:** the token and USDC, sorted; the LP fee; a tick spacing wide enough for one full-range position
-  **[proposed: 200]**; the hook. Which USDC currency (the ERC-20 at `0x3600…`, or native) is **[research]**; v1.3 and
-  the rest of Architex use the ERC-20.
+- **PoolKey:** the token and USDC, sorted; LP fee 0; tick spacing 200; the hook. USDC is the 6-decimal ERC-20 at
+  `0x3600…`, as in v1.3 and nearly every Arc launchpad, settled by sync, transfer, settle.
 
 ## 4. Graduation into Uniswap
 
@@ -114,7 +116,9 @@ the BUSL `Position.sol`, so the hook reads the pool's price with its own copy of
     cannot move the bid anywhere worth selling into.
   - On the curve there is no pool yet: the launchpad holds it for the token (`pendingSnipe`) and the hook locks it in at
     graduation, the same way, at the graduation price. If a curve never graduates it stays in the launchpad for good
-    (the default the owner did not change). It never changes the curve, so every curve stays identical.
+    (the default the owner did not change). The curve's parameters stay identical for every token; like the other fees,
+    the snipe fee comes off a buy before the rest moves the curve, so a buy inside the window moves the price less than
+    the same gross buy after it.
 
 ## 6. Open or closed pools [decided: D3]
 
@@ -137,9 +141,10 @@ the BUSL `Position.sol`, so the hook reads the pool's price with its own copy of
 
 ## 8. Trading after graduation
 
-- **architex.fun:** a small Architex router (exact-in buy and sell with a minimum out and a deadline, via the
-  PoolManager's unlock callback), or the Universal Router with Permit2 **[proposed: our router first, the Universal
-  Router once the hook is allowlisted]**. Quotes from the v4 Quoter, which runs the hook, so they include every fee.
+- **architex.fun:** the Architex v4 router (`contracts-v14/src/ArchitexV4Router.sol`): exact-in buy and sell with a
+  minimum out and a deadline, through the PoolManager's unlock; a sell needs no approval (the token lets the router
+  pull, always from its own caller); it pays only what the swap consumed. Its quotes simulate the swap and revert with
+  the result (the v4 Quoter's pattern), so they include every fee the hook takes.
 - **Everyone else:** wallets, the Uniswap app and aggregators through the Universal Router, once Uniswap lists the
   hook (§2).
 
@@ -151,6 +156,26 @@ the BUSL `Position.sol`, so the hook reads the pool's price with its own copy of
   launchpad and the router.
 - The builder gains the open/closed choice; the token page shows it, the anti-snipe window, and which pool the token
   trades in.
+
+## 9. Accepted limits
+
+- **A buy's fee leaves the PoolManager before the buyer pays in** (Grok #7, Medium, accepted). The hook takes the fees
+  out in `afterSwap`; the buyer's router settles after the swap returns. If a buy's fee is larger than all the USDC the
+  PoolManager holds at that moment, the transfer fails and the buy reverts. Nothing can be taken or skipped; it only
+  refuses a buy. The PoolManager holds every USDC pool on Arc (about 4.1M USDC on 2026-09-25), and at least every v1.4
+  pool's locked USDC, so it takes a buy of several million USDC inside the opening window (fees up to 99%), or tens of
+  millions after it (at most 10.5%), to hit it. Minting ERC-6909 claims instead of taking would remove it at the cost of
+  a second step before the launchpad could pay out.
+- **An open pool's bid can be held off** (Grok #7, Low, accepted). A bid runs to the extreme usable tick, which the
+  full-range position also uses. In an open pool, an LP who parks about 21M USDC one tick-spacing wide at that extreme
+  (it comes back out on removal: no LP fee, far from the price) fills the tick's liquidity cap, and `lock` reverts
+  while it stays. The USDC is not lost; it stays in `lockHeld` until the position leaves. Closed pools cannot be
+  touched this way.
+- **Other v4 pools for the same token.** Anyone can open another v4 pool for a launch token (a different fee, no hook);
+  before graduation it cannot be funded (the token refuses transfers into the PoolManager), after it nothing stops it.
+  Uniswap's app may route buyers into such a pool until our hook is allowlisted (§2).
+- v1.3's accepted limits (V13-SPEC §9) still hold where they concern the curve, the dividend token, fee destinations
+  and plugins.
 
 ## 10. Build, review and rollout
 

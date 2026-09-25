@@ -96,20 +96,24 @@ contract ArchitexV4Router is IArchitexV4Router, IUnlockCallback {
             }),
             ""
         );
-        int128 outDelta = zeroForOne ? delta.amount1() : delta.amount0();
-        uint256 amountOut = uint256(uint128(outDelta));
+        // Pay what the swap actually consumed (all of amountIn, unless the price limit stopped it) and take what it
+        // gave: a swap that stops early then settles instead of reverting, and the trader keeps the rest.
+        uint256 amountIn = uint256(uint128(-(zeroForOne ? delta.amount0() : delta.amount1())));
+        uint256 amountOut = uint256(uint128(zeroForOne ? delta.amount1() : delta.amount0()));
         if (s.quote) revert Quote(amountOut);
         if (amountOut < s.minOut) revert SlippageExceeded();
 
         (address payToken, address outToken) = s.side == _BUY ? (usdc, s.token) : (s.token, usdc);
-        IPoolManager(poolManager).sync(Currency.wrap(payToken));
-        if (s.side == _BUY) {
-            IERC20(usdc).safeTransferFrom(s.payer, poolManager, s.amountIn);
-        } else {
-            ILaunchTokenV14(s.token).pull(s.payer, poolManager, s.amountIn);
+        if (amountIn != 0) {
+            IPoolManager(poolManager).sync(Currency.wrap(payToken));
+            if (s.side == _BUY) {
+                IERC20(usdc).safeTransferFrom(s.payer, poolManager, amountIn);
+            } else {
+                ILaunchTokenV14(s.token).pull(s.payer, poolManager, amountIn);
+            }
+            IPoolManager(poolManager).settle();
         }
-        IPoolManager(poolManager).settle();
-        IPoolManager(poolManager).take(Currency.wrap(outToken), s.to, amountOut);
+        if (amountOut != 0) IPoolManager(poolManager).take(Currency.wrap(outToken), s.to, amountOut);
         return abi.encode(amountOut);
     }
 
