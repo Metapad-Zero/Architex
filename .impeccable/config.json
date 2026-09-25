@@ -1,0 +1,32 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "gradient-text",
+        "value": "*",
+        "files": [
+          "public/home/index.html"
+        ],
+        "createdAt": "2026-09-25T19:05:45.792Z",
+        "reason": "Marketing landing modeled on nuvex.family per owner request; owner approved the page as the main page 2026-09-25"
+      },
+      {
+        "rule": "dark-glow",
+        "value": "*",
+        "files": [
+          "public/home/index.html"
+        ],
+        "createdAt": "2026-09-25T19:05:45.817Z",
+        "reason": "Marketing landing modeled on nuvex.family per owner request; approved by owner 2026-09-25"
+      },
+      {
+        "rule": "design-system-font",
+        "value": "public sans",
+        "createdAt": "2026-09-25T19:05:45.841Z",
+        "reason": "Same family as DESIGN.md's 'Public Sans Variable'"
+      }
+    ]
+  }
+}
