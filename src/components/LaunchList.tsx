@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import type { Address } from 'viem'
-import { launchFacts, type LaunchRecord } from '../lib/launch'
+import { isPriced, launchFacts, type LaunchRecord } from '../lib/launch'
 import { parseLaunchAddress } from '../lib/launchPages'
 import { destinationLabel, feeDestination } from '../lib/plugins/destination'
 import { relativeTime } from '../lib/recent'
@@ -127,7 +127,7 @@ function LaunchRow({ launch, now, onOpen }: { launch: LaunchRecord; now: number;
           </span>
         </button>
       </th>
-      <td data-label="Market cap">{launch.graduated && !launch.pool ? GHOST : facts.cap}</td>
+      <td data-label="Market cap">{isPriced(launch) ? facts.cap : GHOST}</td>
       <td data-label="Creator fee">
         <span className="launch-fee">
           <FeeGauge bps={launch.creatorFeeBps} label={`${launch.symbol} creator fee`} />

@@ -1,6 +1,7 @@
 import { useId, useRef } from 'react'
 import type { Address } from 'viem'
 import { LISTED_PLUGINS, isPluginOffered, listedPlugin, type ListedPluginKind } from '../content/plugins/registry'
+import type { LaunchSuite, LaunchVersion } from '../lib/deployment'
 import { GHOST, formatPct, shortAddress } from '../lib/format'
 import {
   MAX_COMBO_ENTRIES,
@@ -35,13 +36,21 @@ function isListedKind(kind: string): kind is ListedPluginKind {
   return kind === 'split' || kind === 'buyback' || kind === 'deepen' || kind === 'holders' || kind === 'combo'
 }
 
-function available(kind: FeePlanKind): boolean {
-  return !isListedKind(kind) || isPluginOffered(listedPlugin(kind))
+/** The launchpad the builder creates on, whose plugins it offers: they bind to one launchpad when deployed. */
+interface Launchpad {
+  suite: LaunchSuite
+  version: LaunchVersion
 }
 
-/** Why a listed plugin is not offered: paused for new launches, or not deployed on this network. */
-function unavailableReason(kind: FeePlanKind): string {
-  return (isListedKind(kind) && listedPlugin(kind).paused) || 'Not deployed on this network yet.'
+function available(kind: FeePlanKind, launchpad: Launchpad): boolean {
+  return !isListedKind(kind) || isPluginOffered(listedPlugin(kind), launchpad.suite)
+}
+
+/** Why a listed plugin is not offered: none for this launchpad's version, paused for new launches, or not deployed here. */
+function unavailableReason(kind: FeePlanKind, launchpad: Launchpad): string {
+  if (!isListedKind(kind)) return 'Not deployed on this network yet.'
+  const plugin = listedPlugin(kind)
+  return (launchpad.version === 'v14' && plugin.notOnV14) || plugin.paused || 'Not deployed on this network yet.'
 }
 
 function kindName(kind: FeePlanKind): string {
@@ -49,9 +58,9 @@ function kindName(kind: FeePlanKind): string {
 }
 
 /** A new plan of `kind`, as the picker shows it when that kind is chosen. */
-export function initialPlan(kind: FeePlanKind, creator?: Address): FeePlan {
+export function initialPlan(kind: FeePlanKind, launchpad: Launchpad, creator?: Address): FeePlan {
   if (kind !== 'combo') return emptyTarget(kind, creator)
-  const second: SimpleTarget['kind'] = available('buyback') ? 'buyback' : available('holders') ? 'holders' : 'custom'
+  const second: SimpleTarget['kind'] = available('buyback', launchpad) ? 'buyback' : available('holders', launchpad) ? 'holders' : 'custom'
   return {
     kind: 'combo',
     entries: [
@@ -208,6 +217,7 @@ function PayeeList({ idPrefix, payees, onChange, errors, prefix, showErrors }: P
 
 interface ComboEditorProps {
   idPrefix: string
+  launchpad: Launchpad
   entries: ComboEntry[]
   onChange: (entries: ComboEntry[]) => void
   errors: Record<string, string>
@@ -216,11 +226,11 @@ interface ComboEditorProps {
   probed: ReadonlySet<string>
 }
 
-function ComboEditor({ idPrefix, entries, onChange, errors, showErrors, account, probed }: ComboEditorProps) {
+function ComboEditor({ idPrefix, launchpad, entries, onChange, errors, showErrors, account, probed }: ComboEditorProps) {
   const allocated = entries.reduce((sum, entry) => sum + (parsePercentBps(entry.percent, TOTAL_BPS).bps ?? 0), 0)
   const usedListed = new Set(entries.map((entry) => entry.target.kind).filter((kind) => isListedKind(kind)))
   const update = (id: string, patch: Partial<ComboEntry>) => onChange(entries.map((entry) => (entry.id === id ? { ...entry, ...patch } : entry)))
-  const addKind = ENTRY_KINDS.find((kind) => available(kind) && !(isListedKind(kind) && usedListed.has(kind))) ?? 'custom'
+  const addKind = ENTRY_KINDS.find((kind) => available(kind, launchpad) && !(isListedKind(kind) && usedListed.has(kind))) ?? 'custom'
   // Deepen pool and Buyback & burn are never offered side by side (comboRival in lib/plugins/plan.ts says why).
   const clashes = (option: SimpleTarget['kind'], id: string) => {
     const rival = comboRival(option)
@@ -250,7 +260,7 @@ function ComboEditor({ idPrefix, entries, onChange, errors, showErrors, account,
                       <option
                         key={option}
                         value={option}
-                        disabled={!available(option) || (option !== kind && isListedKind(option) && usedListed.has(option)) || clashes(option, entry.id)}
+                        disabled={!available(option, launchpad) || (option !== kind && isListedKind(option) && usedListed.has(option)) || clashes(option, entry.id)}
                       >
                         {kindName(option)}
                       </option>
@@ -313,7 +323,9 @@ function ComboEditor({ idPrefix, entries, onChange, errors, showErrors, account,
       </div>
       <FieldErrors errors={errors} keys={['entries', 'combo']} show={showErrors} idPrefix={idPrefix} />
       <p className="mt-3 text-xs leading-5 text-g500">
-        Each collection is split by these shares; the last destination takes any rounding. One of each plugin (Deepen pool or Buyback &amp; burn, not both), and up to five destinations in all.
+        {launchpad.version === 'v14'
+          ? 'Each collection is split by these shares; the last destination takes any rounding. One of each plugin, and up to five destinations in all.'
+          : 'Each collection is split by these shares; the last destination takes any rounding. One of each plugin (Deepen pool or Buyback & burn, not both), and up to five destinations in all.'}
       </p>
     </div>
   )
@@ -489,6 +501,8 @@ function TargetConfig({ idPrefix, target, onTarget, errors, errorKey, prefix, sh
 }
 
 interface FeeDestinationPickerProps {
+  /** The launchpad the token is created on: its own plugins are the ones offered. */
+  launchpad: Launchpad
   plan: FeePlan
   onPlan: (plan: FeePlan) => void
   errors: Record<string, string>
@@ -503,14 +517,14 @@ interface FeeDestinationPickerProps {
  * Listed plugins are configured here; a wallet or a custom address takes no settings. It says where the fees go
  * and nothing more: no plugin is called safe [D7].
  */
-export function FeeDestinationPicker({ plan, onPlan, errors, showErrors, account, probed }: FeeDestinationPickerProps) {
+export function FeeDestinationPicker({ launchpad, plan, onPlan, errors, showErrors, account, probed }: FeeDestinationPickerProps) {
   const id = useId().replace(/:/g, '')
   // Switching between options keeps what was typed in each, so a detour does not lose a Split's payees.
   const drafts = useRef(new Map<FeePlanKind, FeePlan>())
   const choose = (kind: FeePlanKind) => {
     if (kind === plan.kind) return
     drafts.current.set(plan.kind, plan)
-    onPlan(drafts.current.get(kind) ?? initialPlan(kind, account))
+    onPlan(drafts.current.get(kind) ?? initialPlan(kind, launchpad, account))
   }
   const selected = OPTIONS.find((option) => option.kind === plan.kind) ?? WALLET
 
@@ -522,7 +536,7 @@ export function FeeDestinationPicker({ plan, onPlan, errors, showErrors, account
       </p>
       <div className="fee-options">
         {OPTIONS.map((option) => {
-          const open = available(option.kind)
+          const open = available(option.kind, launchpad)
           const checked = plan.kind === option.kind
           return (
             <label key={option.kind} className="fee-option" data-selected={checked} data-disabled={!open || undefined}>
@@ -536,7 +550,7 @@ export function FeeDestinationPicker({ plan, onPlan, errors, showErrors, account
                 onChange={() => choose(option.kind)}
               />
               <span className="fee-option-name">{option.name}</span>
-              <span className="fee-option-tagline">{open ? option.tagline : unavailableReason(option.kind)}</span>
+              <span className="fee-option-tagline">{open ? option.tagline : unavailableReason(option.kind, launchpad)}</span>
             </label>
           )
         })}
@@ -545,6 +559,7 @@ export function FeeDestinationPicker({ plan, onPlan, errors, showErrors, account
         {plan.kind === 'combo' ? (
           <ComboEditor
             idPrefix={id}
+            launchpad={launchpad}
             entries={plan.entries}
             onChange={(entries) => onPlan({ kind: 'combo', entries })}
             errors={errors}

@@ -57,3 +57,21 @@ export function withoutLaunchPools<P extends { token0: Address; token1: Address 
   const allowed = (token: Address) => !asked.has(token.toLowerCase()) || shown.has(token.toLowerCase())
   return pairs.filter((pair) => allowed(pair.token0) && allowed(pair.token1))
 }
+
+/**
+ * One answer per candidate from several launchpads' `pluginOf` lookups (each list in the candidates' order): a token
+ * any launchpad launched is a launch token; a token is cleared only once every launchpad has said it is not; anything
+ * else (a launchpad not answered yet, or a failed read) holds it back, as withoutLaunchPools holds back a failure.
+ */
+export function combineLaunchLookups(
+  perLaunchpad: readonly (readonly (LaunchLookup | undefined)[] | undefined)[],
+  count: number,
+): (LaunchLookup | undefined)[] {
+  return Array.from({ length: count }, (_, index) => {
+    const answers = perLaunchpad.map((lookups) => lookups?.[index])
+    const launched = answers.find((answer) => answer?.status === 'success' && answer.result !== zeroAddress)
+    if (launched) return launched
+    if (answers.length > 0 && answers.every((answer) => answer?.status === 'success')) return answers[0]
+    return answers.find((answer) => answer?.status === 'failure')
+  })
+}

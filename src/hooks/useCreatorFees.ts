@@ -1,14 +1,23 @@
 import { useQuery } from '@tanstack/react-query'
 import { useCallback, useState, useSyncExternalStore } from 'react'
-import type { Address, Hash, PublicClient } from 'viem'
+import { zeroAddress, type Address, type Hash, type PublicClient } from 'viem'
 import { useAccount, usePublicClient, useWriteContract } from 'wagmi'
 import { activeChain } from '../chain'
 import { listedPluginAt, pluginAddress, listedPlugin } from '../content/plugins/registry'
-import { buybackPluginAbi, comboPluginAbi, deepenPluginAbi, launchpadAbi, launchpadWithPluginErrorsAbi, splitPluginAbi } from '../lib/abi'
-import { deployment, isLaunchpadDeployed } from '../lib/deployment'
+import {
+  buybackPluginAbi,
+  comboPluginAbi,
+  deepenPluginAbi,
+  launchpadAbi,
+  launchpadV14Abi,
+  launchpadV14WithPluginErrorsAbi,
+  launchpadWithPluginErrorsAbi,
+  splitPluginAbi,
+} from '../lib/abi'
+import { isLaunchpadDeployed, isLaunchpadV14Deployed, launchSuite, launchSuiteV14, suiteFor } from '../lib/deployment'
 import { isUserRejection, revertReason } from '../lib/errors'
 import { formatAmount, shortAddress } from '../lib/format'
-import type { LaunchRecord } from '../lib/launch'
+import { launchVersion, type LaunchRecord } from '../lib/launch'
 import { launchFixtureApi } from '../lib/launchFixtureApi'
 import { claimCall, dividendReads, hasDividends, holderReads, type HolderDividends } from '../lib/plugins/holders'
 import type { BuybackState, ComboEntryState, CreatorFeeState, DeepenState, SplitState } from '../lib/plugins/state'
@@ -118,13 +127,19 @@ async function readHolders(client: PublicClient, token: Address, account: Addres
  * Combo is followed one level down, to the listed plugins among its entries (each serves this token too).
  * Which plugins serve the token comes only from its registered plugin, the launchpad's stored hooks flag and the
  * Combo's allocationOf (with its stored isPlugin flags), never from isConfigured or Configured events, which a
- * token's registered plugin can set on any listed plugin without changing where the fees go (V13-SPEC §9).
+ * token's registered plugin can set on any listed plugin without changing where the fees go (V13-SPEC §9). The
+ * launchpad and the plugins are the token's own: v1.4 tokens have their own launchpad, Split, Distribute to holders
+ * and Combo.
  */
 async function readCreatorFees(client: PublicClient, launch: LaunchRecord, account: Address | undefined): Promise<CreatorFeeState> {
   const token = launch.token
-  const listed = launch.pluginHooks ? listedPluginAt(launch.plugin) : undefined
+  const v14 = launchVersion(launch) === 'v14'
+  const suite = suiteFor(launchVersion(launch))
+  const listed = launch.pluginHooks ? listedPluginAt(launch.plugin, suite) : undefined
   const [pending, allocation] = await Promise.all([
-    client.readContract({ address: deployment.launchpad, abi: launchpadAbi, functionName: 'pendingCreatorFees', args: [token] }),
+    v14
+      ? client.readContract({ address: launchSuiteV14.launchpad, abi: launchpadV14Abi, functionName: 'pendingCreatorFees', args: [token] })
+      : client.readContract({ address: launchSuite.launchpad, abi: launchpadAbi, functionName: 'pendingCreatorFees', args: [token] }),
     listed?.kind === 'combo'
       ? client.readContract({ address: launch.plugin, abi: comboPluginAbi, functionName: 'allocationOf', args: [token] })
       : Promise.resolve(undefined),
@@ -133,14 +148,15 @@ async function readCreatorFees(client: PublicClient, launch: LaunchRecord, accou
     ? allocation[0].map((target, index) => ({ target, bps: Number(allocation[1][index] ?? 0), isPlugin: Boolean(allocation[2][index]) }))
     : undefined
   const serves = (kind: 'split' | 'buyback' | 'deepen' | 'holders') => {
-    const address = pluginAddress(listedPlugin(kind))
+    const address = pluginAddress(listedPlugin(kind), suite)
+    if (address === zeroAddress) return false
     if (listed?.kind === kind) return true
     return Boolean(combo?.some((entry) => entry.isPlugin && same(entry.target, address)))
   }
   const [split, buyback, deepen, dividends] = await Promise.all([
-    serves('split') ? readSplit(client, pluginAddress(listedPlugin('split')), token) : Promise.resolve(undefined),
-    serves('buyback') ? readBuyback(client, pluginAddress(listedPlugin('buyback')), token) : Promise.resolve(undefined),
-    serves('deepen') ? readDeepen(client, pluginAddress(listedPlugin('deepen')), token) : Promise.resolve(undefined),
+    serves('split') ? readSplit(client, pluginAddress(listedPlugin('split'), suite), token) : Promise.resolve(undefined),
+    serves('buyback') ? readBuyback(client, pluginAddress(listedPlugin('buyback'), suite), token) : Promise.resolve(undefined),
+    serves('deepen') ? readDeepen(client, pluginAddress(listedPlugin('deepen'), suite), token) : Promise.resolve(undefined),
     // Every launch token carries dividends, and anyone can distribute to one, so they are read for every token.
     readHolders(client, token, account),
   ])
@@ -161,9 +177,11 @@ export function useCreatorFees(launch: LaunchRecord | undefined, onChanged?: () 
   const [busy, setBusy] = useState<CreatorFeeAction>()
   const [status, setStatus] = useState<{ action: CreatorFeeAction; tx: SwapTxStatus }>()
 
+  const v14 = launch !== undefined && launchVersion(launch) === 'v14'
+  const suite = suiteFor(launch ? launchVersion(launch) : undefined)
   const query = useQuery<CreatorFeeState, Error>({
-    queryKey: ['creatorFees', activeChain.id, launch?.token, launch?.plugin, account],
-    enabled: !fixtureOn && isLaunchpadDeployed && Boolean(launch) && Boolean(publicClient),
+    queryKey: ['creatorFees', activeChain.id, launch?.version, launch?.token, launch?.plugin, account],
+    enabled: !fixtureOn && (v14 ? isLaunchpadV14Deployed : isLaunchpadDeployed) && Boolean(launch) && Boolean(publicClient),
     // A holder's claimable grows every second; a poll every 10s keeps it current without animating it.
     refetchInterval: 10_000,
     placeholderData: (previous) => previous,
@@ -214,17 +232,25 @@ export function useCreatorFees(launch: LaunchRecord | undefined, onChanged?: () 
       'collect',
       `Collected ${formatAmount(amount, 6)} USDC of ${symbol} creator fees`,
       () =>
-        writeContractAsync({
-          chainId: activeChain.id,
-          address: deployment.launchpad,
-          // onFees runs inside the collection: plugin errors are in this ABI so a refusal decodes.
-          abi: launchpadWithPluginErrorsAbi,
-          functionName: 'collectCreatorFees',
-          args: [token],
-        }),
+        // onFees runs inside the collection: plugin errors are in these ABIs so a refusal decodes.
+        v14
+          ? writeContractAsync({
+              chainId: activeChain.id,
+              address: launchSuiteV14.launchpad,
+              abi: launchpadV14WithPluginErrorsAbi,
+              functionName: 'collectCreatorFees',
+              args: [token],
+            })
+          : writeContractAsync({
+              chainId: activeChain.id,
+              address: launchSuite.launchpad,
+              abi: launchpadWithPluginErrorsAbi,
+              functionName: 'collectCreatorFees',
+              args: [token],
+            }),
       () => api!.collect(token),
     )
-  }, [act, api, launch, state?.pending, symbol, token, writeContractAsync])
+  }, [act, api, launch, state?.pending, symbol, token, v14, writeContractAsync])
 
   const release = useCallback(
     (payee: Address) => {
@@ -236,7 +262,7 @@ export function useCreatorFees(launch: LaunchRecord | undefined, onChanged?: () 
         () =>
           writeContractAsync({
             chainId: activeChain.id,
-            address: pluginAddress(listedPlugin('split')),
+            address: pluginAddress(listedPlugin('split'), suite),
             abi: splitPluginAbi,
             functionName: 'release',
             args: [token, payee],
@@ -244,7 +270,7 @@ export function useCreatorFees(launch: LaunchRecord | undefined, onChanged?: () 
         () => api!.release(token, payee),
       )
     },
-    [act, api, state?.split?.payees, token, writeContractAsync],
+    [act, api, state?.split?.payees, suite, token, writeContractAsync],
   )
 
   const runBuyback = useCallback(() => {
@@ -255,14 +281,14 @@ export function useCreatorFees(launch: LaunchRecord | undefined, onChanged?: () 
       () =>
         writeContractAsync({
           chainId: activeChain.id,
-          address: pluginAddress(listedPlugin('buyback')),
+          address: pluginAddress(listedPlugin('buyback'), suite),
           abi: buybackPluginAbi,
           functionName: 'run',
           args: [token],
         }),
       () => api!.runBuyback(token),
     )
-  }, [act, api, state?.buyback?.offer, symbol, token, writeContractAsync])
+  }, [act, api, state?.buyback?.offer, suite, symbol, token, writeContractAsync])
 
   const runDeepen = useCallback(() => {
     if (!token) return Promise.resolve()
@@ -272,14 +298,14 @@ export function useCreatorFees(launch: LaunchRecord | undefined, onChanged?: () 
       () =>
         writeContractAsync({
           chainId: activeChain.id,
-          address: pluginAddress(listedPlugin('deepen')),
+          address: pluginAddress(listedPlugin('deepen'), suite),
           abi: deepenPluginAbi,
           functionName: 'run',
           args: [token],
         }),
       () => api!.runDeepen(token),
     )
-  }, [act, api, state?.deepen?.offer, symbol, token, writeContractAsync])
+  }, [act, api, state?.deepen?.offer, suite, symbol, token, writeContractAsync])
 
   // The wallet claims its own dividends on the token. What it earns keeps growing until the claim lands, so the
   // amount shown when pressed is "about".
