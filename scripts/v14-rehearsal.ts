@@ -912,7 +912,8 @@ async function sendRaw(step: string, what: string, to: Address | undefined, data
       save()
     }
     if (from === me) nextNonce = nonce + 1
-    const receipt = await retry(() => pub.waitForTransactionReceipt({ hash, pollingInterval: 250, timeout: 180_000 }))
+    // Arc's public RPC refuses bursts: poll it every 500 ms (v1.3's pace); a local anvil every 250 ms.
+    const receipt = await retry(() => pub.waitForTransactionReceipt({ hash, pollingInterval: SIGNER === 'anvil' ? 250 : 500, timeout: 180_000 }))
     recordTx(step, what, receipt)
     progress.pending = undefined
     save()
