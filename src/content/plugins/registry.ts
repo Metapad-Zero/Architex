@@ -7,7 +7,7 @@
 import { zeroAddress, type Address } from 'viem'
 import { launchSuite, type LaunchSuite } from '../../lib/deployment'
 
-export type ListedPluginKind = 'split' | 'buyback' | 'holders' | 'combo'
+export type ListedPluginKind = 'split' | 'buyback' | 'deepen' | 'holders' | 'combo'
 
 export interface ListedPlugin {
   kind: ListedPluginKind
@@ -16,10 +16,10 @@ export interface ListedPlugin {
   tagline: string
   /** What happens to the fees, in the site's plain voice. */
   description: string
-  /** What the builder asks for: payees and shares, Combo allocations, or nothing. */
-  config: 'split' | 'combo' | 'none'
+  /** What the builder asks for: payees and shares, Combo allocations, a burn share, or nothing. */
+  config: 'split' | 'combo' | 'burnShare' | 'none'
   /** Which deployment entry holds the plugin's singleton address. */
-  suiteKey: keyof Pick<LaunchSuite, 'splitPlugin' | 'buybackPlugin' | 'holderPlugin' | 'comboPlugin'>
+  suiteKey: keyof Pick<LaunchSuite, 'splitPlugin' | 'buybackPlugin' | 'deepenPlugin' | 'holderPlugin' | 'comboPlugin'>
   /** Path from the repo root to the contract's source. */
   contractPath: string
   /**
@@ -53,6 +53,16 @@ export const LISTED_PLUGINS: readonly ListedPlugin[] = [
     paused: 'Paused for new launches. An updated version is coming.',
   },
   {
+    kind: 'deepen',
+    name: 'Deepen pool',
+    tagline: 'Burns the token and grows its pool, in one.',
+    description:
+      'Spends the fees buying the token and burning it while it is on the curve. Once it graduates, every run splits: your burn share buys the token and burns it, and the rest buys the token and adds it to the launch pool, locking the new liquidity at the burn address. Anyone can run it; it spends at most 0.25% of the curve’s USDC side, or of the pool’s locked USDC, per hour, whatever the mix.',
+    config: 'burnShare',
+    suiteKey: 'deepenPlugin',
+    contractPath: 'contracts/plugins/launch/DeepenPoolPlugin.sol',
+  },
+  {
     kind: 'holders',
     name: 'Distribute to holders',
     tagline: 'Paid to holders in USDC, over 24 hours.',
@@ -66,7 +76,7 @@ export const LISTED_PLUGINS: readonly ListedPlugin[] = [
     kind: 'combo',
     name: 'Combo',
     tagline: 'Up to five of these, by percentage.',
-    description: 'Splits the fees across up to five destinations by percentage: wallets, a Split, Buyback & burn or Distribute to holders.',
+    description: 'Splits the fees across up to five destinations by percentage: wallets, a Split, Buyback & burn, Deepen pool or Distribute to holders.',
     config: 'combo',
     suiteKey: 'comboPlugin',
     contractPath: 'contracts/plugins/launch/ComboPlugin.sol',

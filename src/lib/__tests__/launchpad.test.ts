@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { decodeErrorResult, encodeErrorResult, encodeFunctionData, getAddress, parseAbi, zeroAddress, type Hex } from 'viem'
-import { buybackPluginAbi, launchRouterAbi, launchTokenAbi, launchpadAbi, launchpadWithPluginErrorsAbi, splitPluginAbi } from '../abi'
+import { buybackPluginAbi, deepenPluginAbi, launchRouterAbi, launchTokenAbi, launchpadAbi, launchpadWithPluginErrorsAbi, splitPluginAbi } from '../abi'
 import type { LaunchSuite } from '../deployment'
 import { explainRevert } from '../errors'
 import { formatCurveSold, soldLabel, utf8ByteLength } from '../launch'
@@ -23,6 +23,7 @@ const suite: LaunchSuite = {
   buybackPlugin: getAddress('0x00000000000000000000000000000000000000e2'),
   holderPlugin: getAddress('0x00000000000000000000000000000000000000e3'),
   comboPlugin: getAddress('0x00000000000000000000000000000000000000e4'),
+  deepenPlugin: getAddress('0x00000000000000000000000000000000000000e5'),
 }
 
 const tokens: Token[] = [
@@ -50,8 +51,20 @@ describe('launchpad copy and validation', () => {
   test('explains the plugins’ refusals too', () => {
     expect(explainRevert('DuplicatePayee')).toBe('The same address is in the Split twice.')
     expect(explainRevert('BpsSumNot10000')).toBe('The Combo shares must add up to exactly 100%.')
-    expect(explainRevert('AlreadyRanThisBlock')).toBe('A buyback already ran in this block. Try again in a moment.')
+    // Buyback & burn and Deepen pool share the run errors, so the sentences name neither.
+    expect(explainRevert('AlreadyRanThisBlock')).toBe('It already ran for this token in this block. Try again in a moment.')
+    expect(explainRevert('NothingToBuy')).toBe('Nothing to buy with yet: no USDC is waiting, or the budget is still building up since the last run.')
+    expect(explainRevert('InvalidBurnBps')).toBe('The burn share can be at most 100%.')
     expect(explainRevert('NotConfigured')).toBe('That plugin does not serve this token.')
+  })
+
+  test('decodes Deepen pool’s refusals: the run’s from its own ABI, the burn share’s from createToken', () => {
+    for (const errorName of ['NothingToBuy', 'AlreadyRanThisBlock'] as const) {
+      const data = encodeErrorResult({ abi: deepenPluginAbi, errorName, args: [token] })
+      expect(decodeErrorResult({ abi: deepenPluginAbi, data }).errorName).toBe(errorName)
+    }
+    const tooHigh = encodeErrorResult({ abi: launchpadWithPluginErrorsAbi, errorName: 'InvalidBurnBps', args: [10_001n] })
+    expect(explainRevert(decodeErrorResult({ abi: launchpadWithPluginErrorsAbi, data: tooHigh }).errorName)).toBe('The burn share can be at most 100%.')
   })
 
   test('explains the review’s new refusals', () => {

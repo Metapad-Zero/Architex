@@ -64,13 +64,16 @@ const REVERTS: Record<string, string> = {
   ZeroBps: 'Every Combo destination needs a share above zero.',
   BpsSumNot10000: 'The Combo shares must add up to exactly 100%.',
   DuplicateEntry: 'The same destination is in the Combo twice.',
-  AlreadyRanThisBlock: 'A buyback already ran in this block. Try again in a moment.',
+  // Buyback & burn's and Deepen pool's runs share these names, so the sentences fit either.
+  AlreadyRanThisBlock: 'It already ran for this token in this block. Try again in a moment.',
   NothingToBuy: 'Nothing to buy with yet: no USDC is waiting, or the budget is still building up since the last run.',
   RouterNotSet: 'The launch router is not set up yet.',
   PairNotSet: 'This token has no launch pool yet.',
-  SpendMismatch: 'The buyback spent a different amount than it reported, so it was undone.',
-  BadSpend: 'The buyback spent nothing, so it was undone.',
-  NothingBought: 'The buyback bought nothing, so it was undone.',
+  SpendMismatch: 'The run spent a different amount than it reported, so it was undone.',
+  BadSpend: 'The run spent nothing, so it was undone.',
+  NothingBought: 'The run bought nothing, so it was undone.',
+  InvalidBurnBps: 'The burn share can be at most 100%.',
+  LiquidityMismatch: 'The pool minted a different amount of liquidity than the run worked out, so it was undone.',
   OnlyRouter: 'Only the launch router can trade in a launch pool.',
 }
 

@@ -7,6 +7,7 @@ import {
   MAX_PAYEES,
   TOTAL_BPS,
   bpsToPercentText,
+  comboRival,
   emptyTarget,
   parsePercentBps,
   rowId,
@@ -28,10 +29,10 @@ const WALLET: Option = { kind: 'wallet', name: 'Creator wallet', tagline: 'Your 
 const CUSTOM: Option = { kind: 'custom', name: 'Custom address', tagline: 'Any address. Architex has not reviewed it.' }
 const OPTIONS: readonly Option[] = [WALLET, ...LISTED_PLUGINS.map((plugin) => ({ kind: plugin.kind, name: plugin.name, tagline: plugin.tagline })), CUSTOM]
 /** What a Combo entry can be: anything but another Combo (a Combo cannot include itself). */
-const ENTRY_KINDS: readonly SimpleTarget['kind'][] = ['wallet', 'split', 'buyback', 'holders', 'custom']
+const ENTRY_KINDS: readonly SimpleTarget['kind'][] = ['wallet', 'split', 'buyback', 'deepen', 'holders', 'custom']
 
 function isListedKind(kind: string): kind is ListedPluginKind {
-  return kind === 'split' || kind === 'buyback' || kind === 'holders' || kind === 'combo'
+  return kind === 'split' || kind === 'buyback' || kind === 'deepen' || kind === 'holders' || kind === 'combo'
 }
 
 function available(kind: FeePlanKind): boolean {
@@ -220,6 +221,11 @@ function ComboEditor({ idPrefix, entries, onChange, errors, showErrors, account,
   const usedListed = new Set(entries.map((entry) => entry.target.kind).filter((kind) => isListedKind(kind)))
   const update = (id: string, patch: Partial<ComboEntry>) => onChange(entries.map((entry) => (entry.id === id ? { ...entry, ...patch } : entry)))
   const addKind = ENTRY_KINDS.find((kind) => available(kind) && !(isListedKind(kind) && usedListed.has(kind))) ?? 'custom'
+  // Deepen pool and Buyback & burn are never offered side by side (comboRival in lib/plugins/plan.ts says why).
+  const clashes = (option: SimpleTarget['kind'], id: string) => {
+    const rival = comboRival(option)
+    return Boolean(rival) && entries.some((other) => other.id !== id && other.target.kind === rival)
+  }
 
   return (
     <div>
@@ -241,7 +247,11 @@ function ComboEditor({ idPrefix, entries, onChange, errors, showErrors, account,
                     onChange={(event) => update(entry.id, { target: emptyTarget(event.target.value as SimpleTarget['kind'], account) })}
                   >
                     {ENTRY_KINDS.map((option) => (
-                      <option key={option} value={option} disabled={!available(option) || (option !== kind && isListedKind(option) && usedListed.has(option))}>
+                      <option
+                        key={option}
+                        value={option}
+                        disabled={!available(option) || (option !== kind && isListedKind(option) && usedListed.has(option)) || clashes(option, entry.id)}
+                      >
                         {kindName(option)}
                       </option>
                     ))}
@@ -303,7 +313,7 @@ function ComboEditor({ idPrefix, entries, onChange, errors, showErrors, account,
       </div>
       <FieldErrors errors={errors} keys={['entries', 'combo']} show={showErrors} idPrefix={idPrefix} />
       <p className="mt-3 text-xs leading-5 text-g500">
-        Each collection is split by these shares; the last destination takes any rounding. One of each plugin, and up to five destinations in all.
+        Each collection is split by these shares; the last destination takes any rounding. One of each plugin (Deepen pool or Buyback &amp; burn, not both), and up to five destinations in all.
       </p>
     </div>
   )
@@ -328,6 +338,71 @@ function probeNote(address: string, probed: ReadonlySet<string>): string | undef
   return probed.has(address.trim().toLowerCase())
     ? 'This address declares the fee-plugin interface. It is configured at launch with no settings, so if it needs settings the launch fails.'
     : undefined
+}
+
+/** The common burn shares: the rows of Deepen pool's front-running table (V13-SPEC §2.3). */
+const BURN_SHARE_PRESETS = [0, 2_500, 5_000, 7_500, 10_000] as const
+
+interface BurnShareFieldProps {
+  id: string
+  /** What the creator typed, in percent ("50"). */
+  text: string
+  onText: (text: string) => void
+  error?: string
+  showError: boolean
+}
+
+/**
+ * Deepen pool's one setting: how much of each pool run buys the token and burns it, from 0% to 100% at basis-point
+ * precision, 50% to start. The line under the field says what the choice does.
+ */
+function BurnShareField({ id, text, onText, error, showError }: BurnShareFieldProps) {
+  const bps = parsePercentBps(text, TOTAL_BPS).bps
+  const effect =
+    bps === undefined
+      ? GHOST
+      : bps === 0
+        ? 'Everything goes into the pool.'
+        : bps === TOTAL_BPS
+          ? 'Everything is burned (the same as Buyback & burn).'
+          : `${bpsToPercentText(bps)}% is burned and ${bpsToPercentText(TOTAL_BPS - bps)}% goes into the pool.`
+  const describedBy = [showError && error ? `${id}-error` : '', `${id}-effect`, `${id}-hint`].filter(Boolean).join(' ')
+  return (
+    <div className="mt-4">
+      <label className="block text-sm text-g500" htmlFor={id}>Burn share</label>
+      <div className="mt-1 grid grid-cols-5 gap-2" role="group" aria-label="Common burn shares">
+        {BURN_SHARE_PRESETS.map((preset) => {
+          const active = bps === preset
+          return (
+            <button key={preset} type="button" className="choice-button" data-active={active} aria-pressed={active} onClick={() => onText(bpsToPercentText(preset))}>
+              {bpsToPercentText(preset)}%
+            </button>
+          )
+        })}
+      </div>
+      <div className="field-with-suffix mt-2">
+        <input
+          id={id}
+          inputMode="decimal"
+          autoComplete="off"
+          placeholder="50"
+          value={text}
+          onChange={(event) => {
+            const next = event.target.value.replace(/,/g, '.').trim()
+            if (next === '' || /^\d{0,3}(?:\.\d{0,2})?$/.test(next)) onText(next)
+          }}
+          aria-invalid={showError && Boolean(error)}
+          aria-describedby={describedBy}
+        />
+        <span>%</span>
+      </div>
+      {showError && error && <p id={`${id}-error`} className="mt-2 text-sm text-loss" role="alert">{error}</p>}
+      <p id={`${id}-effect`} className="mt-2 text-sm leading-6 text-g700" aria-live="polite">{effect}</p>
+      <p id={`${id}-hint`} className="mt-1 text-xs leading-5 text-g500">
+        How much of each run buys the token and burns it. The rest buys the token and adds it to the pool as liquidity nobody can take out. Locked forever either way.
+      </p>
+    </div>
+  )
 }
 
 function TargetConfig({ idPrefix, target, onTarget, errors, errorKey, prefix, showErrors, account, probed, inCombo = false }: TargetConfigProps) {
@@ -384,6 +459,22 @@ function TargetConfig({ idPrefix, target, onTarget, errors, errorKey, prefix, sh
           <FieldErrors errors={errors} keys={[errorKey]} show={showErrors} idPrefix={idPrefix} />
         </>
       )
+    case 'deepen': {
+      const plugin = listedPlugin('deepen')
+      return (
+        <>
+          <p className="text-sm leading-6 text-g700">{inCombo ? plugin.tagline : plugin.description}</p>
+          <BurnShareField
+            id={`${idPrefix}-burn-share`}
+            text={target.burnShare}
+            onText={(burnShare) => onTarget({ kind: 'deepen', burnShare })}
+            error={errors[`${prefix}burnShare`]}
+            showError={showErrors}
+          />
+          <FieldErrors errors={errors} keys={[errorKey]} show={showErrors} idPrefix={idPrefix} />
+        </>
+      )
+    }
     case 'buyback':
     case 'holders': {
       const plugin = listedPlugin(target.kind)
@@ -508,6 +599,10 @@ export function planSummary(plan: FeePlan, account?: Address): string {
       return `Split · ${plan.payees.length} ${plan.payees.length === 1 ? 'payee' : 'payees'}`
     case 'combo':
       return `Combo · ${plan.entries.length} ${plan.entries.length === 1 ? 'destination' : 'destinations'}`
+    case 'deepen': {
+      const share = parsePercentBps(plan.burnShare, TOTAL_BPS).bps
+      return share === undefined ? listedPlugin('deepen').name : `${listedPlugin('deepen').name} · ${formatPct(share)} burn share`
+    }
     case 'buyback':
     case 'holders':
       return listedPlugin(plan.kind).name

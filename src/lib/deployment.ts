@@ -36,6 +36,8 @@ export interface ArchitexDeployment {
   buybackPlugin: Address
   holderPlugin: Address
   comboPlugin: Address
+  /** Deepen pool (V13-SPEC §2.3), listed after the others; zero until deployed. */
+  deepenPlugin: Address
   /**
    * Launchpads the site no longer points at: v1.2, and v1.3 deployments replaced since (testnet rehearsals). Only
    * scripts read them, to find what their tokens name; scripts/metadata-cleanup.ts tells the two versions apart.
@@ -65,6 +67,7 @@ export interface LaunchSuite {
   buybackPlugin: Address
   holderPlugin: Address
   comboPlugin: Address
+  deepenPlugin: Address
 }
 
 /** Stand-ins the dev fixture uses, so listed plugins can be picked and named without deployed contracts. */
@@ -76,6 +79,7 @@ export const FIXTURE_SUITE: LaunchSuite = {
   buybackPlugin: '0x00000000000000000000000000000000000fa012',
   holderPlugin: '0x00000000000000000000000000000000000fa013',
   comboPlugin: '0x00000000000000000000000000000000000fa014',
+  deepenPlugin: '0x00000000000000000000000000000000000fa015',
 }
 
 /** The launchpad suite's addresses on this network (the fixture's stand-ins in fixture mode). */
@@ -89,4 +93,5 @@ export const launchSuite: LaunchSuite = fixtureOn
       buybackPlugin: deployment.buybackPlugin,
       holderPlugin: deployment.holderPlugin,
       comboPlugin: deployment.comboPlugin,
+      deepenPlugin: deployment.deepenPlugin,
     }

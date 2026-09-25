@@ -3,6 +3,7 @@ import { listedPlugin, listedPluginAt, pluginAddress, type ListedPluginKind } fr
 // (pluginAddress and listedPluginAt are always given ctx.suite here, never the global suite, so plans are testable.)
 import type { LaunchSuite } from '../deployment'
 import { formatPct, shortAddress } from '../format'
+import { DEEPEN_DEFAULT_BURN_BPS } from './state'
 
 /**
  * The token builder's choice of where creator fees go, checked the way the contracts check it and encoded the
@@ -12,10 +13,12 @@ import { formatPct, shortAddress } from '../format'
  *   launchpad / USDC, every share above zero (SplitPlugin.onLaunch).
  * - Combo: `abi.encode(address[] targets, uint16[] bps, bytes[] datas)`, 1–5 entries, distinct, none zero / the
  *   Combo / the launchpad / USDC, every bps above zero, summing to 10,000; an entry that is not a plugin takes
- *   empty data (ComboPlugin.onLaunch).
+ *   empty data (ComboPlugin.onLaunch). The builder also refuses Deepen pool beside Buyback & burn (comboRival).
+ * - Deepen pool: `abi.encode(uint16 burnBps)`, 0 to 10,000 (DeepenPoolPlugin.onLaunch). Empty data would mean
+ *   5,000; the builder always sends the creator's choice.
  * - Buyback & burn, Distribute to holders: empty data.
  * - A wallet or a custom address: empty data (a plain address receives USDC by transfer).
- * Both plugins also check the canonical encoding, which viem's encodeAbiParameters produces.
+ * The plugins also check the canonical encoding, which viem's encodeAbiParameters produces.
  */
 
 export const MAX_PAYEES = 20
@@ -36,6 +39,8 @@ export type SimpleTarget =
   | { kind: 'wallet'; address: string }
   | { kind: 'split'; payees: PayeeRow[] }
   | { kind: 'buyback' }
+  /** `burnShare`: the percentage of each pool run that buys the token and burns it, up to two decimals. */
+  | { kind: 'deepen'; burnShare: string }
   | { kind: 'holders' }
   | { kind: 'custom'; address: string }
 
@@ -225,6 +230,32 @@ export function encodeComboData(targets: readonly Address[], bps: readonly numbe
   return encodeAbiParameters([{ type: 'address[]' }, { type: 'uint16[]' }, { type: 'bytes[]' }], [targets, bps, datas])
 }
 
+export function encodeBurnShareData(burnBps: number): Hex {
+  return encodeAbiParameters([{ type: 'uint16' }], [burnBps])
+}
+
+/** Deepen pool's burn share, checked like DeepenPoolPlugin.onLaunch (0 to 10,000 bps); the error keyed under `prefix`. */
+function planBurnShare(text: string, prefix: string, errors: Record<string, string>): Hex | undefined {
+  const share = parsePercentBps(text, TOTAL_BPS)
+  if (share.error !== undefined) {
+    errors[`${prefix}burnShare`] = share.error
+    return undefined
+  }
+  return encodeBurnShareData(share.bps)
+}
+
+/**
+ * The listed plugin a Combo may not hold beside `kind`, if any. Deepen pool and Buyback & burn each pace their own
+ * spending, so together they spend twice as fast and a trader buying ahead of the runs is paid sooner; with Buyback &
+ * burn v1, whose pot can be drained in one transaction, a Deepen pool run rides that drain too (V13-SPEC §2.3, §9).
+ * Deepen pool's burn share does Buyback & burn's job under one budget, so the builder never pairs them.
+ */
+export function comboRival(kind: SimpleTarget['kind']): SimpleTarget['kind'] | undefined {
+  if (kind === 'deepen') return 'buyback'
+  if (kind === 'buyback') return 'deepen'
+  return undefined
+}
+
 function listedAddress(kind: ListedPluginKind, key: string, ctx: PlanContext, errors: Record<string, string>): Address | undefined {
   const plugin = listedPlugin(kind)
   const address = pluginAddress(plugin, ctx.suite)
@@ -266,6 +297,11 @@ function planTarget(target: SimpleTarget, role: 'plugin' | 'entry', prefix: stri
       const data = planSplit(target.payees, prefix, ctx, errors)
       return address && data ? { plugin: address, pluginData: data } : undefined
     }
+    case 'deepen': {
+      const address = listedAddress('deepen', fieldKey, ctx, errors)
+      const data = planBurnShare(target.burnShare, prefix, errors)
+      return address && data ? { plugin: address, pluginData: data } : undefined
+    }
     case 'buyback':
     case 'holders': {
       const address = listedAddress(target.kind, fieldKey, ctx, errors)
@@ -290,6 +326,7 @@ export function planFeePlugin(plan: FeePlan, ctx: PlanContext): PlanResult {
   const bps: number[] = []
   const datas: Hex[] = []
   const seen = new Set<string>()
+  const kinds = new Set<SimpleTarget['kind']>()
   let sum = 0
   let allPercentsRead = true
   for (const entry of entries) {
@@ -305,6 +342,14 @@ export function planFeePlugin(plan: FeePlan, ctx: PlanContext): PlanResult {
       sum += percent.bps
       bps.push(percent.bps)
     }
+    // Checked on the kinds alone, so it holds whether or not Buyback & burn is paused.
+    const rival = comboRival(entry.target.kind)
+    if (rival && kinds.has(rival)) {
+      errors[`${prefix}target`] =
+        'Deepen pool and Buyback & burn cannot share a Combo: each paces its own spending, so together they spend twice as fast, which weakens the protection against traders buying ahead of the runs. Use Deepen pool’s burn share instead.'
+      continue
+    }
+    kinds.add(entry.target.kind)
     const target = planTarget(entry.target, 'entry', prefix, ctx, errors)
     if (!target) continue
     if (seen.has(target.plugin.toLowerCase())) {
@@ -333,6 +378,8 @@ export function emptyTarget(kind: SimpleTarget['kind'], creator?: Address): Simp
       return { kind: 'split', payees: [{ id: rowId('p'), address: creator ?? '', share: '1' }] }
     case 'buyback':
       return { kind: 'buyback' }
+    case 'deepen':
+      return { kind: 'deepen', burnShare: bpsToPercentText(DEEPEN_DEFAULT_BURN_BPS) }
     case 'holders':
       return { kind: 'holders' }
   }

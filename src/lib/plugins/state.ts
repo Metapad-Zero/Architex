@@ -36,6 +36,9 @@ export const BUYBACK_RUN_INTERVAL = 3_600n
 /** Buyback & burn's smallest offer, in USDC units: below it a run is refused and previewRun reports 0. */
 export const BUYBACK_MIN_RUN_USDC = 3n
 
+/** Deepen pool's burn share when its creator gives it no settings (IDeepenPoolPlugin DEFAULT_BURN_BPS): half and half. */
+export const DEEPEN_DEFAULT_BURN_BPS = 5_000
+
 /** A token's holder dividends, streamed inside the token (lib/plugins/holders.ts). */
 export interface HolderState extends HolderDividends {
   /** Its creator fees go to Distribute to holders (directly or in a Combo), so collecting them adds to the stream. */

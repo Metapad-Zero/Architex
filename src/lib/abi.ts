@@ -423,6 +423,50 @@ export const buybackPluginAbi = parseAbi([
   'function run(address token) returns (uint256 usdcSpent, uint256 tokensBurned)',
 ])
 
+/** Deepen pool's own errors; its runs share Buyback & burn's (same names, same selectors). */
+const deepenPluginErrors = [
+  'error InvalidBurnBps(uint256 burnBps)',
+  'error LiquidityMismatch(uint256 expected, uint256 minted)',
+] as const
+
+/**
+ * IDeepenPoolPlugin: anyone runs it, paced like Buyback & burn (at most 0.25% of the curve's virtual USDC, or of the
+ * locked part of the pool's USDC reserve, per hour, and at most once per block). On the curve a run buys and burns;
+ * in the pool it splits by the token's burn share between buying and burning and buying and adding liquidity, which
+ * is minted to 0x…dEaD.
+ */
+export const deepenPluginAbi = parseAbi([
+  ...launchFeePluginEntries,
+  ...buybackPluginErrors,
+  ...deepenPluginErrors,
+  // A run buys through the launchpad or the launch router and adds to the launch pair, whose refusals surface here.
+  'error ZeroAmount()',
+  'error CurveGraduated()',
+  'error NotGraduated()',
+  'error SlippageExceeded()',
+  'error Expired()',
+  ...launchPairErrors,
+  'event DeepenRun(address indexed token, address indexed caller, bool graduated, uint256 usdcSpent, uint256 usdcBurning, uint256 usdcAdded, uint256 tokensBought, uint256 tokensAdded, uint256 tokensBurned, uint256 liquidity)',
+  'event BurnShareSet(address indexed token, uint16 burnBps)',
+  'function CAP_BPS() view returns (uint256)',
+  'function RUN_INTERVAL() view returns (uint256)',
+  'function MIN_RUN_USDC() view returns (uint256)',
+  'function DEFAULT_BURN_BPS() view returns (uint16)',
+  'function LP_RECIPIENT() view returns (address)',
+  'function burnBpsOf(address token) view returns (uint16)',
+  'function totalUsdcSpent(address token) view returns (uint256)',
+  'function totalUsdcBurning(address token) view returns (uint256)',
+  'function totalTokensBurned(address token) view returns (uint256)',
+  'function totalUsdcAdded(address token) view returns (uint256)',
+  'function totalTokensAdded(address token) view returns (uint256)',
+  'function totalLiquidityLocked(address token) view returns (uint256)',
+  'function nextRunBlock(address token) view returns (uint256)',
+  'function lastRunAt(address token) view returns (uint256)',
+  'function previewRun(address token) view returns (uint256 usdcOffered, uint256 usdcToBurn, uint256 usdcToDeepen, bool graduated)',
+  'function previewSplit(address token, uint256 usdcOffered) view returns (uint256 usdcToBurn, uint256 usdcToBuy, uint256 usdcForLiquidity)',
+  'function run(address token) returns (uint256 usdcSpent, uint256 tokensBurned, uint256 liquidity)',
+])
+
 const comboPluginErrors = [
   'error InvalidEntryCount(uint256 count)',
   'error ZeroBps(address target)',
@@ -469,6 +513,7 @@ export const launchpadWithPluginErrorsAbi = parseAbi([
   ...oz20Errors,
   ...launchFeePluginErrors,
   ...splitPluginErrors,
+  ...deepenPluginErrors,
   ...comboPluginErrors,
   'function createToken(string name, string symbol, string metadataURI, uint16 creatorFeeBps, address plugin, bytes pluginData, uint256 initialBuyUsdc, uint256 minTokensOut, uint256 maxLaunchFee) returns (address token)',
   'function collectCreatorFees(address token) returns (uint256 amount)',
