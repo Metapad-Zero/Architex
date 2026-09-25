@@ -95,7 +95,9 @@ contract PoolManagerSmokeTest is Test {
             : (Currency.wrap(address(token)), Currency.wrap(address(usdc)));
         PoolKey memory key = PoolKey(c0, c1, 3000, 60, IHooks(address(0)));
         manager.initialize(key, TickMath.getSqrtPriceAtTick(0));
-        router.addLiquidity(key, ModifyLiquidityParams({tickLower: -600, tickUpper: 600, liquidityDelta: 1e12, salt: 0}));
+        router.addLiquidity(
+            key, ModifyLiquidityParams({tickLower: -600, tickUpper: 600, liquidityDelta: 1e12, salt: 0})
+        );
         BalanceDelta delta = router.swap(
             key, SwapParams({zeroForOne: true, amountSpecified: -1e6, sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1})
         );

@@ -17,15 +17,14 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
-import {BeforeSwapDelta, BeforeSwapDeltaLibrary, toBeforeSwapDelta} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
+import {
+    BeforeSwapDelta,
+    BeforeSwapDeltaLibrary,
+    toBeforeSwapDelta
+} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
 import {ModifyLiquidityParams, SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {PoolState} from "./libraries/PoolState.sol";
 import {IArchitexLaunchHook} from "./interfaces/IArchitexLaunchHook.sol";
-
-/// @dev The two launchpad functions the hook calls.
-interface ILaunchpadHookSide {
-    function accrueTradeFees(address token, uint256 platformFee, uint256 creatorFee) external;
-}
 
 interface IBurnable {
     function burn(uint256 amount) external;
@@ -42,9 +41,14 @@ interface IBurnable {
 ///   Fees on a known gross amount are each ceil(gross * bps / 1e4). On a net amount (the pool's side), gross = net +
 ///   ceil(net * r / (1e4 - r)) with r the total bps, and the total splits platform first, creator next, the snipe fee
 ///   last, each rounded up and capped by what is left (v1.3's exact-fill split).
-///   afterSwap moves the platform and creator fees to the launchpad and credits them there (accrueTradeFees); the
-///   snipe fee stays here, credited to the token, until `lock` puts it in the pool. Nothing is ever pushed to a
-///   creator, a plugin or anyone else during a swap.
+///   afterSwap keeps every fee in the PoolManager as the hook's ERC-6909 USDC claims (mint), credited to the token:
+///   platform and creator fees until the launchpad releases them (`release`), the snipe fee until `lock` puts it in
+///   the pool. A swap never moves USDC and never calls anything but the PoolManager, so it works whatever the
+///   PoolManager's USDC float, whenever the buyer's router settles, and whatever happens to the launchpad's address.
+///
+/// Positions: the graduation position is full range (salt 0); every bid gets a fresh salt, so a later bid never
+/// touches an older position. Nobody may donate (a donation accrues fees to in-range positions, and a position that
+/// has accrued fees folds them into its owner's next modifyLiquidity).
 ///
 /// A swap the pool cannot fill in full (a price limit) is refused when the fees were fixed on the trader's own amount
 /// (PartialFill), so a trader never pays fees on USDC the pool did not take or give.
@@ -73,10 +77,16 @@ contract ArchitexLaunchHook is BaseHook, IUnlockCallback, IArchitexLaunchHook {
     ///      moment the window closes is not paid back out of his own surcharge (Argus's F-1), and pushing the price
     ///      before a `lock` cannot move the bid anywhere worth selling into.
     int24 public constant BID_DISCOUNT_TICKS = 6932;
+    /// @dev A bid runs from its top down about 10,000 times (a multiple of the tick spacing), not to the extreme tick:
+    ///      the extreme tick is shared with the full-range position, and an outside LP in an open pool could fill its
+    ///      liquidity cap there cheaply enough to hold bids off. Almost all of a USDC-only range's USDC sits near its top
+    ///      anyway.
+    int24 public constant BID_SPAN_TICKS = 92_200;
 
     uint256 private constant _BPS = 10_000;
     uint8 private constant _OP_GRADUATE = 1;
     uint8 private constant _OP_LOCK = 2;
+    uint8 private constant _OP_RELEASE = 3;
 
     /// @inheritdoc IArchitexLaunchHook
     address public immutable launchpad;
@@ -86,6 +96,12 @@ contract ArchitexLaunchHook is BaseHook, IUnlockCallback, IArchitexLaunchHook {
     mapping(PoolId => Launch) private _launches;
     /// @inheritdoc IArchitexLaunchHook
     mapping(address token => uint256) public lockHeld;
+    /// @inheritdoc IArchitexLaunchHook
+    mapping(address token => uint256) public pendingPlatform;
+    /// @inheritdoc IArchitexLaunchHook
+    mapping(address token => uint256) public pendingCreator;
+    /// @inheritdoc IArchitexLaunchHook
+    mapping(address token => uint256) public bidCount;
 
     struct Fees {
         uint256 platform;
@@ -110,7 +126,7 @@ contract ArchitexLaunchHook is BaseHook, IUnlockCallback, IArchitexLaunchHook {
             afterRemoveLiquidity: false,
             beforeSwap: true,
             afterSwap: true,
-            beforeDonate: false,
+            beforeDonate: true,
             afterDonate: false,
             beforeSwapReturnDelta: true,
             afterSwapReturnDelta: true,
@@ -153,12 +169,28 @@ contract ArchitexLaunchHook is BaseHook, IUnlockCallback, IArchitexLaunchHook {
         liquidity = abi.decode(poolManager.unlock(abi.encode(_OP_LOCK, token, 0, 0, 0)), (uint128));
     }
 
-    /// @notice The PoolManager's callback for `graduate` and `lock`, which run inside its unlock.
+    /// @inheritdoc IArchitexLaunchHook
+    function release(address token) external returns (uint256 platformFee, uint256 creatorFee) {
+        if (msg.sender != launchpad) revert OnlyLaunchpad();
+        platformFee = pendingPlatform[token];
+        creatorFee = pendingCreator[token];
+        if (platformFee + creatorFee == 0) return (0, 0);
+        pendingPlatform[token] = 0;
+        pendingCreator[token] = 0;
+        emit FeesReleased(token, platformFee, creatorFee);
+        poolManager.unlock(abi.encode(_OP_RELEASE, token, platformFee + creatorFee, 0, 0));
+    }
+
+    /// @notice The PoolManager's callback for `graduate`, `lock` and `release`, which run inside its unlock.
     function unlockCallback(bytes calldata data) external onlyPoolManager returns (bytes memory) {
-        (uint8 op, address token, uint256 tokenAmount, uint256 usdcAmount, uint256 lockAmount) =
+        (uint8 op, address token, uint256 a, uint256 b, uint256 c) =
             abi.decode(data, (uint8, address, uint256, uint256, uint256));
-        if (op == _OP_GRADUATE) return abi.encode(_openPool(token, tokenAmount, usdcAmount, lockAmount));
-        return abi.encode(_lockBid(token));
+        if (op == _OP_GRADUATE) return abi.encode(_openPool(token, a, b, c));
+        if (op == _OP_LOCK) return abi.encode(_lockBid(token));
+        // Release: turn `a` of the hook's claims back into USDC, paid to the launchpad.
+        poolManager.burn(address(this), _usdcId(), a);
+        poolManager.take(Currency.wrap(usdc), launchpad, a);
+        return "";
     }
 
     /// @dev Initializes the pool at the amounts' own price and adds them as one full-range position owned by the hook.
@@ -181,7 +213,9 @@ contract ArchitexLaunchHook is BaseHook, IUnlockCallback, IArchitexLaunchHook {
         );
         (BalanceDelta added,) = poolManager.modifyLiquidity(
             key,
-            ModifyLiquidityParams({tickLower: lower, tickUpper: upper, liquidityDelta: int256(uint256(liquidity)), salt: 0}),
+            ModifyLiquidityParams({
+                tickLower: lower, tickUpper: upper, liquidityDelta: int256(uint256(liquidity)), salt: 0
+            }),
             ""
         );
         uint256 used0 = uint256(uint128(-added.amount0()));
@@ -192,17 +226,22 @@ contract ArchitexLaunchHook is BaseHook, IUnlockCallback, IArchitexLaunchHook {
         (uint256 tokensUsed, uint256 usdcUsed) = l.usdcIs0 ? (used1, used0) : (used0, used1);
         emit PoolOpened(token, poolId, sqrtPriceX96, tokensUsed, usdcUsed, liquidity, l.open);
         if (tokenAmount > tokensUsed) IBurnable(token).burn(tokenAmount - tokensUsed);
+        // Everything else becomes claims, then the bid: the curve's snipe fees and whatever USDC the position left.
         uint256 toLock = lockAmount + (usdcAmount - usdcUsed);
         if (toLock != 0) {
+            _pay(Currency.wrap(usdc), toLock);
+            poolManager.mint(address(this), _usdcId(), toLock);
             lockHeld[token] += toLock;
             _lockBid(token);
         }
     }
 
-    /// @dev Adds the USDC held for `token` as a position that holds only USDC, from half the reference price (the lower
-    ///      of the current and the graduation price) all the way down. Anything the position cannot take stays held.
+    /// @dev Adds the USDC claims held for `token` as a fresh position (its own salt) that holds only USDC: from half the
+    ///      graduation price down about 10,000 times. Paid by burning claims. Does nothing while the price is below the
+    ///      bid's top (the range would not be one-sided): the claims wait. Anything the position cannot take stays held.
     function _lockBid(address token) private returns (uint128 liquidity) {
         uint256 amount = lockHeld[token];
+        if (amount == 0) return 0;
         PoolKey memory key = _keyFor(token);
         Launch memory l = _launches[key.toId()];
         (, int24 tick) = PoolState.getSlot0(poolManager, key.toId());
@@ -214,30 +253,38 @@ contract ArchitexLaunchHook is BaseHook, IUnlockCallback, IArchitexLaunchHook {
             ? LiquidityAmounts.getLiquidityForAmount0(sqrtA, sqrtB, amount)
             : LiquidityAmounts.getLiquidityForAmount1(sqrtA, sqrtB, amount);
         if (liquidity == 0) return 0;
+        uint256 salt = ++bidCount[token];
         (BalanceDelta added,) = poolManager.modifyLiquidity(
             key,
-            ModifyLiquidityParams({tickLower: lower, tickUpper: upper, liquidityDelta: int256(uint256(liquidity)), salt: 0}),
+            ModifyLiquidityParams({
+                tickLower: lower, tickUpper: upper, liquidityDelta: int256(uint256(liquidity)), salt: bytes32(salt)
+            }),
             ""
         );
+        // A fresh position has no fees, and a range wholly on the USDC side of the price takes USDC and nothing else.
+        if ((l.usdcIs0 ? added.amount1() : added.amount0()) != 0) revert BidNotOneSided();
         uint256 used = uint256(uint128(-(l.usdcIs0 ? added.amount0() : added.amount1())));
-        _pay(Currency.wrap(usdc), used);
+        poolManager.burn(address(this), _usdcId(), used);
         lockHeld[token] = amount - used;
         emit BidLocked(token, used, liquidity, lower, upper);
     }
 
-    /// @dev The range of a USDC-only bid. With USDC as currency0 a higher tick is a cheaper token, and a position above
-    ///      the current tick holds only currency0; with USDC as currency1 it is the other way round.
+    /// @dev The range of a bid, anchored to the graduation price so nobody can move it by pushing the price first: its
+    ///      top about half the graduation price, its bottom about 10,000 times lower. `ok` only while the whole range is
+    ///      on the USDC side of the current price. With USDC as currency0 a higher tick is a cheaper token and a range
+    ///      above the current tick holds only currency0; with USDC as currency1 it is the other way round.
     function _bidRange(Launch memory l, int24 tick) private pure returns (int24 lower, int24 upper, bool ok) {
+        int24 minTick = TickMath.minUsableTick(TICK_SPACING);
+        int24 maxTick = TickMath.maxUsableTick(TICK_SPACING);
         if (l.usdcIs0) {
-            int24 ref = tick > l.graduationTick ? tick : l.graduationTick;
-            lower = _ceilTick(int256(ref) + BID_DISCOUNT_TICKS + 1);
-            upper = TickMath.maxUsableTick(TICK_SPACING);
+            lower = _ceilTick(int256(l.graduationTick) + BID_DISCOUNT_TICKS + 1);
+            upper = lower + BID_SPAN_TICKS > maxTick ? maxTick : lower + BID_SPAN_TICKS;
+            ok = tick < lower && lower < upper;
         } else {
-            int24 ref = tick < l.graduationTick ? tick : l.graduationTick;
-            lower = TickMath.minUsableTick(TICK_SPACING);
-            upper = _floorTick(int256(ref) - BID_DISCOUNT_TICKS);
+            upper = _floorTick(int256(l.graduationTick) - BID_DISCOUNT_TICKS);
+            lower = upper - BID_SPAN_TICKS < minTick ? minTick : upper - BID_SPAN_TICKS;
+            ok = tick >= upper && lower < upper;
         }
-        ok = lower < upper && lower >= TickMath.minUsableTick(TICK_SPACING) && upper <= TickMath.maxUsableTick(TICK_SPACING);
     }
 
     // ─── Hook callbacks ───────────────────────────────────────────────────────
@@ -245,6 +292,17 @@ contract ArchitexLaunchHook is BaseHook, IUnlockCallback, IArchitexLaunchHook {
     /// @dev Only reached when someone other than the hook initializes a pool naming it: refused.
     function _beforeInitialize(address, PoolKey calldata, uint160) internal pure override returns (bytes4) {
         revert PoolCreationRestricted();
+    }
+
+    /// @dev Nobody donates: a donation accrues fees to in-range positions, and fees an owner has not asked for would
+    ///      fold into its next modifyLiquidity.
+    function _beforeDonate(address, PoolKey calldata, uint256, uint256, bytes calldata)
+        internal
+        pure
+        override
+        returns (bytes4)
+    {
+        revert DonationsRefused();
     }
 
     /// @dev Only reached for liquidity from someone other than the hook.
@@ -274,11 +332,13 @@ contract ArchitexLaunchHook is BaseHook, IUnlockCallback, IArchitexLaunchHook {
         return (IHooks.beforeSwap.selector, toBeforeSwapDelta(total, 0), 0);
     }
 
-    function _afterSwap(address sender, PoolKey calldata key, SwapParams calldata params, BalanceDelta delta, bytes calldata)
-        internal
-        override
-        returns (bytes4, int128)
-    {
+    function _afterSwap(
+        address sender,
+        PoolKey calldata key,
+        SwapParams calldata params,
+        BalanceDelta delta,
+        bytes calldata
+    ) internal override returns (bytes4, int128) {
         Launch memory l = _launch(key);
         bool isBuy = params.zeroForOne == l.usdcIs0;
         bool exactIn = params.amountSpecified < 0;
@@ -362,18 +422,13 @@ contract ArchitexLaunchHook is BaseHook, IUnlockCallback, IArchitexLaunchHook {
         if (bps > room) bps = room;
     }
 
-    /// @dev Takes the platform and creator fees to the launchpad and credits them there; keeps the snipe fee here.
+    /// @dev Keeps every fee in the PoolManager as the hook's claims (which settles the hook's side of the swap without
+    ///      moving any USDC) and credits them to the token.
     function _collect(address token, Fees memory f) private {
-        Currency u = Currency.wrap(usdc);
-        uint256 toLaunchpad = f.platform + f.creator;
-        if (toLaunchpad != 0) {
-            poolManager.take(u, launchpad, toLaunchpad);
-            ILaunchpadHookSide(launchpad).accrueTradeFees(token, f.platform, f.creator);
-        }
-        if (f.snipe != 0) {
-            poolManager.take(u, address(this), f.snipe);
-            lockHeld[token] += f.snipe;
-        }
+        poolManager.mint(address(this), _usdcId(), f.platform + f.creator + f.snipe);
+        pendingPlatform[token] += f.platform;
+        pendingCreator[token] += f.creator;
+        if (f.snipe != 0) lockHeld[token] += f.snipe;
     }
 
     // ─── Views ────────────────────────────────────────────────────────────────
@@ -408,6 +463,10 @@ contract ArchitexLaunchHook is BaseHook, IUnlockCallback, IArchitexLaunchHook {
             tickSpacing: TICK_SPACING,
             hooks: IHooks(address(this))
         });
+    }
+
+    function _usdcId() private view returns (uint256) {
+        return uint256(uint160(usdc));
     }
 
     function _launch(PoolKey calldata key) private view returns (Launch memory l) {

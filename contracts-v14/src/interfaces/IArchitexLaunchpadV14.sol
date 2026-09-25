@@ -61,7 +61,8 @@ interface IArchitexLaunchpadV14 is IArchitexLaunchpadLite {
         uint256 liquidityLocked,
         uint256 snipeLocked
     );
-    /// @notice Fees of a pool trade, already taken to the launchpad by the hook, recorded against `token`.
+    /// @notice Pool fees the hook has just released to the launchpad (syncPoolFees, collectCreatorFees), booked against
+    ///         `token`: platform fees to `pendingFees`, creator fees to `pendingCreatorFees[token]`.
     event PoolFeesAccrued(address indexed token, uint256 platformFee, uint256 creatorFee);
     event CreatorFeesCollected(address indexed token, address indexed plugin, uint256 amount);
     event FeeToUpdated(address indexed feeTo);
@@ -103,9 +104,11 @@ interface IArchitexLaunchpadV14 is IArchitexLaunchpadLite {
     function feeTo() external view returns (address);
     function feeToSetter() external view returns (address);
     function launchFee() external view returns (uint256);
-    /// @notice Platform fees (trade fees and launch fees) accrued in the launchpad and not yet sent to `feeTo`.
+    /// @notice Platform fees (trade fees and launch fees) accrued in the launchpad and not yet sent to `feeTo`. Pool fees
+    ///         count once synced; until then they are the hook's `pendingPlatform(token)`.
     function pendingFees() external view returns (uint256);
-    /// @notice `token`'s creator fees accrued in the launchpad and not yet collected to its plugin.
+    /// @notice `token`'s creator fees accrued in the launchpad and not yet collected to its plugin. Pool fees count once
+    ///         synced; until then they are the hook's `pendingCreator(token)` (collectCreatorFees syncs first).
     function pendingCreatorFees(address token) external view returns (uint256);
 
     function TOTAL_SUPPLY() external view returns (uint256);
@@ -177,7 +180,10 @@ interface IArchitexLaunchpadV14 is IArchitexLaunchpadLite {
             uint256 usdcSpent,
             bool graduates
         );
-    function quoteSell(address token, uint256 tokensIn) external view returns (uint256 usdcOut, uint256 platformFee, uint256 creatorFee);
+    function quoteSell(address token, uint256 tokensIn)
+        external
+        view
+        returns (uint256 usdcOut, uint256 platformFee, uint256 creatorFee);
 
     function curves(address token) external view returns (Curve memory);
     function tokensLength() external view returns (uint256);
@@ -200,6 +206,13 @@ interface IArchitexLaunchpadV14 is IArchitexLaunchpadLite {
     ///         onFees runs inside the launchpad's reentrancy guard: a plugin cannot buy, sell (on the curve or through
     ///         the launch router) or collect from inside it, so buybacks must be separate calls.
     function collectCreatorFees(address token) external returns (uint256 amount);
+    /// @notice Permissionless: has the hook release `token`'s pool fees (held as its claims in the PoolManager, so no
+    ///         swap ever moves USDC) to the launchpad and books them: platform fees to `pendingFees`, creator fees to
+    ///         `pendingCreatorFees[token]`. Returns (0, 0) for a token that has not graduated. Reverts if called inside
+    ///         a PoolManager unlock.
+    function syncPoolFees(address token) external returns (uint256 platformFee, uint256 creatorFee);
+    /// @notice syncPoolFees for each token, in one call.
+    function syncPoolFeesBatch(address[] calldata tokens) external;
 
     function setFeeTo(address feeTo) external;
     /// @notice Setting the zero address is an irreversible renounce.

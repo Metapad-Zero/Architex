@@ -4,10 +4,11 @@ Read-only pass over branch `v14` at `a535408`: the v1.4 launchpad, the Uniswap v
 router (V14-SPEC.md). Verdict: ready for an Arc Testnet rehearsal of the closed-pool path; no High.
 
 **What was done about it:**
-- Medium (a buy's fee is taken out of the PoolManager before the buyer pays in): accepted and written into V14-SPEC §9
-  with its size; it can only refuse a buy of several million USDC inside the opening window, never take or skip a fee.
-- Low (an open pool's bid can be held off by filling the extreme tick): accepted into V14-SPEC §9; the USDC stays in
-  `lockHeld`, closed pools are immune.
+- Medium (a buy's fee is taken out of the PoolManager before the buyer pays in): first accepted, then fixed after
+  Claude review #7 found the same thing (its L1): the hook now keeps every fee as its ERC-6909 claims and the launchpad
+  syncs them later, so no USDC moves during a swap (CLAUDE-REVIEW-7.md).
+- Low (an open pool's bid can be held off by filling the extreme tick): first accepted, then fixed after Claude review
+  #7: a bid now runs 92,200 ticks down from its top and never reaches the extreme tick.
 - Low (the router assumed a swap consumes its whole input): fixed. The router now pays exactly what the swap consumed
   and takes what it gave.
 - The five spec corrections: all made (no remove callback; closed pools take liquidity only from the hook; USDC is the

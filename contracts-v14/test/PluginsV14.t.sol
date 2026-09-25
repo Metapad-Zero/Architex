@@ -41,6 +41,9 @@ contract PluginsV14Test is V14Base {
         uint256 got = router.buy(token, 3_000e6, 0, carol, MAX); // pool
         router.sell(token, got / 2, 0, carol, MAX);
         vm.stopPrank();
+        assertGt(hook.pendingCreator(token), 0, "pool creator fees, held by the hook");
+        _sync(token); // books them in the launchpad, next to the curve's
+        assertEq(hook.pendingCreator(token), 0);
     }
 
     function test_splitCollectsCurveAndPoolFees() public {

@@ -1,7 +1,8 @@
 # Launchpad v1.4: graduate into Uniswap v4 (draft)
 
-Status: **built on branch `v14`, not reviewed or deployed**, 2026-09-25. Contracts in `contracts-v14/src`, tests in
-`contracts-v14/test` (run with `FOUNDRY_PROFILE=v14 forge test`). Sections marked **[decided]** are the owner's
+Status: **built on branch `v14` and reviewed twice (Grok #7, Claude #7: no High; every finding fixed or accepted in
+§10), not deployed**, 2026-09-25. Contracts in `contracts-v14/src`, tests in `contracts-v14/test` (run with
+`FOUNDRY_PROFILE=v14 forge test`; CI runs them too). Sections marked **[decided]** are the owner's
 calls; **[proposed]** are defaults to confirm; **[research]** waits on facts still being gathered about Uniswap v4 on
 Arc. v1.3 (V13-SPEC.md) stays live for the tokens it launched; this spec only covers new launches.
 
@@ -61,7 +62,7 @@ where the whole v4 stack sits at the mainnet addresses.
 ## 3. The hook: `ArchitexLaunchHook`
 
 One hook contract for every v1.4 pool (`contracts-v14/src/ArchitexLaunchHook.sol`), deployed at a CREATE2 address
-whose low 14 bits carry exactly its permissions (`0x28CC`). It imports nothing BUSL: v4-core's StateLibrary pulls in
+whose low 14 bits carry exactly its permissions (`0x28EC`). It imports nothing BUSL: v4-core's StateLibrary pulls in
 the BUSL `Position.sol`, so the hook reads the pool's price with its own copy of `getSlot0`.
 
 - **`beforeInitialize`:** v4 skips a hook's own callbacks when the hook itself is the caller, so the hook opens pools as
@@ -71,12 +72,20 @@ the BUSL `Position.sol`, so the hook reads the pool's price with its own copy of
   is the caller, so reaching it at all means an outsider); open pools accept anyone. There is no remove callback: v4
   keys every position by its owner, the locked positions belong to the hook, and the hook has no code that removes
   liquidity. Outside LPs in an open pool can remove their own.
+- **`beforeDonate`:** refuses every donation. A donation accrues fees to the positions in range, and v4 folds a
+  position's fees into its owner's next `modifyLiquidity`; refusing them keeps every hook position fee-free (Claude
+  review #7, M1).
 - **`beforeSwap` / `afterSwap` with return deltas:** take the platform fee and the creator fee **in USDC on both
   sides**, computed on the swap's USDC amount and rounded up, whichever side is exact:
   - a buy pays them out of the USDC in; a sell out of the USDC out (the v1.3 rule);
-  - the hook moves them to the launchpad and calls `launchpad.accrueTradeFees(token, platformFee, creatorFee)`, the
-    same books v1.3's launch router writes, so collection and every plugin work unchanged;
-  - during the opening window (§5) it also takes the surcharge;
+  - the hook keeps them in the PoolManager as its own ERC-6909 USDC claims (`mint`), credited to the token. A swap
+    never moves USDC and calls nothing but the PoolManager, so it works whatever USDC the PoolManager holds, whenever
+    the trader's router pays, and whatever happens to the launchpad's address (a USDC blocklist included);
+  - `launchpad.syncPoolFees(token)` (permissionless, with a batch form) has the hook burn the claims, take the USDC to
+    the launchpad and return the amounts, which the launchpad books in the same places v1.3's launch router did
+    (`pendingFees`, `pendingCreatorFees`). `collectCreatorFees` syncs first, so collection and every plugin work
+    unchanged. Until a sync, the hook's `pendingPlatform(token)` and `pendingCreator(token)` show what it holds;
+  - during the opening window (§5) it also takes the surcharge, held as claims too;
   - a swap that a price limit stops early is refused when the fees were fixed on the trader's own USDC, so nobody pays
     fees on USDC the pool did not take or give (`PartialFill`).
 - **LP fee [proposed]:** 0 for closed pools, as in v1.3's launch pools; the trading cost is the platform and creator
@@ -86,13 +95,14 @@ the BUSL `Position.sol`, so the hook reads the pool's price with its own copy of
 
 ## 4. Graduation into Uniswap
 
-- At `createToken` the launchpad records the token's PoolKey (deterministic) and the creator's open/closed choice.
-  No pool exists yet, and the hook stops anyone else making it.
+- The token's PoolKey is deterministic: the hook derives it from the token and USDC (`poolKeyOf`). At `createToken`
+  the launchpad records the creator's open/closed choice. No pool exists yet, and the hook stops anyone else making it.
 - The sell-out buy, in the same transaction as today:
   1. initializes the v4 pool at the curve's final price;
   2. adds the graduation liquidity: the 200M pool tokens and the USDC the curve raised, as one full-range position
      owned by the hook, locked forever (v1.3 minted the LP to the burn address instead);
-  3. adds the curve's anti-snipe collection (§5) as locked liquidity too;
+  3. turns the curve's anti-snipe collection (§5), with any USDC the full-range position could not take, into the
+     hook's claims and locks it as the token's first bid;
   4. burns any tokens rounding leaves over, as v1.3 does.
 - **LaunchToken v1.4:** excludes the PoolManager from dividends (v4 holds every pool's tokens there) instead of the
   launch pair; everything else in V13-SPEC §3 carries over. Transfers into the PoolManager before graduation are
@@ -104,16 +114,23 @@ the BUSL `Position.sol`, so the hook reads the pool's price with its own copy of
   in the pool). Sells never pay it. It counts blocks, not seconds: Arc makes about two blocks per one-second timestamp,
   which is why Argus's 3-second window protects only about two blocks.
 - **How much [default the owner did not change]:** 90% in the opening block, falling linearly to 0 over the 20 blocks,
-  on top of the normal fees, and never more than leaves platform, creator and snipe fees together under 99%.
+  on top of the normal fees, and capped so platform, creator and snipe fees together take at most 99%.
 - **The creator's first buy** runs in the launch transaction itself, before any bot can act, so it is exempt
-  **[proposed]**.
+  **[proposed]**. It has no size limit: a creator (or a bot that launches) can buy the whole curve surcharge-free in
+  the launch transaction, about 25,126 USDC, and graduate it there; every buyer after pays the pool's 90% in that block
+  (Claude review #7, informational).
 - **Where it goes [decided]: locked into the pool.**
-  - In the pool: the hook holds it and anyone can call `lock(token)` to add it as locked liquidity: a USDC-only position
-    that starts at **half** the lower of the current and the graduation price and runs all the way down, a bid nobody
-    can ever withdraw. Adding it needs no swap, so there is nothing to sandwich (the Deepen pool review's lesson). The
-    discount matters twice: a sniper who dumps the moment the window closes is not paid back out of his own surcharge
-    (Argus found that sending snipe fees to holders refunded snipers 27 to 90%), and pushing the price before a `lock`
-    cannot move the bid anywhere worth selling into.
+  - In the pool: the hook holds it as claims and anyone can call `lock(token)` to add it as locked liquidity: a
+    USDC-only position of its own (a fresh salt for every bid, never re-added to) whose top is **half** the graduation
+    price and which runs about 10,000 times lower (`BID_SPAN_TICKS`, 92,200 ticks), a bid nobody can ever withdraw.
+    It is anchored to the graduation price alone, so pushing the price before a `lock` cannot move it; while the price
+    is under the bid's top, `lock` places nothing and the USDC waits as claims. Adding it needs no swap, so there is
+    nothing to sandwich (the Deepen pool review's lesson), and it never reaches the extreme tick the full-range
+    position uses, so no outside LP can fill that tick to hold it off.
+  - The discount is why a sniper who dumps the moment the window closes is not paid back out of his own surcharge
+    (Argus found that sending snipe fees to holders refunded snipers 27 to 90%). One who holds through graduation and
+    then dumps into the pool does get part back from the bid it became: measured (Claude review #7), nothing at a
+    5,000 USDC snipe, 4.8% of the surcharge at 20,000 and 13.8% at 100,000.
   - On the curve there is no pool yet: the launchpad holds it for the token (`pendingSnipe`) and the hook locks it in at
     graduation, the same way, at the graduation price. If a curve never graduates it stays in the launchpad for good
     (the default the owner did not change). The curve's parameters stay identical for every token; like the other fees,
@@ -134,9 +151,12 @@ the BUSL `Position.sol`, so the hook reads the pool's price with its own copy of
 
 - The plugin interface (V13-SPEC §2.1) is unchanged. Split, Distribute to holders and Combo are redeployed as-is for
   the v1.4 launchpad (they bind to a launchpad at construction).
-- **Deepen pool v1.4:** on the curve, unchanged. In the pool it buys through the PoolManager, burns its burn share,
-  and adds the rest to the hook's locked position. Its cap stays 0.25% of the locked USDC (the H1 fix), which in v4
-  is the USDC in the hook's locked positions.
+- **Deepen pool v1.4 [not built]:** on the curve, unchanged. In the pool it buys through the PoolManager, burns its
+  burn share, and adds the rest through a hook entry point that still has to be written, as a fresh locked position
+  (never by re-adding to an existing one: Claude review #7, M1). Its cap stays 0.25% of the locked USDC (the H1 fix),
+  which in v4 is the USDC in the hook's locked positions.
+- `pairOf(token)` returns the PoolManager for a graduated token, which holds every pool on Arc: no plugin may treat it
+  as a per-token pool (its USDC balance is all of Uniswap's USDC on Arc).
 - **Buyback & burn:** not relisted; Deepen pool at a 100% burn share does its job.
 
 ## 8. Trading after graduation
@@ -157,35 +177,42 @@ the BUSL `Position.sol`, so the hook reads the pool's price with its own copy of
 - The builder gains the open/closed choice; the token page shows it, the anti-snipe window, and which pool the token
   trades in.
 
-## 9. Accepted limits
+## 10. Accepted limits
 
-- **A buy's fee leaves the PoolManager before the buyer pays in** (Grok #7, Medium, accepted). The hook takes the fees
-  out in `afterSwap`; the buyer's router settles after the swap returns. If a buy's fee is larger than all the USDC the
-  PoolManager holds at that moment, the transfer fails and the buy reverts. Nothing can be taken or skipped; it only
-  refuses a buy. The PoolManager holds every USDC pool on Arc (about 4.1M USDC on 2026-09-25), and at least every v1.4
-  pool's locked USDC, so it takes a buy of several million USDC inside the opening window (fees up to 99%), or tens of
-  millions after it (at most 10.5%), to hit it. Minting ERC-6909 claims instead of taking would remove it at the cost of
-  a second step before the launchpad could pay out.
-- **An open pool's bid can be held off** (Grok #7, Low, accepted). A bid runs to the extreme usable tick, which the
-  full-range position also uses. In an open pool, an LP who parks about 21M USDC one tick-spacing wide at that extreme
-  (it comes back out on removal: no LP fee, far from the price) fills the tick's liquidity cap, and `lock` reverts
-  while it stays. The USDC is not lost; it stays in `lockHeld` until the position leaves. Closed pools cannot be
-  touched this way.
+- **Pool fees wait for a sync.** The launchpad's `pendingFees` and `pendingCreatorFees` count a pool's fees only once
+  synced; until then the hook's `pendingPlatform` and `pendingCreator` hold them. `collectCreatorFees` syncs first;
+  `collectFees` does not, so the platform syncs its tokens (`syncPoolFeesBatch`) before collecting.
+- **Snipe fees wait while the price is under the bid's top.** If a token trades below half its graduation price,
+  `lock` places nothing and the USDC stays as the hook's claims until the price comes back, for good if it never does.
+  Nobody can withdraw it either way. Placing the bid lower instead would let anyone move it by pushing the price first
+  (Claude review #7, L2).
+- **Nothing that unlocks runs inside someone else's unlock.** A graduating buy, `lock` and `syncPoolFees` revert
+  `AlreadyUnlocked` when called from inside a v4 unlock; `collectCreatorFees` then skips the sync and pays what the
+  launchpad already holds.
+- **Sells need no approval.** The router pulls a seller's tokens through the token itself, always from its own caller
+  (v1.3's launch router did the same). A contract that holds launch tokens and relays arbitrary calls to targets other
+  than the token can be made to sell them through the router; wallets and ordinary contracts cannot.
 - **Other v4 pools for the same token.** Anyone can open another v4 pool for a launch token (a different fee, no hook);
   before graduation it cannot be funded (the token refuses transfers into the PoolManager), after it nothing stops it.
   Uniswap's app may route buyers into such a pool until our hook is allowlisted (§2).
 - v1.3's accepted limits (V13-SPEC §9) still hold where they concern the curve, the dividend token, fee destinations
   and plugins.
 
-## 10. Build, review and rollout
+## 11. Build, review and rollout
 
 The v1.3 bar: unit, fuzz and invariant tests against a real v4 PoolManager; end-to-end tests of every plugin through
 graduation; adversarial reviews (Claude lenses and Grok) until no High is open; an Arc Testnet rehearsal; the owner
 deploys to mainnet; then the Uniswap routing allowlist submission with a live pool. New invariants to add to V13-SPEC
 §6: the hook never lets a swap skip the fees; the locked positions can never shrink; only the launchpad can create a
-pool with the hook; a closed pool's liquidity only ever grows.
+pool with the hook; a closed pool's liquidity only ever grows; the hook holds no USDC and its claims are exactly what
+it owes (pool fees not yet synced, USDC waiting for a bid); `lock` never reverts once there is something to lock; no
+donation ever lands.
 
-## 11. Still open
+Reviews so far: Grok #7 (`GROK-REVIEW-7.md`: no High; the router fix, the spec corrections) and Claude #7
+(`CLAUDE-REVIEW-7.md`: no High; one Medium and two Lows, all fixed, their PoCs kept as regression tests in
+`contracts-v14/test/review7`).
+
+## 12. Still open
 
 1. Whether the builder stops offering v1.3 launches the day v1.4 is live (proposed: yes; v1.3 tokens keep trading
    where they are).

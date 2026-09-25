@@ -24,7 +24,7 @@ contract DeployLaunchpadV14ScriptTest is Test {
 
         DeployLaunchpadV14.Deployment memory d = new DeployLaunchpadV14().run();
 
-        assertEq(uint160(d.hook) & Hooks.ALL_HOOK_MASK, uint160(0x28CC), "exactly the hook's permission bits");
+        assertEq(uint160(d.hook) & Hooks.ALL_HOOK_MASK, uint160(0x28EC), "exactly the hook's permission bits");
         ArchitexLaunchpadV14 pad = ArchitexLaunchpadV14(payable(d.launchpad));
         assertEq(pad.hook(), d.hook);
         assertEq(pad.router(), d.router);

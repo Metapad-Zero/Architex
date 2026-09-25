@@ -87,15 +87,16 @@ contract ArchitexV4Router is IArchitexV4Router, IUnlockCallback {
         bool usdcIs0 = Currency.unwrap(key.currency0) == usdc;
         // A buy swaps USDC for the token; zeroForOne when USDC is currency0.
         bool zeroForOne = (s.side == _BUY) == usdcIs0;
-        BalanceDelta delta = IPoolManager(poolManager).swap(
-            key,
-            SwapParams({
-                zeroForOne: zeroForOne,
-                amountSpecified: -(s.amountIn.toInt256()),
-                sqrtPriceLimitX96: zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
-            }),
-            ""
-        );
+        BalanceDelta delta = IPoolManager(poolManager)
+            .swap(
+                key,
+                SwapParams({
+                    zeroForOne: zeroForOne,
+                    amountSpecified: -(s.amountIn.toInt256()),
+                    sqrtPriceLimitX96: zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
+                }),
+                ""
+            );
         // Pay what the swap actually consumed (all of amountIn, unless the price limit stopped it) and take what it
         // gave: a swap that stops early then settles instead of reverting, and the trader keeps the rest.
         uint256 amountIn = uint256(uint128(-(zeroForOne ? delta.amount0() : delta.amount1())));
@@ -126,8 +127,9 @@ contract ArchitexV4Router is IArchitexV4Router, IUnlockCallback {
     function _quote(Swap memory s) private returns (uint256 amountOut) {
         if (!IArchitexLaunchpadV14(launchpad).isGraduated(s.token)) revert NotGraduated();
         try IPoolManager(poolManager).unlock(abi.encode(s)) {
-            // unreachable: a quote always reverts
-        } catch (bytes memory reason) {
+        // unreachable: a quote always reverts
+        }
+        catch (bytes memory reason) {
             if (reason.length == 36 && bytes4(reason) == Quote.selector) {
                 assembly ("memory-safe") {
                     amountOut := mload(add(reason, 36))
