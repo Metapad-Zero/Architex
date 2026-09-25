@@ -145,6 +145,7 @@ const tokens = (n: number) => BigInt(n) * E18
 const fmt = (units: bigint) => formatUnits(units, 6)
 const fmt18 = (wei: bigint) => formatUnits(wei, 18)
 const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms))
+const blocks = (n: bigint) => `${n} block${n === 1n ? '' : 's'}`
 
 // ── RPC ───────────────────────────────────────────────────────────────────────
 
@@ -1343,7 +1344,7 @@ async function checkPoolTrade(what: string, k: Kind, sent: Sent, side: Side, exa
   const m = modelPoolTrade(pool, rec.usdcIs0, c, bps, side, exact, amount)
   const sender = trader === 'raw' ? RAW() : ROUTER
   if (side === 'buy') {
-    check(`${what}: the surcharge is the window's at the block it landed in (${B - BigInt(rec.openBlock)} blocks after graduation)`, await rd<bigint>(HOOK, ABI.hook, 'snipeBpsOf', [token], B), bps)
+    check(`${what}: the surcharge is the window's at the block it landed in (${blocks(B - BigInt(rec.openBlock))} after graduation)`, await rd<bigint>(HOOK, ABI.hook, 'snipeBpsOf', [token], B), bps)
   }
   check(`${what}: PoolTrade == model`, eventsOf<PoolTradeEvent>(receipt, HOOK, ABI.hook, 'PoolTrade'), [{
     token, sender, isBuy: side === 'buy', usdcAmount: m.gross, tokenAmount: m.tokenAmount, platformFee: m.fees.platform, creatorFee: m.fees.creator, snipeFee: m.fees.snipe,
@@ -1723,7 +1724,7 @@ async function checkCurveBuy(what: string, k: Kind, sent: Sent): Promise<bigint>
   const c0 = await curveAt(token, B0)
   const bps = snipeBpsAt(c0.createdBlock, B, s.feeBps)
   const m = modelCurveBuy(c0, usdcIn, s.feeBps, bps)
-  check(`${what}: landed ${B - c0.createdBlock} blocks after the launch, surcharge ${bps} bps: snipeBpsOf at that block`, await rd<bigint>(LP, ABI.pad, 'snipeBpsOf', [token], B), bps)
+  check(`${what}: landed ${blocks(B - c0.createdBlock)} after the launch, surcharge ${bps} bps: snipeBpsOf at that block`, await rd<bigint>(LP, ABI.pad, 'snipeBpsOf', [token], B), bps)
   const bps0 = snipeBpsAt(c0.createdBlock, B0, s.feeBps)
   const [qOut, qPlat, qCreator, qSnipe, qSpent, qGrad] = await rd<readonly [bigint, bigint, bigint, bigint, bigint, boolean]>(LP, ABI.pad, 'quoteBuy', [token, usdcIn], B0)
   const q0 = modelCurveBuy(c0, usdcIn, s.feeBps, bps0)
