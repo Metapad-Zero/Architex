@@ -44,4 +44,6 @@ export const LAUNCH_V14_TOPICS = {
   PoolOpened: '0xbcd8140ba57b584223c260db25386ddf8f5805d690e00e25a36a9b8fe574c9ad',
   PoolTrade: '0x9a96e557d7ca9d7ffdc15090e918b600cf14e24d23aca695e344f0f896d7ca1c',
   BidLocked: '0x4ff958855c24f443feb330e3d64c24afe5379fe97e10eac93d6687076e679739',
+  FeesReleased: '0xaf3cb1d4e3118cf86dcc5a60d719c346f961a5ed8bdf30e5df48750b162d81dd',
+  PoolFeesAccrued: '0x224ebb718a43a951a3eefba40c38ae681d4a27940b58fe8d89750d3ef81f5398',
 } as const satisfies Record<string, Hex>

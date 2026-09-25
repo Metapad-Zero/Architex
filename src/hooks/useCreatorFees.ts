@@ -8,6 +8,7 @@ import {
   buybackPluginAbi,
   comboPluginAbi,
   deepenPluginAbi,
+  launchHookAbi,
   launchpadAbi,
   launchpadV14Abi,
   launchpadV14WithPluginErrorsAbi,
@@ -129,17 +130,22 @@ async function readHolders(client: PublicClient, token: Address, account: Addres
  * Combo's allocationOf (with its stored isPlugin flags), never from isConfigured or Configured events, which a
  * token's registered plugin can set on any listed plugin without changing where the fees go (V13-SPEC §9). The
  * launchpad and the plugins are the token's own: v1.4 tokens have their own launchpad, Split, Distribute to holders
- * and Combo.
+ * and Combo. A graduated v1.4 token's pool fees wait as the hook's claims until a sync, which collecting runs first, so
+ * what waits to collect is the launchpad's figure plus the hook's `pendingCreator`.
  */
 async function readCreatorFees(client: PublicClient, launch: LaunchRecord, account: Address | undefined): Promise<CreatorFeeState> {
   const token = launch.token
   const v14 = launchVersion(launch) === 'v14'
   const suite = suiteFor(launchVersion(launch))
   const listed = launch.pluginHooks ? listedPluginAt(launch.plugin, suite) : undefined
-  const [pending, allocation] = await Promise.all([
+  const [booked, heldByHook, allocation] = await Promise.all([
     v14
       ? client.readContract({ address: launchSuiteV14.launchpad, abi: launchpadV14Abi, functionName: 'pendingCreatorFees', args: [token] })
       : client.readContract({ address: launchSuite.launchpad, abi: launchpadAbi, functionName: 'pendingCreatorFees', args: [token] }),
+    // A v1.4 pool's fees wait as the hook's claims until a sync books them; collecting syncs first, so they count.
+    v14 && launch.graduated
+      ? client.readContract({ address: launchSuiteV14.hook, abi: launchHookAbi, functionName: 'pendingCreator', args: [token] })
+      : Promise.resolve(0n),
     listed?.kind === 'combo'
       ? client.readContract({ address: launch.plugin, abi: comboPluginAbi, functionName: 'allocationOf', args: [token] })
       : Promise.resolve(undefined),
@@ -162,7 +168,7 @@ async function readCreatorFees(client: PublicClient, launch: LaunchRecord, accou
   ])
   const fromFees = serves('holders')
   const holders = fromFees || hasDividends(dividends) ? { ...dividends, fromFees } : undefined
-  return { pending, split, buyback, deepen, holders, combo }
+  return { pending: booked + heldByHook, split, buyback, deepen, holders, combo }
 }
 
 export type CreatorFeeAction = 'collect' | 'run' | 'deepen' | 'claim' | `release:${string}`

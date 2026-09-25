@@ -8,11 +8,13 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {IArchitexLaunchpadV14} from "../src/interfaces/IArchitexLaunchpadV14.sol";
+import {IArchitexLaunchHook} from "../src/interfaces/IArchitexLaunchHook.sol";
 import {V14Base} from "./V14Base.sol";
 
 /// @notice Prints the reference vectors the site's v1.4 code is tested against (src/lib/__tests__/fixtures/
 ///         v14-vectors.json): the snipe schedule, curve buys with the snipe fee, pool keys and ids with USDC on either
-///         side, the price a pool opens at, router quotes against the fees the hook took, and raw event logs to decode.
+///         side, the price a pool opens at, router quotes against the fees the hook took, the fees it holds until a sync,
+///         lock attempts either side of a bid's top, and raw event logs to decode.
 ///         Every number comes from the contracts themselves, with USDC at Arc's own address. Regenerate with
 ///         FOUNDRY_PROFILE=v14 forge test --match-contract SiteVectorsV14 -vv | sed -n 's/.*VEC //p'
 contract SiteVectorsV14 is V14Base {
@@ -191,10 +193,65 @@ contract SiteVectorsV14 is V14Base {
                 _logs(string.concat("pool sell ", vm.toString(s), "-", vm.toString(w), "-", vm.toString(b)));
             }
         }
-        _emit(string.concat('{"k":"held","token":', _a(token), ',"lockHeld":', _n(hook.lockHeld(token)), "}"));
+        // The pool's fees wait as the hook's claims until a sync books them in the launchpad.
+        _emit(
+            string.concat(
+                '{"k":"pending","token":',
+                _a(token),
+                ',"hookPlatform":',
+                _n(hook.pendingPlatform(token)),
+                ',"hookCreator":',
+                _n(hook.pendingCreator(token)),
+                ',"padCreator":',
+                _n(pad.pendingCreatorFees(token)),
+                "}"
+            )
+        );
         vm.recordLogs();
-        hook.lock(token);
-        _logs(string.concat("lock ", vm.toString(s)));
+        pad.syncPoolFees(token);
+        _logs(string.concat("sync ", vm.toString(s)));
+
+        // A bid is anchored to the graduation price: while the price is under its top, lock places nothing. Dump well
+        // under half the graduation price and try, then buy back above it and try again.
+        address[2] memory buyers = [carol, dave];
+        for (uint256 step; step < 2; ++step) {
+            if (step == 0) {
+                vm.prank(bob);
+                router.sell(token, 300_000_000e18, 0, bob, MAX);
+            } else {
+                vm.prank(buyers[1]);
+                router.buy(token, 90_000e6, 0, buyers[1], MAX);
+            }
+            _lockVector(token, s, step);
+        }
+    }
+
+    /// @dev One lock attempt: the ticks it is judged by, what was held, and whether a bid was placed (and where).
+    function _lockVector(address token, uint256 s, uint256 step) internal {
+        (, IArchitexLaunchHook.Launch memory l) = hook.launchOf(token);
+        (, int24 tick) = _slot0(hook.poolKeyOf(token).toId());
+        uint256 held = hook.lockHeld(token);
+        uint256 bids = hook.bidCount(token);
+        vm.recordLogs();
+        uint128 liquidity = hook.lock(token);
+        _emit(
+            string.concat(
+                '{"k":"lock","token":',
+                _a(token),
+                ',"usdcIs0":',
+                _b(l.usdcIs0),
+                ',"graduationTick":',
+                vm.toString(int256(l.graduationTick)),
+                ',"tick":',
+                vm.toString(int256(tick)),
+                ',"held":',
+                _n(held),
+                ',"liquidity":',
+                _n(liquidity),
+                string.concat(',"bidsBefore":', _n(bids), ',"bidsAfter":', _n(hook.bidCount(token)), ',"heldAfter":', _n(hook.lockHeld(token)), "}")
+            )
+        );
+        _logs(string.concat("lock ", vm.toString(s), "-", vm.toString(step)));
     }
 
     // ─── Vectors ──────────────────────────────────────────────────────────────

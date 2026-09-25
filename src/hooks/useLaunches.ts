@@ -191,16 +191,17 @@ export function useLaunches() {
     })
   }, [api, fixtureVersion, graduated, graduatedV14, metaQuery.data, reservesQuery.data, rows, slot0Query.data])
 
+  // A manual refetch runs even a disabled query, so only the reads that apply here are asked for.
   const refetch = async () => {
     if (fixtureOn) return
     await Promise.all([
-      lengthQuery.refetch(),
-      pageQuery.refetch(),
-      lengthV14Query.refetch(),
-      pageV14Query.refetch(),
-      metaQuery.refetch(),
-      reservesQuery.refetch(),
-      slot0Query.refetch(),
+      v13On ? lengthQuery.refetch() : undefined,
+      v13On && windows.length > 0 ? pageQuery.refetch() : undefined,
+      v14On ? lengthV14Query.refetch() : undefined,
+      v14On && windowsV14.length > 0 ? pageV14Query.refetch() : undefined,
+      isDeployed && addresses.length > 0 ? metaQuery.refetch() : undefined,
+      graduated.length > 0 ? reservesQuery.refetch() : undefined,
+      v14On && graduatedV14.length > 0 ? slot0Query.refetch() : undefined,
     ])
   }
 

@@ -184,6 +184,8 @@ export function useLaunch(token: Address | undefined) {
           ? {
               poolId: launchOf[0],
               sqrtPriceX96: pool[0][0],
+              tick: pool[0][1],
+              graduationTick: launchOf[1].graduationTick,
               usdcIs0: launchOf[1].usdcIs0,
               openBlock: launchOf[1].openBlock,
               liquidity: pool[1],
@@ -235,17 +237,19 @@ export function useLaunch(token: Address | undefined) {
         : pendingSnipeQuery.data
       : undefined
 
+  // A manual refetch runs even a disabled query, so only the reads that apply to this token and network are asked for.
   const refetch = async () => {
     if (fixtureOn) return
+    const v14Token = curve?.version === 'v14'
     await Promise.all([
-      curveQuery.refetch(),
-      curveV14Query.refetch(),
-      metaQuery.refetch(),
-      balancesQuery.refetch(),
-      allowancesQuery.refetch(),
-      reservesQuery.refetch(),
-      poolQuery.refetch(),
-      pendingSnipeQuery.refetch(),
+      isLaunchpadDeployed && valid ? curveQuery.refetch() : undefined,
+      isLaunchpadV14Deployed && valid ? curveV14Query.refetch() : undefined,
+      isDeployed && valid ? metaQuery.refetch() : undefined,
+      isDeployed && owner ? balancesQuery.refetch() : undefined,
+      allowanceSpenders.length > 0 && owner ? allowancesQuery.refetch() : undefined,
+      curve?.graduated && !v14Token ? reservesQuery.refetch() : undefined,
+      graduatedV14 && poolId ? poolQuery.refetch() : undefined,
+      v14Token && !curve.graduated ? pendingSnipeQuery.refetch() : undefined,
     ])
   }
 

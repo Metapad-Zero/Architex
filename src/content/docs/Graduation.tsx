@@ -68,8 +68,10 @@ export function DocsGraduation() {
       <p>
         The hook takes the platform's 0.5% and the token's creator fee on every swap in the pool,
         in USDC, rounded up, exactly as the curve did. Because it does this inside the pool, the
-        fees apply to every router that reaches it, not only to this site. The pool charges no
-        liquidity fee of its own.
+        fees apply to every router that reaches it, not only to this site. A swap never sends
+        them anywhere: they wait in Uniswap's pool contract, held for the token, until anyone
+        moves them to the launchpad, and collecting a token's creator fees does that first. The
+        pool charges no liquidity fee of its own, and it takes no donations.
       </p>
 
       <h3 className="mt-6 text-base font-semibold text-ink">Open or closed pools</h3>
@@ -87,11 +89,14 @@ export function DocsGraduation() {
         For 20 blocks after a v1.4 token launches, and again for 20 blocks after its pool opens,
         buys pay an anti-sniping fee (see <span className="font-semibold">Trading a launch
         token</span>). None of it goes to the creator or to Architex. What the curve collects waits
-        in the launchpad and goes into the pool at graduation; what the pool collects waits in the
-        hook until anyone presses Lock on the token's page. Both go in as liquidity that holds only
-        USDC, starting at half the price (the lower of the price then and the price the pool
-        opened at) and running all the way down: a standing bid for the token that nobody can ever
-        withdraw. If a curve never sells out, what it collected stays in the launchpad.
+        in the launchpad and goes into the pool at graduation; what the pool collects waits with
+        the hook until anyone presses Lock on the token's page. Each becomes a bid: liquidity that
+        holds only USDC, in a position of its own, from about half the price the pool opened at
+        down to about a ten-thousandth of it. It's a standing offer to buy the token that nobody
+        can ever withdraw, and since it's placed from the opening price alone, nobody can move it
+        by pushing the price first. While the price is under half its opening price, a lock places
+        nothing and the fees keep waiting, for good if the price never comes back. If a curve
+        never sells out, what it collected stays in the launchpad.
       </p>
 
       <h3 className="mt-6 text-base font-semibold text-ink">Uniswap's own app</h3>

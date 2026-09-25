@@ -17,7 +17,7 @@ import {
 } from '../lib/impactGuard'
 import { isPriced, launchVersion, type LaunchRecord, type TradeVenue } from '../lib/launch'
 import { quoteLaunchTrade, quoteV4Trade, type LaunchQuote, type LaunchSide } from '../lib/launchQuote'
-import { snipeBps } from '../lib/launchV14'
+import { snipeBps, snipeWindowEnd } from '../lib/launchV14'
 import { pushRecent } from '../lib/recent'
 import type { Token } from '../lib/tokens'
 import { launchFixtureApi } from '../lib/launchFixtureApi'
@@ -28,6 +28,12 @@ import type { SwapTxStatus } from './useSwap'
 const fixtureOn = import.meta.env.DEV && import.meta.env.VITE_LAUNCHPAD_FIXTURE === '1'
 /** A pool quote is a call to the chain: it waits until typing pauses. */
 const POOL_QUOTE_DEBOUNCE_MS = 250
+
+/** The router's answer for a pool trade, and the snipe rate of the block it was worked out at. */
+interface PoolQuote {
+  amountOut: bigint
+  snipeBps: number
+}
 
 export type { LaunchQuote, LaunchSide }
 
@@ -107,36 +113,43 @@ export function useLaunchTrade({
   const v14 = launch !== undefined && launchVersion(launch) === 'v14'
   const inV4Pool = v14 && venue === 'pool'
 
-  // v1.4's anti-sniping fee on a buy in the block the chain is at now: on the curve from its creation block, in the
-  // pool from the block it opened. A buy lands later, when the fee is lower, so this quote never promises too much.
-  const snipe = useMemo(() => {
-    if (!launch || !v14 || side !== 'buy' || block === undefined) return 0
-    const opened = launch.graduated ? launch.v4?.openBlock : launch.createdBlock
-    return opened === undefined ? 0 : snipeBps(opened, block, launch.creatorFeeBps)
-  }, [block, launch, side, v14])
+  // v1.4's anti-sniping fee on a buy: on the curve from its creation block, in the pool from the block it opened. A
+  // v1.4 curve buy is quoted at the block the chain is at now (a buy lands later, when the fee is lower, so the quote
+  // never promises too much), and not before that block is known: quoted without the fee it would promise far too much.
+  const opened = launch && v14 ? (launch.graduated ? launch.v4?.openBlock : launch.createdBlock) : undefined
+  const snipe = side === 'buy' && launch && opened !== undefined && block !== undefined ? snipeBps(opened, block, launch.creatorFeeBps) : 0
+  const curveAwaitsBlock = v14 && side === 'buy' && venue === 'curve' && block === undefined
 
-  // In a v1.4 pool the quote is the router's (a call to the chain, fees included); everywhere else it is local.
+  // In a v1.4 pool the quote is the router's (a call to the chain, every fee included), made at one pinned block whose
+  // snipe rate splits its fees, so the fees and the impact always describe the same swap. Everywhere else it is local.
   const settledIn = useSettled(parsedIn, POOL_QUOTE_DEBOUNCE_MS)
-  const poolQuoteQuery = useQuery<bigint, Error>({
+  const poolWindowOpen = inV4Pool && opened !== undefined && (block === undefined || block < snipeWindowEnd(opened))
+  const poolQuoteQuery = useQuery<PoolQuote, Error>({
     queryKey: ['v4Quote', activeChain.id, launch?.token, side, settledIn.toString()],
     enabled: inV4Pool && settledIn > 0n && isPriced(launch) && (fixtureOn || Boolean(publicClient)),
-    staleTime: 4_000,
-    refetchInterval: 8_000,
+    staleTime: 2_000,
+    // While the pool's window is open its fee falls every block: quote more often.
+    refetchInterval: poolWindowOpen ? 2_000 : 8_000,
     retry: false,
     queryFn: async () => {
-      if (!launch) throw new Error('No token')
+      if (!launch?.v4) throw new Error('No pool')
+      const rateAt = (at: bigint) => (side === 'buy' ? snipeBps(launch.v4!.openBlock, at, launch.creatorFeeBps) : 0)
       if (fixtureOn) {
         const api = launchFixtureApi()
         if (!api) throw new Error('No fixture')
-        return api.quoteV4(launch.token, side, settledIn)
+        const at = api.blockNumber()
+        return { amountOut: api.quoteV4(launch.token, side, settledIn), snipeBps: rateAt(at) }
       }
       if (!publicClient) throw new Error('No RPC client for Arc')
-      return publicClient.readContract({
+      const at = await publicClient.getBlockNumber({ cacheTime: 0 })
+      const amountOut = await publicClient.readContract({
         address: launchSuiteV14.router,
         abi: v4RouterAbi,
         functionName: side === 'buy' ? 'quoteBuy' : 'quoteSell',
         args: [launch.token, settledIn],
+        blockNumber: at,
       })
+      return { amountOut, snipeBps: rateAt(at) }
     },
   })
   const poolQuoteFresh = inV4Pool && settledIn === parsedIn && poolQuoteQuery.data !== undefined && !poolQuoteQuery.isPlaceholderData
@@ -144,9 +157,13 @@ export function useLaunchTrade({
 
   const quote = useMemo(() => {
     if (!launch) return undefined
-    if (inV4Pool) return poolQuoteFresh && poolQuoteQuery.data !== undefined ? quoteV4Trade(launch, side, parsedIn, poolQuoteQuery.data, slippageBps, snipe) : undefined
+    if (inV4Pool) {
+      const answer = poolQuoteFresh ? poolQuoteQuery.data : undefined
+      return answer ? quoteV4Trade(launch, side, parsedIn, answer.amountOut, slippageBps, answer.snipeBps) : undefined
+    }
+    if (curveAwaitsBlock) return undefined
     return quoteLaunchTrade(launch, side, parsedIn, slippageBps, snipe)
-  }, [inV4Pool, launch, parsedIn, poolQuoteFresh, poolQuoteQuery.data, side, slippageBps, snipe])
+  }, [curveAwaitsBlock, inV4Pool, launch, parsedIn, poolQuoteFresh, poolQuoteQuery.data, side, slippageBps, snipe])
 
   // The price-impact guard (lib/impactGuard.ts), as on Swap: a refused trade is neither approved nor sent, and one past
   // the acknowledgment line only while the sheet's checkbox is ticked for this trade (side, typed amount, venue) and
@@ -182,12 +199,16 @@ export function useLaunchTrade({
     if (phase === 'quoteMoved') return 'quoteMoved'
     if (phase === 'pending') return 'pending'
     if (launch && !isPriced(launch)) return 'poolLoading'
-    // A pool quote on its way reads as quoting; one that came back unusable, or refused, as no quote.
-    if (!quote) return inV4Pool && parsedIn > 0n && !poolQuoteError && !poolQuoteFresh ? 'quoting' : 'enterAmount'
+    // A pool quote on its way, or a v1.4 curve buy waiting for the chain's block, reads as quoting; a pool quote that
+    // came back unusable, or refused, as no quote.
+    if (!quote) {
+      const waiting = (inV4Pool && !poolQuoteError && !poolQuoteFresh) || curveAwaitsBlock
+      return parsedIn > 0n && waiting ? 'quoting' : 'enterAmount'
+    }
     if (!payToken || spendableBalance(payToken.address, balance) < required) return 'insufficientBalance'
     if (side === 'buy' && allowance < required) return 'needsApproval'
     return 'ready'
-  }, [account, allowance, balance, chainId, impactRefused, inV4Pool, isConnected, launch, parsedIn, payToken, phase, poolQuoteError, poolQuoteFresh, quote, required, side])
+  }, [account, allowance, balance, chainId, curveAwaitsBlock, impactRefused, inV4Pool, isConnected, launch, parsedIn, payToken, phase, poolQuoteError, poolQuoteFresh, quote, required, side])
 
   const label = useMemo(() => {
     const symbol = token?.symbol ?? 'token'
@@ -368,8 +389,11 @@ export function useLaunchTrade({
   return {
     quote,
     venue,
-    /** v1.4's anti-sniping fee on a buy in the latest block, in bps; 0 outside the window, for sells and on v1.3. */
-    snipeBps: snipe,
+    /**
+     * v1.4's anti-sniping fee on a buy, in bps: the quote's own rate once there is one, else the latest block's; 0
+     * outside the window, for sells and on v1.3.
+     */
+    snipeBps: quote ? quote.snipeBps : snipe,
     /** Why the pool could not quote the typed amount, in a sentence. */
     quoteError: poolQuoteError,
     buttonState,

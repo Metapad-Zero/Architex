@@ -316,7 +316,7 @@ export function describeLaunchHookCall(data: Hex, tokens: readonly Token[]): Sig
   return {
     title: `Lock ${symbol(token, tokens)} anti-sniping fees`,
     lines: [{ label: 'Token', value: symbol(token, tokens) }],
-    note: 'Adds the anti-sniping fees the hook holds for this token to its Uniswap pool, as liquidity nobody can withdraw. Nothing comes to you.',
+    note: 'Adds the anti-sniping fees the hook holds for this token to its Uniswap pool, as liquidity nobody can withdraw. While the price is under half the price the pool opened at, it adds nothing and the fees wait. Nothing comes to you.',
   }
 }
 

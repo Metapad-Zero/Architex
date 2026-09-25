@@ -71,7 +71,10 @@ export interface LaunchSuiteV14 {
   stateView: Address
 }
 
-/** Uniswap v4 on Arc mainnet (developers.uniswap.org; the code confirmed on chain 2026-09-25, V14-SPEC §2). */
+/**
+ * Uniswap v4 on Arc (developers.uniswap.org; the code confirmed on chain 2026-09-25, V14-SPEC §2): the same addresses
+ * on Arc mainnet and Arc Testnet.
+ */
 export const UNISWAP_V4_ARC = {
   poolManager: '0x8366a39CC670B4001A1121B8F6A443A643e40951',
   stateView: '0xF3334192D15450CdD385c8B70e03f9A6bD9E673b',

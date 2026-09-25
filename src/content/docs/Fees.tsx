@@ -127,10 +127,12 @@ export function DocsFees() {
       <V14Note {...V14_NOTE} />
       <p>
         Creator fees work the same way on v1.4: the same range, locked at launch, waiting in the
-        v1.4 launchpad until anyone collects them, including every fee the pool's hook takes after
-        graduation. A plugin works with one launchpad, so v1.4 has its own Split, Distribute to
-        holders and Combo, and those are the ones its builder lists. Buyback &amp; burn and Deepen
-        pool are v1.3's alone for now.
+        v1.4 launchpad until anyone collects them. After graduation, the fees the pool's hook takes
+        wait in Uniswap's pool contract until they're moved to the launchpad; collecting does that
+        first, so the token's page counts both and its Collect button pays both. A plugin works
+        with one launchpad, so v1.4 has its own Split, Distribute to holders and Combo, and those
+        are the ones its builder lists. Buyback &amp; burn and Deepen pool are v1.3's alone for
+        now.
       </p>
       <p>
         v1.4's anti-sniping fee is not a creator fee and goes to no one: it becomes liquidity in

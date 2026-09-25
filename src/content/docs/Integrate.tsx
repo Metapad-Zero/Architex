@@ -249,7 +249,13 @@ PoolTrade(address indexed token, address indexed sender, bool isBuy,
   ${LAUNCH_V14_TOPICS.PoolTrade}
 BidLocked(address indexed token, uint256 usdc, uint128 liquidity,
           int24 tickLower, int24 tickUpper)
-  ${LAUNCH_V14_TOPICS.BidLocked}`
+  ${LAUNCH_V14_TOPICS.BidLocked}
+FeesReleased(address indexed token, uint256 platformFee, uint256 creatorFee)
+  ${LAUNCH_V14_TOPICS.FeesReleased}
+
+// launchpad v1.4, on a sync (not on a trade)
+PoolFeesAccrued(address indexed token, uint256 platformFee, uint256 creatorFee)
+  ${LAUNCH_V14_TOPICS.PoolFeesAccrued}`
 
 const V14_POOLS = `// a token's pool, known from launch (hook.poolKeyOf(token))
 PoolKey(currency0 = min(USDC, token), currency1 = max(USDC, token),
@@ -264,7 +270,12 @@ hook.launchOf(token)       returns (poolId, usdcIs0, open, openBlock, ...)
 v4Router.quoteBuy(token, usdcIn)      returns tokensOut
 v4Router.quoteSell(token, tokensIn)   returns usdcOut
 v4Router.buy(token, usdcIn, minTokensOut, to, deadline)
-v4Router.sell(token, tokensIn, minUsdcOut, to, deadline)`
+v4Router.sell(token, tokensIn, minUsdcOut, to, deadline)
+
+// pool fees wait as the hook's claims until a sync (anyone)
+hook.pendingPlatform(token), hook.pendingCreator(token)
+launchpad.syncPoolFees(token), launchpad.syncPoolFeesBatch(tokens)
+launchpad.pendingCreatorFees(token)   counts them once synced`
 
 const ENDPOINTS: ReadonlyArray<readonly [string, string, string]> = [
   ['GET /api/v1/pairs', 'Every market: ticker_id, base, target, pool_id', '5 min'],
@@ -308,7 +319,12 @@ export function DocsIntegrate() {
       </p>
 
       <H3>Contracts on Arc Testnet</H3>
-      <Rows rows={contractRows(testnet)} />
+      <Rows
+        rows={contractRows(testnet, [
+          ['Uniswap v4 PoolManager', UNISWAP_V4_ARC.poolManager],
+          ['Uniswap v4 StateView', UNISWAP_V4_ARC.stateView],
+        ])}
+      />
 
       <H3>The core AMM is a Uniswap V2 fork</H3>
       <p>
@@ -392,14 +408,19 @@ export function DocsIntegrate() {
       <Pre label="Events, with topic0">{V14_EVENTS}</Pre>
       <p>
         In <C>PoolTrade</C>, <C>sender</C> is whoever called the PoolManager (a router), not necessarily the trader,
-        and <C>usdcAmount</C> is gross as in <C>Trade</C>: all a buyer paid, or all the pool paid out on a sell. The
+        and <C>usdcAmount</C> is gross as in <C>Trade</C>: all a buyer paid, or all the pool paid out on a sell. It is
+        the per-trade record of a pool&rsquo;s fees: the hook keeps them as its ERC-6909 claims in the PoolManager, and
+        <C>PoolFeesAccrued</C> fires only when a sync or a creator-fee collection books them in the launchpad. The
         PoolManager&rsquo;s own <C>Swap</C> event, keyed by the pool id, carries the price after each swap.
       </p>
       <Pre label="Pools, prices and quotes">{V14_POOLS}</Pre>
       <p>
         Arc&rsquo;s USDC sorts below most token addresses, so it is currency0 in most v1.4 pools and currency1 in
-        the rest: read which from the key. Uniswap&rsquo;s app and routing only reach a pool with a hook like this one once
-        Uniswap has approved the hook, which has not happened. The public endpoints below do not list v1.4 markets yet.
+        the rest: read which from the key. The pools refuse donations. Each <C>lock</C> places a bid of its own, a
+        USDC-only range anchored to the graduation tick, its top about half the graduation price and 92,200 ticks deep;
+        while the price is under that top it places nothing and the USDC waits. Uniswap&rsquo;s app and routing only
+        reach a pool with a hook like this one once Uniswap has approved the hook, which has not happened. The public
+        endpoints below do not list v1.4 markets yet.
       </p>
 
       <H3>Token details</H3>

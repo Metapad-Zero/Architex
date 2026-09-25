@@ -55,6 +55,8 @@ const REVERTS: Record<string, string> = {
   AlreadyOpened: 'This token’s pool is already open.',
   PoolCreationRestricted: 'Only the launchpad can open this pool.',
   NothingToLock: 'No anti-sniping fees are waiting to be locked for this token.',
+  DonationsRefused: 'These pools take no donations.',
+  BidNotOneSided: 'The bid could not be placed at the price now. The fees wait; try again later.',
   WrappedError: 'The pool refused the trade. Check the amount, then try again.',
   // Creator-fee plugins (contracts/interfaces/plugins).
   NotConfigured: 'That plugin does not serve this token.',

@@ -49,8 +49,8 @@ describe('events', () => {
   })
 
   test('v1.4’s topics match its ABIs, and none is v1.3’s', () => {
-    for (const name of ['TokenCreated', 'Trade', 'Graduated'] as const) expect(topic(launchpadV14Abi, name)).toBe(LAUNCH_V14_TOPICS[name])
-    for (const name of ['PoolOpened', 'PoolTrade', 'BidLocked'] as const) expect(topic(launchHookAbi, name)).toBe(LAUNCH_V14_TOPICS[name])
+    for (const name of ['TokenCreated', 'Trade', 'Graduated', 'PoolFeesAccrued'] as const) expect(topic(launchpadV14Abi, name)).toBe(LAUNCH_V14_TOPICS[name])
+    for (const name of ['PoolOpened', 'PoolTrade', 'BidLocked', 'FeesReleased'] as const) expect(topic(launchHookAbi, name)).toBe(LAUNCH_V14_TOPICS[name])
     const v13 = new Set<string>(Object.values(LAUNCH_TOPICS))
     expect(Object.values(LAUNCH_V14_TOPICS).filter((value) => v13.has(value))).toEqual([])
   })

@@ -12,6 +12,8 @@ import { quoteLaunchTrade, quoteV4Trade } from '../launchQuote'
 import { decodeTradeLog, feedVenue, tradeFeeds, TRADE_EVENTS } from '../launchTradeLogs'
 import {
   V14,
+  bidRange,
+  canLockBid,
   grossOfSell,
   launchPoolKey,
   maxV4Trade,
@@ -205,14 +207,14 @@ describe('pool trades through the router match the hook’s fees', () => {
     for (const v of quotes) {
       const step = steps[index++]
       expect(step.startsWith(`pool ${v.side as string}`)).toBe(true)
-      const [accrued, hookLog] = [logsOf(step, 'launchpad'), logsOf(step, 'hook')]
+      const hookLog = logsOf(step, 'hook')
       expect(hookLog.length).toBe(1)
+      // A swap never reaches the launchpad: its fees wait as the hook's claims, and PoolFeesAccrued marks a sync.
+      expect(logsOf(step, 'launchpad')).toEqual([])
       const trade = decode(hookLog[0])
       expect(v.quote).toBe(v.out)
       expect(trade.viaRouter).toBe(true)
       expect(getAddress(trade.trader)).toBe(getAddress(suiteVector.router))
-      const accruedArgs = decodeEventLog({ abi: launchpadV14Abi, data: accrued[0].data, topics: accrued[0].topics as [Hex, ...Hex[]] })
-      expect(accruedArgs.eventName).toBe('PoolFeesAccrued')
       if (v.side === 'buy') {
         const fees = poolFeesOnGross(big(v.in), v.c as number, v.s as number)
         expect([trade.isBuy, trade.usdcAmount, trade.tokenAmount]).toEqual([true, big(v.in), big(v.out)])
@@ -262,6 +264,64 @@ describe('pool trades through the router match the hook’s fees', () => {
     expect(impact(large)).toBeGreaterThan(3_000n)
   })
 
+  test('the hook holds a pool’s fees until a sync books them: creator fees ready = the launchpad’s + the hook’s', () => {
+    const pending = all.filter((v) => v.k === 'pending')
+    expect(pending.length).toBe(2)
+    pending.forEach((v, s) => {
+      const trades = all
+        .filter((row) => row.k === 'log' && row.emitter === 'hook' && String(row.step).startsWith('pool ') && String(row.step).includes(` ${s}-`))
+        .map((row) => decodeTradeLog('poolV14', row.data as Hex, row.topics as Hex[]))
+      expect(trades.length).toBe(14)
+      const platform = trades.reduce((sum, trade) => sum + trade.platformFee, 0n)
+      const creator = trades.reduce((sum, trade) => sum + trade.creatorFee, 0n)
+      expect([big(v.hookPlatform), big(v.hookCreator)]).toEqual([platform, creator])
+      // The sync: the hook releases exactly that to the launchpad, which books it.
+      const [released] = logsOf(`sync ${s}`, 'hook')
+      const releasedEvent = decodeEventLog({ abi: launchHookAbi, data: released.data, topics: released.topics as [Hex, ...Hex[]] })
+      if (releasedEvent.eventName !== 'FeesReleased') throw new Error(releasedEvent.eventName)
+      expect([releasedEvent.args.platformFee, releasedEvent.args.creatorFee]).toEqual([platform, creator])
+      const [booked] = logsOf(`sync ${s}`, 'launchpad')
+      const bookedEvent = decodeEventLog({ abi: launchpadV14Abi, data: booked.data, topics: booked.topics as [Hex, ...Hex[]] })
+      if (bookedEvent.eventName !== 'PoolFeesAccrued') throw new Error(bookedEvent.eventName)
+      expect([bookedEvent.args.platformFee, bookedEvent.args.creatorFee]).toEqual([platform, creator])
+    })
+  })
+
+  test('a bid is anchored to the graduation tick, and lock places nothing while the price is under its top', () => {
+    const locks = all.filter((v) => v.k === 'lock')
+    expect(locks.length).toBe(4)
+    expect(locks.map((v) => v.usdcIs0).sort()).toEqual([false, false, true, true])
+    locks.forEach((v, index) => {
+      const s = Math.floor(index / 2)
+      const step = index % 2
+      const placed = big(v.bidsAfter) > big(v.bidsBefore)
+      expect(canLockBid(v.tick as number, v.graduationTick as number, v.usdcIs0 as boolean)).toBe(placed)
+      // The dump first (under half the graduation price: nothing placed, the USDC waits), then the buy back.
+      expect(placed).toBe(step === 1)
+      expect(big(v.heldAfter)).toBe(placed ? 0n : big(v.held))
+      const bids = logsOf(`lock ${s}-${step}`, 'hook')
+      expect(bids.length).toBe(placed ? 1 : 0)
+      if (placed) {
+        const event = decodeEventLog({ abi: launchHookAbi, data: bids[0].data, topics: bids[0].topics as [Hex, ...Hex[]] })
+        if (event.eventName !== 'BidLocked') throw new Error(event.eventName)
+        const range = bidRange(v.graduationTick as number, v.usdcIs0 as boolean)
+        expect([event.args.tickLower, event.args.tickUpper]).toEqual([range.lower, range.upper])
+        expect(event.args.usdc).toBe(big(v.held))
+        expect(range.upper - range.lower).toBe(V14.BID_SPAN_TICKS)
+      }
+    })
+    // Half the graduation price is 6,932 ticks away, in whichever direction makes the token cheaper.
+    expect(bidRange(366_200, true)).toEqual({ lower: 373_200, upper: 465_400 })
+    expect(bidRange(-366_201, false)).toEqual({ lower: -465_400, upper: -373_200 })
+    expect(canLockBid(373_199, 366_200, true)).toBe(true)
+    expect(canLockBid(373_200, 366_200, true)).toBe(false)
+    expect(canLockBid(-373_200, -366_201, false)).toBe(true)
+    expect(canLockBid(-373_201, -366_201, false)).toBe(false)
+    // A range that would run past Uniswap's usable ticks stops at the edge.
+    expect(bidRange(850_000, true).upper).toBe(V14.MAX_USABLE_TICK)
+    expect(bidRange(-850_000, false).lower).toBe(V14.MIN_USABLE_TICK)
+  })
+
   test('the hook refuses fees that take everything, and so does the site', () => {
     expect(outcome(() => poolFeesOnGross(1n, 0, 9_000))).toBe('FeesExceedAmount')
     expect(outcome(() => poolFeesOnGross(100n, 1_000, 8_850))).toBe('FeesExceedAmount')
@@ -296,7 +356,9 @@ describe('the v1.4 events decode', () => {
     expect(toEventSelector(getAbiItem({ abi: launchHookAbi, name: 'BidLocked' }))).toBe(topic('graduation', 'hook', 1))
     expect(toEventSelector(getAbiItem({ abi: launchpadV14Abi, name: 'Graduated' }))).toBe(topic('graduation', 'launchpad', 1))
     expect(toEventSelector(TRADE_EVENTS.poolV14)).toBe(topic('pool buy 0-0-0', 'hook'))
-    expect(toEventSelector(getAbiItem({ abi: launchHookAbi, name: 'BidLocked' }))).toBe(topic('lock 0', 'hook'))
+    expect(toEventSelector(getAbiItem({ abi: launchHookAbi, name: 'BidLocked' }))).toBe(topic('lock 0-1', 'hook'))
+    expect(toEventSelector(getAbiItem({ abi: launchHookAbi, name: 'FeesReleased' }))).toBe(topic('sync 0', 'hook'))
+    expect(toEventSelector(getAbiItem({ abi: launchpadV14Abi, name: 'PoolFeesAccrued' }))).toBe(topic('sync 0', 'launchpad'))
     // v1.4's Trade and PoolTrade carry one more field than v1.3's, so their topics differ from them.
     expect(toEventSelector(TRADE_EVENTS.curveV14)).not.toBe(toEventSelector(TRADE_EVENTS.curve))
     expect(toEventSelector(TRADE_EVENTS.poolV14)).not.toBe(toEventSelector(TRADE_EVENTS.pool))
@@ -441,9 +503,11 @@ describe('deployment', () => {
       // All or nothing: the site needs every one of these to run v1.4.
       expect(core.every((address) => address === zeroAddress) || core.every((address) => address !== zeroAddress)).toBe(true)
     }
-    // On mainnet the PoolManager and StateView are Uniswap's own.
-    for (const key of ['poolManager', 'stateView'] as const) {
-      if (mainnet.v14[key] !== zeroAddress) expect(getAddress(mainnet.v14[key])).toBe(getAddress(UNISWAP_V4_ARC[key]))
+    // The PoolManager and StateView are Uniswap's own, at the same addresses on both networks.
+    for (const file of [mainnet, testnet]) {
+      for (const key of ['poolManager', 'stateView'] as const) {
+        if (file.v14[key] !== zeroAddress) expect(getAddress(file.v14[key])).toBe(getAddress(UNISWAP_V4_ARC[key]))
+      }
     }
   })
 

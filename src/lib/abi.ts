@@ -353,6 +353,8 @@ export const launchHookErrors = [
   'error FeesExceedAmount()',
   'error NothingToLock()',
   'error PartialFill()',
+  'error DonationsRefused()',
+  'error BidNotOneSided()',
 ] as const
 
 /** Uniswap v4's own refusals that can end a pool trade: a hook's revert, wrapped, and a pool that is not open. */
@@ -383,6 +385,8 @@ const launchpadV14Errors = [
   'error AlreadyInitialized()',
   'error InvalidWiring()',
   'error PluginPullMismatch()',
+  'error ReentrancyGuardReentrantCall()',
+  'error SafeERC20FailedOperation(address token)',
 ] as const
 
 const curveV14 =
@@ -396,6 +400,12 @@ const createTokenV14 =
  * IArchitexLaunchpadV14, including IArchitexLaunchpadLite. v1.3's curves and fees with a third fee on a curve buy in
  * the token's first SNIPE_BLOCKS blocks (the snipe fee, held for its pool), an open or closed pool chosen at launch,
  * and graduation into a Uniswap v4 pool behind the hook instead of a launch pair.
+ *
+ * Pool trades' fees stay with the hook (its ERC-6909 claims in the PoolManager) until the launchpad releases and books
+ * them: `syncPoolFees` (anyone), or first thing in `collectCreatorFees`. So PoolFeesAccrued marks a sync, not a trade
+ * (per-trade fees are the hook's PoolTrade), and a graduated token's creator fees ready to collect are
+ * `pendingCreatorFees(token)` plus the hook's `pendingCreator(token)`. `accrueTradeFees` is IArchitexLaunchpadLite's and
+ * always reverts on v1.4.
  */
 export const launchpadV14Abi = parseAbi([
   curveV14,
@@ -459,7 +469,9 @@ export const launchpadV14Abi = parseAbi([
   'function progressBps(address token) view returns (uint256)',
   'function collectFees() returns (uint256 amount)',
   'function collectCreatorFees(address token) returns (uint256 amount)',
-  'function accrueTradeFees(address token, uint256 platformFee, uint256 creatorFee)',
+  'function syncPoolFees(address token) returns (uint256 platformFee, uint256 creatorFee)',
+  'function syncPoolFeesBatch(address[] tokens)',
+  'function accrueTradeFees(address token, uint256 platformFee, uint256 creatorFee) pure',
   'function setFeeTo(address feeTo)',
   'function setFeeToSetter(address feeToSetter)',
   'function setLaunchFee(uint256 launchFee)',
@@ -467,8 +479,12 @@ export const launchpadV14Abi = parseAbi([
 
 /**
  * IArchitexLaunchHook: one hook for every v1.4 pool. It opens each pool at graduation, takes the platform, creator and
- * snipe fees of every swap in USDC (PoolTrade), and locks the snipe fees it holds into the pool as a bid (BidLocked).
- * PoolTrade's `sender` is whoever called the PoolManager (a router), not necessarily the trader.
+ * snipe fees of every swap in USDC (PoolTrade) and keeps them as its ERC-6909 claims in the PoolManager: the platform
+ * and creator fees until the launchpad releases them (FeesReleased), the snipe fee until anyone locks it into the pool
+ * as a bid (BidLocked). Each bid is a position of its own, from about half the graduation price down BID_SPAN_TICKS;
+ * `lock` places nothing while the price is below that top. Nobody can donate to a pool. PoolTrade's `sender` is
+ * whoever called the PoolManager (a router), not necessarily the trader. `graduate` and `release` are the launchpad's
+ * alone: the site never calls them.
  */
 export const launchHookAbi = parseAbi([
   'struct PoolKey { address currency0; address currency1; uint24 fee; int24 tickSpacing; address hooks; }',
@@ -476,6 +492,7 @@ export const launchHookAbi = parseAbi([
   'event PoolOpened(address indexed token, bytes32 indexed poolId, uint160 sqrtPriceX96, uint256 tokensAdded, uint256 usdcAdded, uint128 liquidity, bool open)',
   'event PoolTrade(address indexed token, address indexed sender, bool isBuy, uint256 usdcAmount, uint256 tokenAmount, uint256 platformFee, uint256 creatorFee, uint256 snipeFee)',
   'event BidLocked(address indexed token, uint256 usdc, uint128 liquidity, int24 tickLower, int24 tickUpper)',
+  'event FeesReleased(address indexed token, uint256 platformFee, uint256 creatorFee)',
   'error OnlyLaunchpad()',
   ...launchHookErrors,
   ...uniswapV4Errors,
@@ -485,11 +502,18 @@ export const launchHookAbi = parseAbi([
   'function SNIPE_BLOCKS() view returns (uint256)',
   'function SNIPE_START_BPS() view returns (uint256)',
   'function MAX_TOTAL_FEE_BPS() view returns (uint256)',
+  'function BID_DISCOUNT_TICKS() view returns (int24)',
+  'function BID_SPAN_TICKS() view returns (int24)',
   'function launchpad() view returns (address)',
   'function usdc() view returns (address)',
   'function poolManager() view returns (address)',
+  'function graduate(address token, uint256 tokenAmount, uint256 usdcAmount, uint256 lockAmount, bool open, uint16 creatorFeeBps) returns (bytes32 poolId, uint128 liquidity)',
   'function lock(address token) returns (uint128 liquidity)',
+  'function release(address token) returns (uint256 platformFee, uint256 creatorFee)',
   'function lockHeld(address token) view returns (uint256)',
+  'function pendingPlatform(address token) view returns (uint256)',
+  'function pendingCreator(address token) view returns (uint256)',
+  'function bidCount(address token) view returns (uint256)',
   'function poolKeyOf(address token) view returns (PoolKey)',
   'function launchOf(address token) view returns (bytes32 poolId, Launch launch)',
   'function snipeBpsOf(address token) view returns (uint256)',
