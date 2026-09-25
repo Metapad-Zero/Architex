@@ -1,0 +1,170 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.28;
+
+import {Test} from "forge-std/Test.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
+import {ArchitexLaunchpadV14} from "../src/ArchitexLaunchpadV14.sol";
+import {ArchitexLaunchHook} from "../src/ArchitexLaunchHook.sol";
+import {ArchitexV4Router} from "../src/ArchitexV4Router.sol";
+import {MockUSDC} from "./utils/MockUSDC.sol";
+import {RawSwapper, V14Base} from "./V14Base.sol";
+
+/// @dev Drives random launches, curve and pool trades (exact in through the router, exact out through a raw swapper),
+///      graduations, locks and collections across a few tokens, in blocks inside and after both snipe windows.
+contract V14Handler is Test {
+    ArchitexLaunchpadV14 internal immutable pad;
+    ArchitexLaunchHook internal immutable hook;
+    ArchitexV4Router internal immutable router;
+    RawSwapper internal immutable raw;
+    MockUSDC internal immutable usdc;
+    address[] public tokens;
+
+    constructor(ArchitexLaunchpadV14 pad_, ArchitexLaunchHook hook_, ArchitexV4Router router_, RawSwapper raw_, MockUSDC usdc_)
+    {
+        (pad, hook, router, raw, usdc) = (pad_, hook_, router_, raw_, usdc_);
+        usdc.mint(address(this), 1e18);
+        usdc.approve(address(pad), type(uint256).max);
+        usdc.approve(address(router), type(uint256).max);
+    }
+
+    function tokensLength() external view returns (uint256) {
+        return tokens.length;
+    }
+
+    function launch(uint16 fee, bool open, uint256 firstBuy) external {
+        if (tokens.length >= 3) return;
+        fee = uint16(bound(fee, 0, 1000));
+        firstBuy = bound(firstBuy, 0, 5_000e6);
+        tokens.push(pad.createToken("Fuzz", "FZ", "", fee, address(0xBEEF), "", open, firstBuy, 0, type(uint256).max));
+    }
+
+    function step(uint256 blocks) external {
+        blocks = bound(blocks, 1, 30);
+        vm.roll(block.number + blocks);
+        vm.warp(block.timestamp + blocks / 2 + 1);
+    }
+
+    function curveBuy(uint256 i, uint256 amount) external {
+        if (tokens.length == 0) return;
+        address t = tokens[i % tokens.length];
+        if (pad.isGraduated(t)) return;
+        amount = bound(amount, 1e6, 40_000e6);
+        pad.buy(t, amount, 0, address(this), type(uint256).max);
+    }
+
+    function curveSell(uint256 i, uint256 frac) external {
+        if (tokens.length == 0) return;
+        address t = tokens[i % tokens.length];
+        uint256 bal = IERC20(t).balanceOf(address(this));
+        if (pad.isGraduated(t) || bal == 0) return;
+        uint256 amount = bal * bound(frac, 1, 100) / 100;
+        try pad.sell(t, amount, 0, address(this), type(uint256).max) {} catch {}
+    }
+
+    function poolBuy(uint256 i, uint256 amount) external {
+        if (tokens.length == 0) return;
+        address t = tokens[i % tokens.length];
+        if (!pad.isGraduated(t)) return;
+        amount = bound(amount, 1e6, 50_000e6);
+        router.buy(t, amount, 0, address(this), type(uint256).max);
+    }
+
+    function poolSell(uint256 i, uint256 frac) external {
+        if (tokens.length == 0) return;
+        address t = tokens[i % tokens.length];
+        uint256 bal = IERC20(t).balanceOf(address(this));
+        if (!pad.isGraduated(t) || bal == 0) return;
+        uint256 amount = bal * bound(frac, 1, 100) / 100;
+        try router.sell(t, amount, 0, address(this), type(uint256).max) {} catch {}
+    }
+
+    /// @dev Exact out, either way, through a router the hook has never heard of.
+    function rawExactOut(uint256 i, uint256 amount, bool buyTokens) external {
+        if (tokens.length == 0) return;
+        address t = tokens[i % tokens.length];
+        if (!pad.isGraduated(t)) return;
+        PoolKey memory key = hook.poolKeyOf(t);
+        bool usdcIs0 = address(usdc) < t;
+        usdc.mint(address(raw), 100_000e6);
+        uint256 bal = IERC20(t).balanceOf(address(this));
+        if (!buyTokens) {
+            if (bal == 0) return;
+            IERC20(t).transfer(address(raw), bal);
+        }
+        bool zeroForOne = buyTokens == usdcIs0;
+        int256 specified = buyTokens ? int256(bound(amount, 1e18, 1_000_000e18)) : int256(bound(amount, 1e6, 1_000e6));
+        try raw.swap(
+            key,
+            SwapParams({
+                zeroForOne: zeroForOne,
+                amountSpecified: specified,
+                sqrtPriceLimitX96: zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
+            })
+        ) {} catch {}
+    }
+
+    function graduate(uint256 i) external {
+        if (tokens.length == 0) return;
+        address t = tokens[i % tokens.length];
+        if (pad.isGraduated(t)) return;
+        pad.buy(t, 1_000_000e6, 0, address(this), type(uint256).max);
+    }
+
+    function lock(uint256 i) external {
+        if (tokens.length == 0) return;
+        address t = tokens[i % tokens.length];
+        if (!pad.isGraduated(t) || hook.lockHeld(t) == 0) return;
+        hook.lock(t);
+    }
+
+    function collect(uint256 i) external {
+        pad.collectFees();
+        if (tokens.length == 0) return;
+        pad.collectCreatorFees(tokens[i % tokens.length]);
+    }
+}
+
+/// @notice V14-SPEC §10 invariants, under random sequences.
+contract LaunchpadV14InvariantTest is V14Base {
+    V14Handler internal handler;
+
+    function _usdcAt() internal pure override returns (address) {
+        return 0x3600000000000000000000000000000000000000;
+    }
+
+    function setUp() public override {
+        super.setUp();
+        handler = new V14Handler(pad, hook, router, raw, usdc);
+        targetContract(address(handler));
+    }
+
+    /// @dev The launchpad's USDC is exactly its books: platform and creator fees, curve snipe fees, live curve floats.
+    function invariant_launchpadUsdcIsItsBooks() public view {
+        _assertSolvent();
+    }
+
+    /// @dev The hook keeps no launch token, and its USDC is exactly what it holds for bids.
+    function invariant_hookHoldsOnlyItsBids() public view {
+        uint256 n = handler.tokensLength();
+        uint256 held;
+        for (uint256 i; i < n; ++i) {
+            address t = handler.tokens(i);
+            assertEq(IERC20(t).balanceOf(address(hook)), 0, "hook keeps no token");
+            held += hook.lockHeld(t);
+        }
+        assertEq(usdc.balanceOf(address(hook)), held, "hook USDC == sum of lockHeld");
+    }
+
+    /// @dev A graduated token's curve inventory is gone and its supply never grows.
+    function invariant_supplyNeverGrows() public view {
+        uint256 n = handler.tokensLength();
+        for (uint256 i; i < n; ++i) {
+            address t = handler.tokens(i);
+            assertLe(IERC20(t).totalSupply(), 1_000_000_000e18);
+            if (pad.isGraduated(t)) assertEq(IERC20(t).balanceOf(address(pad)), 0, "curve inventory gone");
+        }
+    }
+}
