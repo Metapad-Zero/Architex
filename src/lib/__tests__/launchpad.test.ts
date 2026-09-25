@@ -5,7 +5,7 @@ import type { LaunchSuite } from '../deployment'
 import { explainRevert } from '../errors'
 import { formatCurveSold, soldLabel, utf8ByteLength } from '../launch'
 import { holderPluginAbi } from '../plugins/holders'
-import { encodeComboData, encodeSplitData } from '../plugins/plan'
+import { encodeBurnShareData, encodeComboData, encodeSplitData } from '../plugins/plan'
 import { describeLaunchRouterCall, describeLaunchTokenCall, describeLaunchpadCall, describePluginCall } from '../signingIntent'
 import type { Token } from '../tokens'
 
@@ -130,6 +130,27 @@ describe('launchpad signing intent', () => {
     ])
   })
 
+  test('spells out Deepen pool’s burn share, on its own and in a Combo', () => {
+    const own = describeLaunchpadCall(createToken(100, suite.deepenPlugin, encodeBurnShareData(2_500)), account, tokens, suite)
+    expect(own?.lines.slice(3, 5)).toEqual([
+      { label: 'Fees go to', value: 'Deepen pool' },
+      { label: 'Burn share', value: '25.00%' },
+    ])
+    // Empty data is the plugin's default, half and half.
+    expect(describeLaunchpadCall(createToken(100, suite.deepenPlugin, '0x'), account, tokens, suite)?.lines[4]).toEqual({ label: 'Burn share', value: '50.00%' })
+    const combo = describeLaunchpadCall(
+      createToken(100, suite.comboPlugin, encodeComboData([suite.holderPlugin, suite.deepenPlugin], [6_000, 4_000], ['0x', encodeBurnShareData(7_500)])),
+      account,
+      tokens,
+      suite,
+    )
+    expect(combo?.lines.slice(3, 6)).toEqual([
+      { label: 'Fees go to', value: 'Combo' },
+      { label: 'Distribute to holders', value: '60.00%' },
+      { label: 'Deepen pool · 75.00% burn share', value: '40.00%' },
+    ])
+  })
+
   test('decodes curve buys and sells into titles, bounds and their deadline', () => {
     const buy = describeLaunchpadCall(
       encodeFunctionData({ abi: launchpadAbi, functionName: 'buy', args: [token, 100_000_000n, 1n, account, 32_503_680_000n] }),
@@ -194,6 +215,9 @@ describe('launchpad signing intent', () => {
     expect(release?.lines[1]).toEqual({ label: 'Paid to', value: 'You' })
     const run = describePluginCall(suite.buybackPlugin, encodeFunctionData({ abi: buybackPluginAbi, functionName: 'run', args: [token] }), account, tokens, suite)
     expect(run?.title).toBe('Run DOGE buyback')
+    const deepen = describePluginCall(suite.deepenPlugin, encodeFunctionData({ abi: deepenPluginAbi, functionName: 'run', args: [token] }), account, tokens, suite)
+    expect(deepen?.title).toBe('Run Deepen pool')
+    expect(deepen?.lines).toEqual([{ label: 'Token', value: 'DOGE' }])
     // Distribute to holders only forwards fees to the token: it has no action of its own to describe.
     expect(describePluginCall(suite.holderPlugin, encodeFunctionData({ abi: holderPluginAbi, functionName: 'totalDistributed', args: [token] }), account, tokens, suite)).toBe(undefined)
     // The same calldata sent to an address that is not the listed plugin is not described as that plugin's action.

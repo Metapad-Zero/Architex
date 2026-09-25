@@ -1,9 +1,10 @@
 import { decodeAbiParameters, decodeFunctionData, hexToString, isHex, maxUint256, parseAbi, zeroAddress, type Address, type Hex, type TypedDataDefinition } from 'viem'
 import { listedPluginAt } from '../content/plugins/registry'
-import { buybackPluginAbi, factoryAbi, launchRouterAbi, launchTokenAbi, launchpadAbi, routerAbi, splitPluginAbi, testTokenAbi } from './abi'
+import { buybackPluginAbi, deepenPluginAbi, factoryAbi, launchRouterAbi, launchTokenAbi, launchpadAbi, routerAbi, splitPluginAbi, testTokenAbi } from './abi'
 import { bytes32ToAddress, domainLabel, isMessenger, isTransmitter } from './cctp'
 import { deployment, launchSuite, type LaunchSuite } from './deployment'
 import { formatAmount, formatPct, shortAddress } from './format'
+import { DEEPEN_DEFAULT_BURN_BPS } from './plugins/state'
 import { rememberedToken, type Token } from './tokens'
 import type { SigningRequest } from './unlock'
 
@@ -88,9 +89,18 @@ function shareLines(addresses: readonly Address[], weights: readonly bigint[], l
   }))
 }
 
-/** What the plugin data of a createToken sets up, as receipt lines: a Split's payees, a Combo's destinations. */
+/** Deepen pool's settings: one uint16 burn share, or empty data for the plugin's default. */
+function burnShareOf(data: Hex): number | undefined {
+  return data === '0x' ? DEEPEN_DEFAULT_BURN_BPS : decodeParams([{ type: 'uint16' }], data)?.[0]
+}
+
+/** What the plugin data of a createToken sets up, as receipt lines: a Split's payees, Deepen pool's burn share, a Combo's destinations. */
 function pluginDataLines(plugin: Address, data: Hex, suite: LaunchSuite): IntentLine[] {
   const listed = listedPluginAt(plugin, suite)
+  if (listed?.kind === 'deepen') {
+    const burnBps = burnShareOf(data)
+    if (burnBps !== undefined) return [{ label: 'Burn share', value: formatPct(burnBps) }]
+  }
   if (data === '0x') return []
   if (listed?.kind === 'split') {
     const split = decodeParams([{ type: 'address[]' }, { type: 'uint256[]' }], data)
@@ -103,7 +113,9 @@ function pluginDataLines(plugin: Address, data: Hex, suite: LaunchSuite): Intent
       return targets.map((target, index) => {
         const entry = listedPluginAt(target, suite)
         const payees = entry?.kind === 'split' ? decodeParams([{ type: 'address[]' }, { type: 'uint256[]' }], datas[index] ?? '0x')?.[0].length : undefined
-        const name = entry ? `${entry.name}${payees ? ` · ${payees} ${payees === 1 ? 'payee' : 'payees'}` : ''}` : `Wallet ${shortAddress(target)}`
+        const burnBps = entry?.kind === 'deepen' ? burnShareOf(datas[index] ?? '0x') : undefined
+        const detail = payees ? ` · ${payees} ${payees === 1 ? 'payee' : 'payees'}` : burnBps !== undefined ? ` · ${formatPct(burnBps)} burn share` : ''
+        const name = entry ? `${entry.name}${detail}` : `Wallet ${shortAddress(target)}`
         return { label: name, value: formatPct(bps[index] ?? 0) }
       })
     }
@@ -235,8 +247,8 @@ export function describeLaunchRouterCall(data: Hex, from: string | undefined, to
 }
 
 /**
- * The reference plugins' public actions: release a Split payee, run a buyback. (Distribute to holders has none: it
- * forwards fees to the token, and holders claim on the token itself.)
+ * The reference plugins' public actions: release a Split payee, run a buyback, run Deepen pool. (Distribute to holders
+ * has none: it forwards fees to the token, and holders claim on the token itself.)
  */
 export function describePluginCall(to: Address, data: Hex, from: string | undefined, tokens: readonly Token[], suite: LaunchSuite = launchSuite): SigningIntent | undefined {
   const listed = listedPluginAt(to, suite)
@@ -261,6 +273,17 @@ export function describePluginCall(to: Address, data: Hex, from: string | undefi
         title: `Run ${symbol(token, tokens)} buyback`,
         lines: [{ label: 'Token', value: symbol(token, tokens) }],
         note: 'Buys the token with its waiting creator fees, within a budget of 0.25% of the USDC side per hour, and burns what it buys.',
+      }
+    }
+  }
+  if (listed?.kind === 'deepen') {
+    const call = decode(deepenPluginAbi, data)
+    if (call?.functionName === 'run') {
+      const [token] = call.args
+      return {
+        title: 'Run Deepen pool',
+        lines: [{ label: 'Token', value: symbol(token, tokens) }],
+        note: 'Spends the token’s waiting creator fees, within a budget of 0.25% of the USDC side per hour (its locked part, in the pool): the burn share buys the token and burns it, and the rest buys the token and adds it to the pool, locked for good. On the curve all of it buys and burns.',
       }
     }
   }

@@ -4,14 +4,14 @@ import type { Address, Hash, PublicClient } from 'viem'
 import { useAccount, usePublicClient, useWriteContract } from 'wagmi'
 import { activeChain } from '../chain'
 import { listedPluginAt, pluginAddress, listedPlugin } from '../content/plugins/registry'
-import { buybackPluginAbi, comboPluginAbi, launchpadAbi, launchpadWithPluginErrorsAbi, splitPluginAbi } from '../lib/abi'
+import { buybackPluginAbi, comboPluginAbi, deepenPluginAbi, launchpadAbi, launchpadWithPluginErrorsAbi, splitPluginAbi } from '../lib/abi'
 import { deployment, isLaunchpadDeployed } from '../lib/deployment'
 import { isUserRejection, revertReason } from '../lib/errors'
 import { formatAmount, shortAddress } from '../lib/format'
 import type { LaunchRecord } from '../lib/launch'
 import { launchFixtureApi } from '../lib/launchFixtureApi'
 import { claimCall, dividendReads, hasDividends, holderReads, type HolderDividends } from '../lib/plugins/holders'
-import type { BuybackState, ComboEntryState, CreatorFeeState, SplitState } from '../lib/plugins/state'
+import type { BuybackState, ComboEntryState, CreatorFeeState, DeepenState, SplitState } from '../lib/plugins/state'
 import { pushRecent } from '../lib/recent'
 import type { SwapTxStatus } from './useSwap'
 
@@ -62,6 +62,34 @@ async function readBuyback(client: PublicClient, plugin: Address, token: Address
   return { held, totalSpent, totalBurned, offer: preview[0], lastRunAt }
 }
 
+async function readDeepen(client: PublicClient, plugin: Address, token: Address): Promise<DeepenState> {
+  const [burnBps, held, preview, lastRunAt, totalSpent, totalBurned, totalUsdcAdded, totalTokensAdded, totalLiquidity] = await Promise.all([
+    client.readContract({ address: plugin, abi: deepenPluginAbi, functionName: 'burnBpsOf', args: [token] }),
+    client.readContract({ address: plugin, abi: deepenPluginAbi, functionName: 'usdcHeld', args: [token] }),
+    // Exact for the block it is read in, as Buyback & burn's is, and it says how the offer divides.
+    client.readContract({ address: plugin, abi: deepenPluginAbi, functionName: 'previewRun', args: [token] }),
+    client.readContract({ address: plugin, abi: deepenPluginAbi, functionName: 'lastRunAt', args: [token] }),
+    client.readContract({ address: plugin, abi: deepenPluginAbi, functionName: 'totalUsdcSpent', args: [token] }),
+    client.readContract({ address: plugin, abi: deepenPluginAbi, functionName: 'totalTokensBurned', args: [token] }),
+    client.readContract({ address: plugin, abi: deepenPluginAbi, functionName: 'totalUsdcAdded', args: [token] }),
+    client.readContract({ address: plugin, abi: deepenPluginAbi, functionName: 'totalTokensAdded', args: [token] }),
+    client.readContract({ address: plugin, abi: deepenPluginAbi, functionName: 'totalLiquidityLocked', args: [token] }),
+  ])
+  return {
+    burnBps,
+    held,
+    offer: preview[0],
+    toBurn: preview[1],
+    toDeepen: preview[2],
+    lastRunAt,
+    totalSpent,
+    totalBurned,
+    totalUsdcAdded,
+    totalTokensAdded,
+    totalLiquidity,
+  }
+}
+
 /** The token's own dividend stream, and the connected wallet's claimable part of it (live up to the read). */
 async function readHolders(client: PublicClient, token: Address, account: Address | undefined): Promise<HolderDividends> {
   const reads = dividendReads(token)
@@ -104,23 +132,24 @@ async function readCreatorFees(client: PublicClient, launch: LaunchRecord, accou
   const combo: ComboEntryState[] | undefined = allocation
     ? allocation[0].map((target, index) => ({ target, bps: Number(allocation[1][index] ?? 0), isPlugin: Boolean(allocation[2][index]) }))
     : undefined
-  const serves = (kind: 'split' | 'buyback' | 'holders') => {
+  const serves = (kind: 'split' | 'buyback' | 'deepen' | 'holders') => {
     const address = pluginAddress(listedPlugin(kind))
     if (listed?.kind === kind) return true
     return Boolean(combo?.some((entry) => entry.isPlugin && same(entry.target, address)))
   }
-  const [split, buyback, dividends] = await Promise.all([
+  const [split, buyback, deepen, dividends] = await Promise.all([
     serves('split') ? readSplit(client, pluginAddress(listedPlugin('split')), token) : Promise.resolve(undefined),
     serves('buyback') ? readBuyback(client, pluginAddress(listedPlugin('buyback')), token) : Promise.resolve(undefined),
+    serves('deepen') ? readDeepen(client, pluginAddress(listedPlugin('deepen')), token) : Promise.resolve(undefined),
     // Every launch token carries dividends, and anyone can distribute to one, so they are read for every token.
     readHolders(client, token, account),
   ])
   const fromFees = serves('holders')
   const holders = fromFees || hasDividends(dividends) ? { ...dividends, fromFees } : undefined
-  return { pending, split, buyback, holders, combo }
+  return { pending, split, buyback, deepen, holders, combo }
 }
 
-export type CreatorFeeAction = 'collect' | 'run' | 'claim' | `release:${string}`
+export type CreatorFeeAction = 'collect' | 'run' | 'deepen' | 'claim' | `release:${string}`
 
 /** A launch token's creator fees: the state for the token page, and the actions anyone can take on them. */
 export function useCreatorFees(launch: LaunchRecord | undefined, onChanged?: () => void | Promise<void>) {
@@ -235,6 +264,23 @@ export function useCreatorFees(launch: LaunchRecord | undefined, onChanged?: () 
     )
   }, [act, api, state?.buyback?.offer, symbol, token, writeContractAsync])
 
+  const runDeepen = useCallback(() => {
+    if (!token) return Promise.resolve()
+    return act(
+      'deepen',
+      `Ran Deepen pool for ${symbol} with ${formatAmount(state?.deepen?.offer ?? 0n, 6)} USDC`,
+      () =>
+        writeContractAsync({
+          chainId: activeChain.id,
+          address: pluginAddress(listedPlugin('deepen')),
+          abi: deepenPluginAbi,
+          functionName: 'run',
+          args: [token],
+        }),
+      () => api!.runDeepen(token),
+    )
+  }, [act, api, state?.deepen?.offer, symbol, token, writeContractAsync])
+
   // The wallet claims its own dividends on the token. What it earns keeps growing until the claim lands, so the
   // amount shown when pressed is "about".
   const claim = useCallback(
@@ -260,6 +306,7 @@ export function useCreatorFees(launch: LaunchRecord | undefined, onChanged?: () 
     collect,
     release,
     runBuyback,
+    runDeepen,
     claim,
   }
 }

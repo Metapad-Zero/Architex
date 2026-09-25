@@ -6,11 +6,21 @@ import { listedPlugin, listedPluginAt } from '../content/plugins/registry'
 import { useConnectSheet } from '../hooks/useConnectSheet'
 import { useCreatorFees, type CreatorFeeAction } from '../hooks/useCreatorFees'
 import { useSwitchToArc } from '../hooks/useSwitchToArc'
-import { GHOST, formatAmount, formatPct, shortAddress } from '../lib/format'
+import { GHOST, formatAmount, formatLp, formatPct, shortAddress } from '../lib/format'
 import type { LaunchRecord } from '../lib/launch'
 import { destinationLabel, destinationName, feeDestination } from '../lib/plugins/destination'
 import { dividendStatus, roughly } from '../lib/plugins/holders'
-import { BUYBACK_MIN_RUN_USDC, BUYBACK_RUN_INTERVAL, type BuybackState, type ComboEntryState, type HolderState, type SplitState } from '../lib/plugins/state'
+import {
+  BUYBACK_MIN_RUN_USDC,
+  BUYBACK_RUN_INTERVAL,
+  DEEPEN_MIN_RUN_USDC,
+  DEEPEN_RUN_INTERVAL,
+  type BuybackState,
+  type ComboEntryState,
+  type DeepenState,
+  type HolderState,
+  type SplitState,
+} from '../lib/plugins/state'
 import { FeeGauge } from './FeeGauge'
 import { GhostButton } from './GhostButton'
 import { ExternalLinkIcon } from './Icons'
@@ -169,6 +179,76 @@ function BuybackPanel({ buyback, symbol, graduated, alsoPaysHolders, busy, statu
         Anyone can run it. It spends at most 0.25% of the {side} USDC side per hour and burns every token it buys, so the supply only goes down.
         {alsoPaysHolders && ' It doesn’t raise anyone’s share of holder dividends: the tokens it buys come from the curve or the pool, which earn none.'}
         {listedPlugin('buyback').paused && ' This version is paused for new launches, and an updated one is coming.'}
+      </p>
+    </section>
+  )
+}
+
+function DeepenPanel({ deepen, symbol, graduated, alsoPaysHolders, busy, status, run, runDeepen }: {
+  deepen: DeepenState
+  symbol: string
+  graduated: boolean
+  /** The token also pays holders (a Combo): say that neither burning nor adding raises their share. */
+  alsoPaysHolders: boolean
+  busy: CreatorFeeAction | undefined
+  status: ActionProps['status']
+  run: Run
+  runDeepen: () => Promise<void>
+}) {
+  // previewRun is the plugin's own answer for this block, as Buyback & burn's is, and says how the offer divides.
+  const next = deepen.offer > 0n
+    ? `Up to ${usdc(deepen.offer)}`
+    : deepen.held >= DEEPEN_MIN_RUN_USDC
+      ? 'Builds up over the next hour'
+      : 'Nothing waiting yet'
+  const fullAt = deepen.lastRunAt > 0n ? deepen.lastRunAt + DEEPEN_RUN_INTERVAL : 0n
+  const now = BigInt(Math.floor(useNow() / 1_000))
+  return (
+    <section className="fee-plugin" aria-label="Deepen pool">
+      <div className="fee-plugin-head">
+        <h3>Deepen pool</h3>
+        <span>{graduated ? 'Burns and adds to the pool' : 'Buys on the curve and burns'}</span>
+      </div>
+      <dl className="receipt-lines">
+        <div><dt>Burn share</dt><dd>{formatPct(deepen.burnBps)}</dd></div>
+        <div><dt>USDC waiting</dt><dd>{usdc(deepen.held)}</dd></div>
+        <div><dt>Next run</dt><dd className={deepen.offer > 0n ? '' : 'text-g500'}>{next}</dd></div>
+        {/* On the curve a run burns all it buys, so only a pool run has a split to show. */}
+        {graduated && deepen.offer > 0n && (
+          <>
+            <div><dt>Buys and burns</dt><dd>{usdc(deepen.toBurn)}</dd></div>
+            <div><dt>Buys and adds to the pool</dt><dd>{usdc(deepen.toDeepen)}</dd></div>
+          </>
+        )}
+        <div>
+          <dt>Last run</dt>
+          <dd className={deepen.lastRunAt > 0n ? '' : 'text-g500'}>
+            {deepen.lastRunAt === 0n
+              ? 'Never'
+              : fullAt > now
+                ? `${formatWhen(deepen.lastRunAt)} · full budget again at ${formatTime(fullAt)}`
+                : formatWhen(deepen.lastRunAt)}
+          </dd>
+        </div>
+        <div><dt>Spent so far</dt><dd>{usdc(deepen.totalSpent)}</dd></div>
+        <div><dt>Burned so far</dt><dd>{formatAmount(deepen.totalBurned, 18)} {symbol}</dd></div>
+        <div>
+          <dt>Added to the pool</dt>
+          <dd className={graduated ? '' : 'text-g500'}>
+            {graduated ? `${usdc(deepen.totalUsdcAdded)} + ${formatAmount(deepen.totalTokensAdded, 18)} ${symbol}` : 'Starts once it graduates'}
+          </dd>
+        </div>
+        {graduated && <div><dt>Liquidity locked</dt><dd>{formatLp(deepen.totalLiquidity)} LP</dd></div>}
+      </dl>
+      <div className="mt-4">
+        <GhostButton disabled={deepen.offer === 0n || Boolean(busy)} onClick={() => run(runDeepen)}>
+          {busy === 'deepen' ? 'Running…' : 'Run'}
+        </GhostButton>
+      </div>
+      <ActionStatus action="deepen" status={status} />
+      <p className="fee-plugin-note">
+        Anyone can run it. It spends at most 0.25% of the {graduated ? 'pool’s locked USDC' : 'curve’s USDC side'} per hour. On the curve it buys the token and burns it; once the token graduates, each run burns its burn share and adds the rest to the pool, with the new liquidity locked at the burn address for good.
+        {alsoPaysHolders && ' It doesn’t raise anyone’s share of holder dividends: the tokens it buys come from the curve or the pool, which earn none.'}
       </p>
     </section>
   )
@@ -352,6 +432,18 @@ export function CreatorFeesPanel({ launch, onChanged }: CreatorFeesPanelProps) {
           status={fees.status}
           run={run}
           runBuyback={fees.runBuyback}
+        />
+      )}
+      {state?.deepen && (
+        <DeepenPanel
+          deepen={state.deepen}
+          symbol={launch.symbol}
+          graduated={launch.graduated}
+          alsoPaysHolders={Boolean(state.holders)}
+          busy={fees.busy}
+          status={fees.status}
+          run={run}
+          runDeepen={fees.runDeepen}
         />
       )}
       {state?.holders && (

@@ -10,13 +10,14 @@
 import { decodeAbiParameters, getAddress, keccak256, toHex, type Address, type Hash, type Hex } from 'viem'
 import { activeChain } from '../chain'
 import { listedPlugin, listedPluginAt, pluginAddress } from '../content/plugins/registry'
+import { sqrt } from './amm'
 import { CURVE, INITIAL_CURVE, quoteBuy, quotePoolBuy, quotePoolSell, quoteSell, realUsdc, type CurveState, type PoolReserves } from './curve'
 import { FIXTURE_SUITE } from './deployment'
 import type { LaunchRecord, LaunchTrade } from './launch'
 import { setLaunchFixtureApi, type FixtureCreateArgs } from './launchFixtureApi'
 // The builder's own encoders, so a fixture launch carries exactly what the builder would send.
-import { encodeComboData as encodeCombo, encodeSplitData as encodeSplit } from './plugins/plan'
-import type { CreatorFeeState } from './plugins/state'
+import { encodeBurnShareData as encodeBurnShare, encodeComboData as encodeCombo, encodeSplitData as encodeSplit } from './plugins/plan'
+import { DEEPEN_DEFAULT_BURN_BPS, type CreatorFeeState } from './plugins/state'
 import { rememberToken } from './tokens'
 
 export const LAUNCHPAD_FIXTURE_XSS_PAYLOAD = '<img src=x onerror=alert(1)>'
@@ -26,7 +27,7 @@ const E18 = 10n ** 18n
 /** LaunchToken's dividend magnitude. */
 const MAGNITUDE = 2n ** 128n
 const DRIP_PERIOD = 86_400
-/** Buyback & burn pacing: the budget refills over an hour; offers under 3 units are no run. */
+/** Buyback & burn pacing, which Deepen pool shares: the budget refills over an hour; offers under 3 units are no run. */
 const RUN_INTERVAL = 3_600
 const MIN_RUN_USDC = 3n
 const FIXTURE_LAUNCH_FEE = 1n * USDC
@@ -67,6 +68,14 @@ interface BuybackBook {
   lastRunAt: number
 }
 
+/** Buyback & burn's book, plus the burn share and what the pool runs have added and locked. */
+interface DeepenBook extends BuybackBook {
+  burnBps: number
+  usdcAdded: bigint
+  tokensAdded: bigint
+  liquidity: bigint
+}
+
 /**
  * A launch token's dividend stream, kept the way LaunchToken keeps it: `rate` pays the eligible supply continuously
  * from `lastAccrual` to `end`, magnified by 2^128, and pauses (its end moving out) under one whole eligible token.
@@ -96,6 +105,7 @@ interface Store {
   pending: Map<string, bigint>
   splits: Map<string, SplitBook>
   buybacks: Map<string, BuybackBook>
+  deepens: Map<string, DeepenBook>
   holders: Map<string, HolderBook>
   combos: Map<string, { target: Address; bps: number; isPlugin: boolean }[]>
   version: number
@@ -111,6 +121,7 @@ const store: Store = {
   pending: new Map(),
   splits: new Map(),
   buybacks: new Map(),
+  deepens: new Map(),
   holders: new Map(),
   combos: new Map(),
   version: 1,
@@ -249,6 +260,22 @@ function configure(token: Address, plugin: Address, data: Hex): void {
     case 'buyback':
       store.buybacks.set(token.toLowerCase(), { held: 0n, spent: 0n, burned: 0n, lastRunBlock: 0, lastRunAt: 0 })
       return
+    case 'deepen': {
+      // Empty data is the plugin's default; anything else is one uint16.
+      const burnBps = data === '0x' ? DEEPEN_DEFAULT_BURN_BPS : decodeAbiParameters([{ type: 'uint16' }], data)[0]
+      store.deepens.set(token.toLowerCase(), {
+        held: 0n,
+        spent: 0n,
+        burned: 0n,
+        lastRunBlock: 0,
+        lastRunAt: 0,
+        burnBps,
+        usdcAdded: 0n,
+        tokensAdded: 0n,
+        liquidity: 0n,
+      })
+      return
+    }
     case 'holders':
       store.holders.set(token.toLowerCase(), {
         rate: 0n,
@@ -288,6 +315,11 @@ function deliver(token: Address, target: Address, amount: bigint): void {
     }
     case 'buyback': {
       const book = store.buybacks.get(id)
+      if (book) book.held += amount
+      return
+    }
+    case 'deepen': {
+      const book = store.deepens.get(id)
       if (book) book.held += amount
       return
     }
@@ -447,11 +479,12 @@ function createInternal(owner: Address, args: FixtureCreateArgs, time: number, s
 }
 
 /**
- * What a buyback run may offer at `time`, as BuybackBurnPlugin paces it: min(held, budget), the budget being the cap
- * (0.25% of the USDC-side reserve) prorated by the time since the last run, full for a first run or after an hour;
- * 0 when it already ran this block or the offer is under the 3-unit minimum.
+ * What a Buyback & burn or Deepen pool run may offer at `time`, as both plugins pace it: min(held, budget), the budget
+ * being the cap (0.25% of the USDC-side reserve) prorated by the time since the last run, full for a first run or after
+ * an hour; 0 when it already ran this block or the offer is under the 3-unit minimum. Deepen pool takes its pool cap
+ * from the locked part of the reserve; every LP in a fixture pool is locked, so that is the whole reserve here.
  */
-function buybackOffer(book: BuybackBook, launch: FixtureLaunch, time: number): bigint {
+function pacedOffer(book: BuybackBook, launch: FixtureLaunch, time: number): bigint {
   if (blockNumber() < book.lastRunBlock + 1) return 0n
   const cap = ((launch.graduated ? (launch.pool as PoolReserves).reserveUsdc : launch.state.virtualUsdc) * 25n) / 10_000n
   const elapsed = book.lastRunAt === 0 ? RUN_INTERVAL : Math.min(Math.max(0, time - book.lastRunAt), RUN_INTERVAL)
@@ -460,12 +493,115 @@ function buybackOffer(book: BuybackBook, launch: FixtureLaunch, time: number): b
   return offer < MIN_RUN_USDC ? 0n : offer
 }
 
+/**
+ * DeepenPoolPlugin._sides: a pool run's burn share of the offer (rounded down) and the rest. A side under the minimum
+ * could buy nothing, so the whole offer goes through the other one, the burn side giving way first.
+ */
+function deepenSides(offer: bigint, burnBps: number): { toBurn: bigint; toDeepen: bigint } {
+  const toBurn = (offer * BigInt(burnBps)) / 10_000n
+  if (toBurn < MIN_RUN_USDC) return { toBurn: 0n, toDeepen: offer }
+  if (offer - toBurn < MIN_RUN_USDC) return { toBurn: offer, toDeepen: 0n }
+  return { toBurn, toDeepen: offer - toBurn }
+}
+
+/** What a Deepen pool run would offer now, and how it would divide it (DeepenPoolPlugin.previewRun). */
+function deepenPreview(book: DeepenBook, launch: FixtureLaunch, time: number): { offer: bigint; toBurn: bigint; toDeepen: bigint } {
+  const offer = pacedOffer(book, launch, time)
+  if (offer === 0n) return { offer, toBurn: 0n, toDeepen: 0n }
+  // On the curve there is no pool to add to: the whole offer buys and burns, whatever the burn share.
+  if (!launch.graduated) return { offer, toBurn: offer, toDeepen: 0n }
+  return { offer, ...deepenSides(offer, book.burnBps) }
+}
+
+/**
+ * DeepenPoolPlugin._usdcToBuy: the part of the deepen side that buys the token, sized so the add takes every token it
+ * buys at the price the buy leaves (b + n + n²/R = U, with n = b·q/10⁴ what the buy puts in the pool).
+ */
+function deepenBuy(usdcToDeepen: bigint, reserveUsdc: bigint, feeBps: bigint): bigint {
+  const q = 10_000n - feeBps
+  const s = 10_000n + q
+  const root = sqrt(s * s * reserveUsdc * reserveUsdc + 4n * q * q * usdcToDeepen * reserveUsdc)
+  const toBuy = (2n * 10_000n * usdcToDeepen * reserveUsdc) / (s * reserveUsdc + root)
+  return toBuy < MIN_RUN_USDC ? MIN_RUN_USDC : toBuy > usdcToDeepen ? usdcToDeepen : toBuy
+}
+
+/**
+ * DeepenPoolPlugin._addAmounts: all the tokens bought with the USDC they pair with at the pool's price, or all the USDC
+ * left with the tokens it matches, and the LP that mints. A fixture pool's LP supply is √(k): it holds no one else's
+ * liquidity, and with no pool fee, trades leave k where it was and adds at the pool's price grow √k with the supply.
+ */
+function deepenAdd(tokens: bigint, usdcLeft: bigint, pool: PoolReserves): { tokens: bigint; usdc: bigint; liquidity: bigint } {
+  if (tokens === 0n || usdcLeft === 0n) return { tokens: 0n, usdc: 0n, liquidity: 0n }
+  let usdc = (tokens * pool.reserveUsdc) / pool.reserveToken
+  let added = tokens
+  if (usdc > usdcLeft) {
+    usdc = usdcLeft
+    added = (usdcLeft * pool.reserveToken) / pool.reserveUsdc
+  }
+  const supply = sqrt(pool.reserveToken * pool.reserveUsdc)
+  const byToken = (added * supply) / pool.reserveToken
+  const byUsdc = (usdc * supply) / pool.reserveUsdc
+  const liquidity = byToken < byUsdc ? byToken : byUsdc
+  return liquidity === 0n ? { tokens: 0n, usdc: 0n, liquidity: 0n } : { tokens: added, usdc, liquidity }
+}
+
+/**
+ * A Deepen pool run, as DeepenPoolPlugin.run makes it: on the curve, Buyback & burn's run; in the pool, the burn side
+ * buys and burns, then the deepen side buys and adds what it bought to the pool with USDC. Whatever the add does not
+ * take is burned; USDC that does not fit stays held.
+ */
+function runDeepenInternal(token: Address, time: number): Hash {
+  const book = store.deepens.get(token.toLowerCase())
+  if (!book) throw new Error('NotConfigured')
+  if (blockNumber() < book.lastRunBlock + 1) throw new Error('AlreadyRanThisBlock')
+  const launch = find(token)
+  const offer = pacedOffer(book, launch, time)
+  if (offer === 0n) throw new Error('NothingToBuy')
+  book.lastRunAt = time
+  const plugin = pluginAddress(listedPlugin('deepen'))
+  store.balances.set(key(plugin, usdcAddress()), offer)
+  let spent = 0n
+  let burned = 0n
+  if (!launch.graduated) {
+    // A sell-out buy takes only what the last tokens cost; the rest stays held for the next run, in the pool.
+    const bought = buyInternal(plugin, token, offer, time)
+    spent = bought.usdcSpent
+    burned = bought.tokensOut
+  } else {
+    const { toBurn, toDeepen } = deepenSides(offer, book.burnBps)
+    if (toBurn > 0n) {
+      const bought = buyInternal(plugin, token, toBurn, time)
+      spent += bought.usdcSpent
+      burned += bought.tokensOut
+    }
+    if (toDeepen > 0n) {
+      const toBuy = deepenBuy(toDeepen, (launch.pool as PoolReserves).reserveUsdc, CURVE.FEE_BPS + BigInt(launch.creatorFeeBps))
+      const bought = buyInternal(plugin, token, toBuy, time)
+      const pool = launch.pool as PoolReserves
+      const add = deepenAdd(bought.tokensOut, toDeepen - bought.usdcSpent, pool)
+      launch.pool = { reserveToken: pool.reserveToken + add.tokens, reserveUsdc: pool.reserveUsdc + add.usdc }
+      spent += bought.usdcSpent + add.usdc
+      burned += bought.tokensOut - add.tokens
+      book.usdcAdded += add.usdc
+      book.tokensAdded += add.tokens
+      book.liquidity += add.liquidity
+    }
+  }
+  store.balances.delete(key(plugin, usdcAddress()))
+  store.balances.delete(key(plugin, token))
+  book.held -= spent
+  book.spent += spent
+  book.burned += burned
+  book.lastRunBlock = blockNumber()
+  return nextHash('deepen')
+}
+
 function runBuybackInternal(token: Address, time: number): Hash {
   const book = store.buybacks.get(token.toLowerCase())
   if (!book) throw new Error('NotConfigured')
   if (blockNumber() < book.lastRunBlock + 1) throw new Error('AlreadyRanThisBlock')
   const launch = find(token)
-  const offer = buybackOffer(book, launch, time)
+  const offer = pacedOffer(book, launch, time)
   if (offer === 0n) throw new Error('NothingToBuy')
   book.lastRunAt = time
   const plugin = pluginAddress(listedPlugin('buyback'))
@@ -482,7 +618,7 @@ function runBuybackInternal(token: Address, time: number): Hash {
 
 // ─── The initial market ──────────────────────────────────────────────────────
 
-function launchWith(kind: 'wallet' | 'custom' | 'split' | 'buyback' | 'holders' | 'combo', args: Omit<FixtureCreateArgs, 'plugin' | 'pluginData' | 'maxLaunchFee' | 'initialBuyUsdc'>, time: number, data: Hex = '0x'): Address {
+function launchWith(kind: 'wallet' | 'custom' | 'split' | 'buyback' | 'deepen' | 'holders' | 'combo', args: Omit<FixtureCreateArgs, 'plugin' | 'pluginData' | 'maxLaunchFee' | 'initialBuyUsdc'>, time: number, data: Hex = '0x'): Address {
   const plugin = kind === 'wallet' ? CREATOR : kind === 'custom' ? CUSTOM_DESTINATION : pluginAddress(listedPlugin(kind))
   return createInternal(CREATOR, { ...args, plugin, pluginData: data, initialBuyUsdc: 0n, maxLaunchFee: FIXTURE_LAUNCH_FEE }, time)
 }
@@ -543,6 +679,29 @@ function seedMarket(): void {
   if (dogeBook) dogeBook.lastRunBlock = 0
   sellInternal(alice, doge, fixtureBalance(alice, doge) / 4n, NOW - 600)
 
+  // Deepen pool after graduation: one run made 40 minutes ago, so the next one is part refilled and splits.
+  const deep = launchWith('deepen', { name: 'Deep Pool', symbol: 'DEEP', metadataURI: '', creatorFeeBps: 100 }, NOW - 30_000, encodeBurnShare(5_000))
+  buyInternal(WHALE, deep, 1_000_000n * USDC, NOW - 26_000)
+  buyInternal(alice, deep, 3_000n * USDC, NOW - 20_000)
+  sellInternal(alice, deep, fixtureBalance(alice, deep) / 2n, NOW - 12_000)
+  collect(deep)
+  const deepBook = store.deepens.get(deep.toLowerCase())
+  if (deepBook) deepBook.lastRunBlock = 0
+  runDeepenInternal(deep, NOW - 2_400)
+  if (deepBook) deepBook.lastRunBlock = 0
+  buyInternal(bob, deep, 1_500n * USDC, NOW - 900)
+
+  // Deepen pool as a Combo entry on a token still on its curve: every run buys and burns, whatever the burn share.
+  const slow = launchWith(
+    'combo',
+    { name: 'Slow burn', symbol: 'SLOW', metadataURI: '', creatorFeeBps: 300 },
+    NOW - 9_000,
+    encodeCombo([pluginAddress(listedPlugin('holders')), pluginAddress(listedPlugin('deepen'))], [6_000, 4_000], ['0x', encodeBurnShare(7_500)]),
+  )
+  buyInternal(alice, slow, 2_000n * USDC, NOW - 8_000)
+  buyInternal(bob, slow, 700n * USDC, NOW - 4_000)
+  collect(slow)
+
   launchWith('wallet', { name: 'Pepe', symbol: 'PEPE', metadataURI: '', creatorFeeBps: 0 }, NOW - 120)
 
   const mint = launchWith(
@@ -575,6 +734,7 @@ function creatorFees(token: Address, owner: Address | undefined): CreatorFeeStat
   const id = token.toLowerCase()
   const split = store.splits.get(id)
   const buyback = store.buybacks.get(id)
+  const deepen = store.deepens.get(id)
   const holders = store.holders.get(id)
   const combo = store.combos.get(id)
   const totalShares = split ? split.shares.reduce((sum, share) => sum + share, 0n) : 0n
@@ -594,8 +754,19 @@ function creatorFees(token: Address, owner: Address | undefined): CreatorFeeStat
       held: buyback.held,
       totalSpent: buyback.spent,
       totalBurned: buyback.burned,
-      offer: buybackOffer(buyback, launch, nowSeconds()),
+      offer: pacedOffer(buyback, launch, nowSeconds()),
       lastRunAt: BigInt(buyback.lastRunAt),
+    },
+    deepen: deepen && {
+      burnBps: deepen.burnBps,
+      held: deepen.held,
+      ...deepenPreview(deepen, launch, nowSeconds()),
+      lastRunAt: BigInt(deepen.lastRunAt),
+      totalSpent: deepen.spent,
+      totalBurned: deepen.burned,
+      totalUsdcAdded: deepen.usdcAdded,
+      totalTokensAdded: deepen.tokensAdded,
+      totalLiquidity: deepen.liquidity,
     },
     holders: holders && {
       undistributed: undistributed(token, holders, nowSeconds()),
@@ -674,6 +845,11 @@ function install(): void {
     },
     runBuyback: (token) => {
       const hash = runBuybackInternal(token, nowSeconds())
+      emit()
+      return hash
+    },
+    runDeepen: (token) => {
+      const hash = runDeepenInternal(token, nowSeconds())
       emit()
       return hash
     },

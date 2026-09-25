@@ -32,6 +32,7 @@ export interface LaunchFixtureApi {
   collect: (token: Address) => Hash
   release: (token: Address, payee: Address) => Hash
   runBuyback: (token: Address) => Hash
+  runDeepen: (token: Address) => Hash
   /** The owner claims its dividends on the token. */
   claim: (token: Address, owner: Address) => Hash
 }
