@@ -2,7 +2,9 @@ import type { ReactNode } from 'react'
 import { zeroAddress } from 'viem'
 import mainnet from '../../deployments/arc-mainnet.json'
 import testnet from '../../deployments/arc-testnet.json'
-import { LAUNCH_TOPICS, MAINNET_USDC_EURC_PAIR, PAIR_INIT_CODE_HASH, UNISWAP_V2_TOPICS } from '../../lib/integration'
+import { UNISWAP_V4_ARC } from '../../lib/deployment'
+import { LAUNCH_TOPICS, LAUNCH_V14_TOPICS, MAINNET_USDC_EURC_PAIR, PAIR_INIT_CODE_HASH, UNISWAP_V2_TOPICS } from '../../lib/integration'
+import { V14Note } from './V14Note'
 
 const SITE = 'https://architex.fun'
 
@@ -63,6 +65,7 @@ interface Deployment {
   holderPlugin: string
   comboPlugin: string
   deepenPlugin: string
+  v14: { launchpad: string; hook: string; router: string; splitPlugin: string; holderPlugin: string; comboPlugin: string }
   tokens: ReadonlyArray<{ symbol: string; address: string; decimals: number }>
 }
 
@@ -81,6 +84,12 @@ function contractRows(deployment: Deployment, extra: ReadonlyArray<readonly [str
     ['Plugin: Deepen pool', address(deployment.deepenPlugin)],
     ['Plugin: Holders', address(deployment.holderPlugin)],
     ['Plugin: Combo', address(deployment.comboPlugin)],
+    ['Launchpad (v1.4)', address(deployment.v14.launchpad)],
+    ['Launch hook (v1.4)', address(deployment.v14.hook)],
+    ['v4 router (v1.4)', address(deployment.v14.router)],
+    ['Plugin: Split (v1.4)', address(deployment.v14.splitPlugin)],
+    ['Plugin: Holders (v1.4)', address(deployment.v14.holderPlugin)],
+    ['Plugin: Combo (v1.4)', address(deployment.v14.comboPlugin)],
     ...extra.map(([name, value]) => [name, address(value)] as const),
     ...deployment.tokens.map((token) => [`${token.symbol} (${token.decimals} decimals)`, address(token.address)] as const),
   ]
@@ -216,6 +225,47 @@ launchRouter.quoteSell(token, tokensIn)
 launchRouter.buy(token, usdcIn, minTokensOut, to, deadline)
 launchRouter.sell(token, tokensIn, minUsdcOut, to, deadline)`
 
+const V14_EVENTS = `// launchpad v1.4
+TokenCreated(address indexed token, address indexed creator,
+             address indexed plugin, bool openPool, uint16 creatorFeeBps,
+             string name, string symbol, string metadataURI)
+  ${LAUNCH_V14_TOPICS.TokenCreated}
+Trade(address indexed token, address indexed trader, bool isBuy,
+      uint256 usdcAmount, uint256 tokenAmount, uint256 platformFee,
+      uint256 creatorFee, uint256 snipeFee, uint256 virtualUsdc,
+      uint256 virtualTokens)
+  ${LAUNCH_V14_TOPICS.Trade}
+Graduated(address indexed token, bytes32 indexed poolId, uint256 usdcSeeded,
+          uint256 tokensSeeded, uint256 liquidityLocked, uint256 snipeLocked)
+  ${LAUNCH_V14_TOPICS.Graduated}
+
+// launch hook: every v1.4 pool
+PoolOpened(address indexed token, bytes32 indexed poolId, uint160 sqrtPriceX96,
+           uint256 tokensAdded, uint256 usdcAdded, uint128 liquidity, bool open)
+  ${LAUNCH_V14_TOPICS.PoolOpened}
+PoolTrade(address indexed token, address indexed sender, bool isBuy,
+          uint256 usdcAmount, uint256 tokenAmount, uint256 platformFee,
+          uint256 creatorFee, uint256 snipeFee)
+  ${LAUNCH_V14_TOPICS.PoolTrade}
+BidLocked(address indexed token, uint256 usdc, uint128 liquidity,
+          int24 tickLower, int24 tickUpper)
+  ${LAUNCH_V14_TOPICS.BidLocked}`
+
+const V14_POOLS = `// a token's pool, known from launch (hook.poolKeyOf(token))
+PoolKey(currency0 = min(USDC, token), currency1 = max(USDC, token),
+        fee = 0, tickSpacing = 200, hooks = the launch hook)
+poolId = keccak256(abi.encode(PoolKey))
+
+// its price: sqrtPriceX96 is sqrt(currency1 / currency0) in Q64.96
+StateView.getSlot0(poolId)
+hook.launchOf(token)       returns (poolId, usdcIs0, open, openBlock, ...)
+
+// quotes, fees included: not views, call them with eth_call
+v4Router.quoteBuy(token, usdcIn)      returns tokensOut
+v4Router.quoteSell(token, tokensIn)   returns usdcOut
+v4Router.buy(token, usdcIn, minTokensOut, to, deadline)
+v4Router.sell(token, tokensIn, minUsdcOut, to, deadline)`
+
 const ENDPOINTS: ReadonlyArray<readonly [string, string, string]> = [
   ['GET /api/v1/pairs', 'Every market: ticker_id, base, target, pool_id', '5 min'],
   ['GET /api/v1/tickers', '24 hours of price, volume and liquidity per market', '2 min'],
@@ -246,7 +296,13 @@ export function DocsIntegrate() {
       />
 
       <H3>Contracts on Arc mainnet</H3>
-      <Rows rows={contractRows(mainnet, [['Pool: USDC/EURC', MAINNET_USDC_EURC_PAIR]])} />
+      <Rows
+        rows={contractRows(mainnet, [
+          ['Pool: USDC/EURC', MAINNET_USDC_EURC_PAIR],
+          ['Uniswap v4 PoolManager', UNISWAP_V4_ARC.poolManager],
+          ['Uniswap v4 StateView', UNISWAP_V4_ARC.stateView],
+        ])}
+      />
       <p className="text-sm text-g700">
         The contracts are open source under the MIT license and have not been audited by a third party.
       </p>
@@ -318,6 +374,32 @@ export function DocsIntegrate() {
       <p>
         Anyone can pair a launch token in a core pool, but trades there skip the creator fee. The site and the endpoints
         below leave such pools out.
+      </p>
+
+      <H3>Launchpad v1.4 and Uniswap v4 pools</H3>
+      <V14Note
+        live="Tokens launched since v1.4 went live graduate this way; v1.3 tokens keep their launch pools."
+        pending="Launchpad v1.4 is not live yet. Its addresses above read Not deployed yet until it is; until then, everything above is what runs."
+      />
+      <p>
+        v1.4 keeps v1.3&rsquo;s curves and fees, and graduates each token into its own Uniswap v4 pool behind the
+        Architex launch hook instead of a launch pair. The hook takes the 0.5% platform fee and the creator fee in USDC
+        on every swap in the pool, whichever router makes it, and the pool charges no LP fee. For 20 blocks after a
+        launch and after a pool opens, buys also pay a snipe fee (90% falling to 0), which the launchpad and the hook
+        lock into the pool as USDC-only liquidity. Index the launchpad and the hook: their events cover every curve and
+        pool trade, fees included.
+      </p>
+      <Pre label="Events, with topic0">{V14_EVENTS}</Pre>
+      <p>
+        In <C>PoolTrade</C>, <C>sender</C> is whoever called the PoolManager (a router), not necessarily the trader,
+        and <C>usdcAmount</C> is gross as in <C>Trade</C>: all a buyer paid, or all the pool paid out on a sell. The
+        PoolManager&rsquo;s own <C>Swap</C> event, keyed by the pool id, carries the price after each swap.
+      </p>
+      <Pre label="Pools, prices and quotes">{V14_POOLS}</Pre>
+      <p>
+        Arc&rsquo;s USDC sorts below most token addresses, so it is currency0 in most v1.4 pools and currency1 in
+        the rest: read which from the key. Uniswap&rsquo;s app and routing only reach a pool with a hook like this one once
+        Uniswap has approved the hook, which has not happened. The public endpoints below do not list v1.4 markets yet.
       </p>
 
       <H3>Token details</H3>

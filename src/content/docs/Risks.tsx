@@ -1,3 +1,5 @@
+import { V14Note, V14_NOTE } from './V14Note'
+
 export function DocsRisks() {
   return (
     <div className="space-y-4">
@@ -92,6 +94,37 @@ export function DocsRisks() {
         <li>
           Holder dividends are shared by the second. If everyone else sells, whoever still holds
           collects the whole stream while they're alone, and anyone who buys shares it from then on.
+        </li>
+      </ul>
+
+      <h3 className="mt-6 text-base font-semibold text-ink">What launchpad v1.4 adds</h3>
+      <V14Note {...V14_NOTE} />
+      <ul className="list-disc space-y-2 pl-5">
+        <li>
+          A graduated v1.4 token trades in a Uniswap v4 pool behind the Architex hook. The hook and
+          the v4 router are Architex contracts, tested and reviewed internally but not audited, like
+          the rest; the pool itself lives in Uniswap's own contract.
+        </li>
+        <li>
+          Uniswap's app doesn't route trades to these pools until Uniswap approves the hook, which
+          hasn't happened. A token you can't find there may still trade here, and there may be other,
+          unrelated pools for it that skip its creator fee.
+        </li>
+        <li>
+          In an open pool, liquidity other people add can be taken back out at any time. Only the
+          launch liquidity, and what the hook locks into the pool, is locked for good.
+        </li>
+        <li>
+          A buy in a token's first 20 blocks, on the curve or in its new pool, pays an anti-sniping
+          fee of up to 90%. The trade sheet shows it; a buy sent another way doesn't get that warning.
+        </li>
+        <li>
+          What a curve's anti-sniping fee collects stays in the launchpad for good if the curve never
+          sells out. In the pool it becomes a standing bid, from half the price down, that buys the
+          token from anyone who sells that low.
+        </li>
+        <li>
+          Tokens in Uniswap's pool contract, anyone's, earn no holder dividends.
         </li>
       </ul>
 

@@ -2,8 +2,8 @@ import { describe, expect, test } from 'bun:test'
 import { encodePacked, getContractAddress, keccak256, toEventSelector, type AbiEvent, type Address } from 'viem'
 import mainnet from '../../deployments/arc-mainnet.json'
 import testnet from '../../deployments/arc-testnet.json'
-import { factoryAbi, launchPairAbi, launchPairFactoryAbi, launchRouterAbi, launchpadAbi, pairAbi } from '../abi'
-import { LAUNCH_TOPICS, MAINNET_USDC_EURC_PAIR, PAIR_INIT_CODE_HASH, UNISWAP_V2_TOPICS } from '../integration'
+import { factoryAbi, launchHookAbi, launchPairAbi, launchPairFactoryAbi, launchRouterAbi, launchpadAbi, launchpadV14Abi, pairAbi } from '../abi'
+import { LAUNCH_TOPICS, LAUNCH_V14_TOPICS, MAINNET_USDC_EURC_PAIR, PAIR_INIT_CODE_HASH, UNISWAP_V2_TOPICS } from '../integration'
 
 /** What a Uniswap V2 SDK computes: CREATE2 over the sorted pair and the init code hash. */
 function pairFor(factory: string, tokenA: string, tokenB: string, initCodeHash: `0x${string}`): Address {
@@ -46,5 +46,12 @@ describe('events', () => {
     expect(topic(launchpadAbi, 'Trade')).toBe(LAUNCH_TOPICS.Trade)
     expect(topic(launchpadAbi, 'Graduated')).toBe(LAUNCH_TOPICS.Graduated)
     expect(topic(launchRouterAbi, 'PoolTrade')).toBe(LAUNCH_TOPICS.PoolTrade)
+  })
+
+  test('v1.4’s topics match its ABIs, and none is v1.3’s', () => {
+    for (const name of ['TokenCreated', 'Trade', 'Graduated'] as const) expect(topic(launchpadV14Abi, name)).toBe(LAUNCH_V14_TOPICS[name])
+    for (const name of ['PoolOpened', 'PoolTrade', 'BidLocked'] as const) expect(topic(launchHookAbi, name)).toBe(LAUNCH_V14_TOPICS[name])
+    const v13 = new Set<string>(Object.values(LAUNCH_TOPICS))
+    expect(Object.values(LAUNCH_V14_TOPICS).filter((value) => v13.has(value))).toEqual([])
   })
 })

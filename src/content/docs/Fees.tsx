@@ -1,3 +1,5 @@
+import { V14Note, V14_NOTE } from './V14Note'
+
 export function DocsFees() {
   return (
     <div className="space-y-4">
@@ -5,8 +7,9 @@ export function DocsFees() {
         Every launch token carries a creator fee: a percentage, from 0% to 10%, taken from every
         buy and every sell of that token. The creator picks it when they launch, and it's locked
         for good from then on: nobody can raise it, lower it, or switch it off, the creator
-        included. The fee applies on the curve and keeps applying in the token's launch pool
-        after it graduates. The creator's own first buy pays it too.
+        included. The fee applies on the curve and keeps applying in the token's pool after it
+        graduates (its launch pool on v1.3; on v1.4 its Uniswap v4 pool, whose hook takes it).
+        The creator's own first buy pays it too.
       </p>
       <p>
         It comes on top of the platform's 0.5% fee, and both are taken in USDC: out of the USDC
@@ -22,8 +25,8 @@ export function DocsFees() {
         too. It can be a wallet (their own, or any other), one of the plugins listed in the token
         builder, or any other address that can pass fees on. The launchpad refuses the few that
         can't: USDC itself, the launchpad and its launch router and pair factory, launch tokens,
-        and launch pools, where anyone could take fees sent in; the builder catches these before
-        you sign. Settings only go to a plugin: an address that isn't one takes none, which also
+        and launch pools, where anyone could take fees sent in (on v1.4 also the hook, the v4
+        router and Uniswap's PoolManager); the builder catches these before you sign. Settings only go to a plugin: an address that isn't one takes none, which also
         catches a mistyped plugin address. The site always says plainly where a token's fees go: the
         listed plugin's name, "Creator wallet" when it's the creator's own address, or "Custom
         address" with the address itself. Architex hasn't reviewed a custom address and makes no
@@ -118,6 +121,21 @@ export function DocsFees() {
         refuses to pay), the collection is undone and the fees stay in the launchpad. Trading
         carries on exactly as before, and nobody, Architex included, can send those fees anywhere
         else. That's the cost of a destination nobody can change: a broken one keeps its fees.
+      </p>
+
+      <h3 className="mt-10 text-base font-semibold text-ink">On launchpad v1.4</h3>
+      <V14Note {...V14_NOTE} />
+      <p>
+        Creator fees work the same way on v1.4: the same range, locked at launch, waiting in the
+        v1.4 launchpad until anyone collects them, including every fee the pool's hook takes after
+        graduation. A plugin works with one launchpad, so v1.4 has its own Split, Distribute to
+        holders and Combo, and those are the ones its builder lists. Buyback &amp; burn and Deepen
+        pool are v1.3's alone for now.
+      </p>
+      <p>
+        v1.4's anti-sniping fee is not a creator fee and goes to no one: it becomes liquidity in
+        the token's own pool that nobody can withdraw. See{' '}
+        <span className="font-semibold">Graduation</span>.
       </p>
     </div>
   )
