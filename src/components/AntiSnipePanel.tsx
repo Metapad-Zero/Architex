@@ -54,7 +54,7 @@ export function AntiSnipePanel({ launch, block, held }: AntiSnipePanelProps) {
       </dl>
       <p className="fee-plugin-note">
         {launch.graduated
-          ? 'For 20 blocks after its pool opened (about 10 seconds), every buy pays an extra fee that starts at 90% and falls to 0; sells never do. The same transaction turns that fee into a bid: liquidity that only buys the token, from half the price just before that buy down, below the market, which nobody can ever withdraw. Nothing waits and nobody has to press anything.'
+          ? 'For 20 blocks after its pool opened (about 10 seconds), every buy pays an extra fee that starts at 90% and falls to 0; sells never do. The same transaction turns that fee into a bid below the market: liquidity that only buys the token, which nobody can ever withdraw. It starts at half the lower of two prices, the one just before that buy and the one the pool opened at. Nothing waits and nobody has to press anything.'
           : 'For 20 blocks after launch (about 10 seconds), every buy pays an extra fee that starts at 90% and falls to 0; sells never do. The launchpad holds what the curve’s window collects, and when the token graduates it becomes the pool’s first bid: liquidity that only buys the token, from half the price the pool opens at down, which nobody can ever withdraw. If the curve never sells out, it stays in the launchpad. After graduation, each buy in the pool’s first 20 blocks turns its own fee into a bid in the same transaction.'}
       </p>
     </section>

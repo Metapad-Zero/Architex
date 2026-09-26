@@ -422,11 +422,15 @@ export function DocsIntegrate() {
         the rest: read which from the key. The pools refuse donations. Snipe fees become bids with no separate step:
         each a position of its own, a USDC-only range whose top is 6,932 ticks (about half the price) past a reference
         tick and which runs 92,200 ticks further. A buy in a pool&rsquo;s window places its fee inside the same swap,
-        from the tick just before that buy, and emits <C>BidLocked</C> before its <C>PoolTrade</C>; graduation places
-        the curve&rsquo;s fees from the graduation tick. <C>hook.bidCount(token)</C> counts the bids, and{' '}
-        <C>lockHeld(token)</C> is only the unit or two of rounding a bid could not take. Such a buy costs about 80,000
-        more gas. Uniswap&rsquo;s app and routing only reach a pool with a hook like this one once Uniswap has approved
-        the hook, which has not happened. The public endpoints below do not list v1.4 markets yet.
+        from the cheaper of the tick just before that buy and the graduation tick (the higher tick when USDC is
+        currency0, the lower when it is currency1), and emits <C>BidLocked</C> before its <C>PoolTrade</C>; graduation
+        places the curve&rsquo;s fees from the graduation tick. So no bid starts above half the graduation price, a buy
+        made above the graduation price places its bid on the graduation bid&rsquo;s ticks, and after a crash the next
+        bid follows the price down. <C>hook.bidCount(token)</C> counts the bids, and <C>lockHeld(token)</C> is only the
+        unit or two of rounding a bid could not take. Such a buy costs about 56,000 to 93,000 more gas when its
+        bid&rsquo;s ticks are already in use, and 117,000 to 176,000 when it opens new ones. Uniswap&rsquo;s app and
+        routing only reach a pool with a hook like this one once Uniswap has approved the hook, which has not happened.
+        The public endpoints below do not list v1.4 markets yet.
       </p>
 
       <H3>Token details</H3>

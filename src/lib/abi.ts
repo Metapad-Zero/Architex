@@ -480,8 +480,9 @@ export const launchpadV14Abi = parseAbi([
  * IArchitexLaunchHook: one hook for every v1.4 pool. It opens each pool at graduation, takes the platform, creator and
  * snipe fees of every swap in USDC (PoolTrade) and keeps the platform and creator fees as its ERC-6909 claims in the
  * PoolManager until the launchpad releases them (FeesReleased). A snipe fee never waits: the buy that pays it places
- * it as a bid in the same transaction (BidLocked), a position of its own from about half the price just before that buy
- * down BID_SPAN_TICKS; the curve's snipe fees become the first bid at graduation, from half the graduation price.
+ * it as a bid in the same transaction (BidLocked), a position of its own from about half the cheaper of the price just
+ * before that buy and the graduation price, down BID_SPAN_TICKS (lib/launchV14.ts windowBidRange); the curve's snipe
+ * fees become the first bid at graduation, from half the graduation price.
  * `bidCount` counts the bids, and `lockHeld` is only the rounding a bid could not take (a unit or two). Nobody can
  * donate to a pool. PoolTrade's `sender` is whoever called the PoolManager (a router), not necessarily the trader.
  * `graduate` and `release` are the launchpad's alone: the site never calls them.

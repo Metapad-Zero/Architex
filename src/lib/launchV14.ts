@@ -20,7 +20,7 @@ export const V14 = {
   /** Every v1.4 pool charges no LP fee (the hook's fees are the whole trading cost) and spaces its ticks by 200. */
   LP_FEE: 0,
   TICK_SPACING: 200,
-  /** A bid's top sits this many ticks below the price it is placed from: about half of it. */
+  /** A bid's top sits this many ticks past the price it is placed from, on the cheaper side: about half of it. */
   BID_DISCOUNT_TICKS: 6_932,
   /** How far down a bid runs from its top: about 10,000 times lower. */
   BID_SPAN_TICKS: 92_200,
@@ -127,11 +127,11 @@ function floorTick(tick: number): number {
 }
 
 /**
- * Where the hook places a bid (`ArchitexLaunchHook._bidRange`): its top about half the price at `refTick`
+ * A bid's range from its reference tick (`ArchitexLaunchHook._bidRange`): its top about half the price at `refTick`
  * (BID_DISCOUNT_TICKS past it, rounded away from the price onto the tick spacing), its bottom BID_SPAN_TICKS further,
- * clamped to the usable ticks. A buy's snipe fee is placed from the price just before that buy (which the buy then moves
- * up, so the bid is always wholly under the market); the curve's, at graduation, from the graduation price. With USDC as
- * currency0 a higher tick is a cheaper token, so the range lies above the reference tick; with USDC as currency1, below.
+ * clamped to the usable ticks. With USDC as currency0 a higher tick is a cheaper token, so the range lies above the
+ * reference tick; with USDC as currency1, below. The graduation bid takes the graduation tick as its reference; a window
+ * buy's, windowBidRange's.
  */
 export function bidRange(usdcIs0: boolean, refTick: number): { lower: number; upper: number } {
   if (usdcIs0) {
@@ -140,6 +140,24 @@ export function bidRange(usdcIs0: boolean, refTick: number): { lower: number; up
   }
   const upper = floorTick(refTick - V14.BID_DISCOUNT_TICKS)
   return { lower: Math.max(upper - V14.BID_SPAN_TICKS, V14.MIN_USABLE_TICK), upper }
+}
+
+/**
+ * The tick of the cheaper token price of two (`ArchitexLaunchHook._cheaperOf`): with USDC as currency0 a higher tick
+ * is a cheaper token, so the higher of the two; with USDC as currency1, the lower.
+ */
+export function cheaperOf(usdcIs0: boolean, a: number, b: number): number {
+  if (usdcIs0) return a > b ? a : b
+  return a < b ? a : b
+}
+
+/**
+ * Where a buy in a pool's snipe window places its fee: from half the lower of the price just before that buy
+ * (`preTick`) and the graduation price. So no bid ever starts above half the graduation price, and after a crash the
+ * next bid follows the price down. A buy only moves the price up, so the bid is always wholly under the market.
+ */
+export function windowBidRange(usdcIs0: boolean, preTick: number, graduationTick: number): { lower: number; upper: number } {
+  return bidRange(usdcIs0, cheaperOf(usdcIs0, preTick, graduationTick))
 }
 
 type Priced = Pick<V4PoolState, 'sqrtPriceX96' | 'usdcIs0'>

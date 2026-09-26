@@ -14,7 +14,8 @@ import {V14Base} from "./V14Base.sol";
 /// @notice Prints the reference vectors the site's v1.4 code is tested against (src/lib/__tests__/fixtures/
 ///         v14-vectors.json): the snipe schedule, curve buys with the snipe fee, pool keys and ids with USDC on either
 ///         side, the price a pool opens at and its first bid, router quotes against the fees the hook took, the bid each
-///         buy in a pool's snipe window places, the fees the hook holds until a sync, and raw event logs to decode.
+///         buy in a pool's snipe window places (above the graduation price, and after a crash under it), the fees the
+///         hook holds until a sync, and raw event logs to decode.
 ///         Every number comes from the contracts themselves, with USDC at Arc's own address. Regenerate with
 ///         FOUNDRY_PROFILE=v14 forge test --match-contract SiteVectorsV14 -vv | sed -n 's/.*VEC //p'
 contract SiteVectorsV14 is V14Base {
@@ -168,6 +169,7 @@ contract SiteVectorsV14 is V14Base {
                 );
                 _logs(string.concat("pool sell ", vm.toString(s), "-", vm.toString(w), "-", vm.toString(b)));
             }
+            if (w == 0) _crashThenBuy(token, key, s);
         }
         // The pool's fees wait as the hook's claims until a sync books them in the launchpad.
         _emit(
@@ -188,8 +190,37 @@ contract SiteVectorsV14 is V14Base {
         _logs(string.concat("sync ", vm.toString(s)));
     }
 
-    /// @dev One router buy: its quote and result, the price and tick before it (a window buy's bid is placed from that
-    ///      tick), and the hook's held rounding and bid count either side of it.
+    /// @dev Still inside the window: a dump that takes the price well under the graduation price, then a buy whose bid
+    ///      follows the price down (it is placed from the cheaper of the tick before it and the graduation tick).
+    function _crashThenBuy(address token, PoolKey memory key, uint256 s) internal {
+        vm.roll(vm.getBlockNumber() + 1);
+        vm.recordLogs();
+        vm.prank(bob);
+        router.sell(token, 300_000_000e18, 0, bob, MAX);
+        _logs(string.concat("pool crash-sell ", vm.toString(s), "-0"));
+        vm.roll(vm.getBlockNumber() + 1);
+        (, int24 tickBefore) = _slot0(key.toId());
+        (, IArchitexLaunchHook.Launch memory l) = hook.launchOf(token);
+        uint256 snipe = hook.snipeBpsOf(token);
+        uint256 heldBefore = hook.lockHeld(token);
+        uint256 bidsBefore = hook.bidCount(token);
+        vm.recordLogs();
+        vm.prank(carol);
+        router.buy(token, 2_000e6, 0, carol, MAX);
+        _emit(
+            string.concat(
+                string.concat('{"k":"crash","token":', _a(token), ',"usdcIs0":', _b(l.usdcIs0)),
+                string.concat(',"graduationTick":', vm.toString(int256(l.graduationTick)), ',"tickBefore":', vm.toString(int256(tickBefore))),
+                string.concat(',"s":', vm.toString(snipe), ',"in":', _n(2_000e6)),
+                string.concat(',"heldBefore":', _n(heldBefore), ',"heldAfter":', _n(hook.lockHeld(token))),
+                string.concat(',"bidsBefore":', _n(bidsBefore), ',"bidsAfter":', _n(hook.bidCount(token)), "}")
+            )
+        );
+        _logs(string.concat("pool crash-buy ", vm.toString(s), "-0"));
+    }
+
+    /// @dev One router buy: its quote and result, the price and tick before it (a window buy's bid is placed from the
+    ///      cheaper of that tick and the graduation tick), and the hook's held rounding and bid count either side of it.
     function _poolBuy(address token, PoolKey memory key, uint256 usdcIn, string memory step) internal {
         (uint160 before, int24 tickBefore) = _slot0(key.toId());
         uint256 snipe = hook.snipeBpsOf(token);
