@@ -6,27 +6,30 @@ every part of it through real transactions against Uniswap's own v4 PoolManager 
 window, graduated into Uniswap v4 and traded there, and every fee is synced, collected and paid out. The books are
 checked to the unit after every transaction.
 
-**Status, 2026-09-25: built, and proven end to end on a local anvil fork of Arc Testnet at `f9649d4`, which includes
-`v14` at `39a78b4`: the owner's option A (a buy's snipe fee becomes a bid inside that buy, and `lock` is gone), with
-every window bid placed from half the pool's reference, `bidRefTick`: the lowest price any window buy has started from,
-the graduation price to begin with (Claude review #9's L1 and its residual). Nothing has been sent to Arc Testnet or
-mainnet.** The live run waits for the two security reviews in progress.
+**Status, 2026-09-26: run live on Arc Testnet, and both runs passed.** Run A (rUSDC) and Run B (Arc's own USDC) were
+deployed with the Foundry script and driven from `v14-rehearsal` at `3bc28ab`, which includes `v14` at `1fa9e54`: the
+owner's option A (a buy's snipe fee becomes a bid inside that buy, and `lock` is gone), with every window bid placed
+from half the pool's reference, `bidRefTick`, the lowest price any window buy has started from (Claude review #9's L1
+and its residual). Since `39a78b4` the contracts have changed only in comments. The deployment records and Foundry's
+broadcasts are committed as `aa9e5c1`. Nothing has been sent to mainnet.
 
-| Fork dry run (Run A, rUSDC) | Transactions | Checks | Gas | USDC at 25 gwei |
+| Live run, Arc Testnet (chain 5042002) | Transactions | Checks | Gas | USDC at 25 gwei |
 | --- | ---: | ---: | ---: | ---: |
-| deploy (the Foundry script) | 7 | 36 | 12,134,866 | 0.303372 |
-| drive (5 tokens, 5 graduations) | 90 | 1,685 | 25,298,323 | 0.632458 |
-| **total** | **97** | **1,721** | **37,433,189** | **0.935830** |
+| Run A (rUSDC): deploy (the Foundry script) | 7 | 36 | 12,134,854 | 0.303371 |
+| Run A: drive (5 tokens, 5 graduations) | 90 | 1,726 | 25,299,447 | 0.632486 |
+| Run B (Arc's USDC): deploy | 7 | 34 | 12,114,234 | 0.302856 |
+| Run B: drive (1 token, curve only) | 8 | 157 | 2,324,017 | 0.058100 |
+| **total** | **112** | **1,953** | **51,872,552** | **1.296814** |
 
-Every check passed, before and after each merge (option A, the graduation-price cap, then the reference), and **no
-contract behaviour contradicted the spec**. The pool window's transactions now go out back to back, without waiting for
-receipts, so the window's cases land in a few blocks whatever the RPC's latency (below). "USDC at 25 gwei" is what Arc
-Testnet charges (a 20 gwei base fee plus the node's 5 gwei tip, so 1M gas is 0.025 USDC); the fork's own gas prices
-mean nothing (below).
+Every check passed on the first attempt, each run in one pass (no step re-run, nothing re-sent), and **no contract
+behaviour contradicted the spec**. The burner's native balance fell from 4.472875 to 3.095060 USDC (nonce 272 to 384,
+all 112 transactions its own): exactly the gas above, every transaction at 25 gwei, plus the 0.081001 USDC that Run B
+left in its launchpad for good (its window buy's surcharge and 1 unit of curve float). That is inside the budget.
+"USDC at 25 gwei" is what Arc Testnet charges: a 20 gwei base fee plus the node's 5 gwei tip, so 1M gas is 0.025 USDC.
 
-Run B, on Arc's own USDC, was built and typechecked. On the fork it deploys, passes every deployment check and launches
-its token, then stops at its first USDC transfer, as it must: Arc's USDC is a precompile that a fork cannot execute. It
-only runs live.
+The anvil-fork dry run of the same scripts is kept below as the pre-flight: at `f9649d4` it passed with 97
+transactions and 1,721 checks, and the live Run A matched it to within 1,112 gas. The live results are under "The
+live run", after the plan and the commands.
 
 ## The scripts
 
@@ -185,7 +188,7 @@ trades. It deploys the whole suite on Arc's USDC with launch fee 0, and runs one
 burner as its creator-fee destination so the fees come back):
 
 1. `deploy`: the same checks as Run A, against the Arc-USDC deployment.
-2. `approve`: the launchpad, for exactly what the trades need (6 USDC).
+2. `approve`: the launchpad, for exactly what the trades need (6 USDC; 4.2 with `RUNB_WINDOW_USDC=0.1`, as live).
 3. `create:wallet`: the launch, then a 1 USDC buy fired inside the curve's window, checked at the block it lands in.
 4. `curve:wallet`: a 1 USDC buy after the window and a sell of half.
 5. `sellAll:wallet`: sells everything back, so the curve's float returns.
@@ -199,11 +202,13 @@ B opens no pool). The driver refuses any transaction that would leave the burner
 **The in-window buy is a real cost.** Its surcharge (up to 85.5% of the 1 USDC if it lands one block after the launch,
 about 54% to 72% if it lands 4 to 8 blocks after, as live latency suggests) goes to `pendingSnipe`, and since the token
 never graduates it stays in the launchpad for good (V14-SPEC §5). `RUNB_WINDOW_USDC=0.1` makes that 10 times smaller.
+The live run used it: the buy landed 2 blocks after the launch and left 0.081 USDC.
 
 On the fork Run B deployed (12,114,246 gas), passed its 34 deployment checks, approved (55,438 gas; Arc's USDC keeps
 allowances in its own storage) and launched (1,626,278 gas), then stopped exactly where it must: the window buy's
 `transferFrom` reverts with no revert data, because the native-balance precompile behind Arc's USDC does not exist on a
-fork (`balanceOf` and `approve` answer; `transfer`, `transferFrom` and `totalSupply` revert).
+fork (`balanceOf` and `approve` answer; `transfer`, `transferFrom` and `totalSupply` revert). Live, Run B ran to the end
+(below).
 
 ## How to run it live
 
@@ -249,7 +254,9 @@ The gas flags make forge pay what the driver pays: at Arc's 20 gwei base fee, a 
 only leaves headroom). Without them, forge paid 32.5 gwei for the v1.3 deploys. `--private-key` puts the key in forge's
 process arguments while it runs; `--interactive` instead of `--private-key "$REHEARSAL_KEY"` makes forge prompt for it.
 
-**Budget.** The burner holds 4.47 USDC of gas.
+The live run below was driven with these scripts and `SIGNER=key` from `3bc28ab`, Run B with `RUNB_WINDOW_USDC=0.1`.
+
+**Budget.** The burner held 4.47 USDC of gas before the live run (3.10 after).
 
 | Part | Gas | USDC |
 | --- | ---: | ---: |
@@ -269,11 +276,12 @@ adds 46,892 gas to the hook's deploy; the drive costs 0.02 USDC more than at `82
 make two more window buys each. The window transactions' gas limits (estimate + 30% or + 200,000) are about 360,000 to
 500,000; only the gas used is paid, but the limit times the fee cap is held against the balance while a transaction is
 pending, about 0.02 USDC each. rUSDC is minted freely and is not part of this. The driver refuses any transaction past
-`GAS_CAP` (2 USDC of gas for Run A's progress file, 1 for Run B's).
+`GAS_CAP` (2 USDC of gas for Run A's progress file, 1 for Run B's). The live run spent 1.377815 USDC, inside the
+budget ("Against the budget", below).
 
 **Order matters.** Deploy Run A first, as the burner's next transaction, so it lands at nonce 272 and reproduces the fork
 run's addresses and orientations (check `--preview` first). Run B's deploy then comes 97 nonces later; Run B opens no
-pool, so its orientation does not matter.
+pool, so its orientation does not matter. Live, Run A deployed at nonces 272 to 278 and Run B at 369 to 375.
 
 **Resuming.** Progress (token addresses, the pools' positions, mined transactions, finished steps) lives in
 `deployments/<name>.progress.json`, which is gitignored:
@@ -291,7 +299,362 @@ Settings: `DEPLOYMENT`, `PROGRESS`, `RPC_URL` (or `ARC_TESTNET_RPC`), `SIGNER` (
 `REHEARSAL_KEY`, `ACTOR` (anvil only), `ARTIFACTS` (default `contracts-v14/out`), `GAS_CAP`, `FLOOR`, `RUNB_WINDOW_USDC`,
 `SAMPLE_SECONDS` (default 20), `MARKDOWN=1`.
 
-## The fork dry run
+## The live run (2026-09-26)
+
+Both runs went out from the dev burner `0x7212fA4Fe663d063A7a83dA0467d592ed3A51D46` on 2026-09-26: Run A deployed at
+06:03 UTC and finished at 06:07:37, Run B deployed at 06:08:28 and finished at 06:09:02. Every deployed contract equals
+the local build byte for byte (`scripts/verify-bytecode.ts`, immutables and metadata hashes masked), and each hook
+address has the low 14 bits `0x28EC`.
+
+### Addresses
+
+**Run A, on rUSDC: `deployments/arc-testnet-v14-rehearsal.json`.**
+
+- Launch fee 1 rUSDC. `feeTo`, `feeToSetter` and the rUSDC owner are the dev burner.
+- Uniswap's own v4 contracts: the PoolManager `0x8366a39CC670B4001A1121B8F6A443A643e40951` (its code is the tests'
+  fixture, byte for byte, and it has no protocol-fee controller) and StateView
+  `0xF3334192D15450CdD385c8B70e03f9A6bD9E673b`.
+- The fee recipients are the plan's (above).
+
+| Contract | Address |
+| --- | --- |
+| rUSDC (TestToken "Architex Rehearsal USD", 6 decimals) | `0x309297011592BA9a157204e57EB0AF2175D8ceed` |
+| ArchitexLaunchpadV14 | `0x5a0eFD7b3ac83686E5a08d8004f181443A13CC58` |
+| ArchitexLaunchHook (CREATE2 through `0x4e59b44847b379578588920cA78FbF26c0B4956C`, salt `0x…0266`) | `0x8c420B3EC4d92d50Ff2928476d26A26e63e768ec` |
+| ArchitexV4Router | `0xf87C6Da66dCb64991208E1189Ea0e8e74bb90664` |
+| SplitPlugin | `0xfd8e55DD52992Dc6B9ea7Af52fab70Ee28F5CD1f` |
+| HolderDistributionPlugin | `0x17B608b4B55045c5380437E0E28752BC31194e2D` |
+| ComboPlugin | `0x3CeA455cE9320Ac479cA59284D02ca91c78D1b5d` |
+| RawSwapper (test only, `contracts-v14/test/V14Base.sol`) | `0x69cf92c006C5bC512646BD6984e47d1Da024FB09` |
+
+| Token | Creator fee → destination | Pool | Token address | Pool id |
+| --- | --- | --- | --- | --- |
+| RWAL | 1% → a plain wallet | closed; USDC is currency0 | `0xD7aD75F24f84e3E263b3580a461AE70d93B8E958` | `0x27f2e8b1db71ff6b99d8e0db366cfbbaec009bdcfdbab0c5cdaf921a62231ccd` |
+| RSPL | 10% → Split, payees 5/3/2 | open; USDC is currency0 | `0x9A96EfCfd6b6184f5b448e9151c83639cec9cd33` | `0xea152fb5ef6979804de3a0d4089e60e82f5b131890cc22de028c64247c794412` |
+| RHLD | 10% → Distribute to holders | closed; USDC is currency1 | `0x2fB747e32255B07e7BDFF9b1b43ddc44f90fE1DD` | `0xdd1ccfe203b4cdb1e2cc91c66cac7d6c72a74874f0d136403641d8e3445e1f21` |
+| RCMB | 1% → Combo: 50% holders, 30% Split (payees 1:1), 20% a wallet | open; USDC is currency0 | `0x357227Fd75205822B93B35F3Fb518da7792f0a78` | `0x9d111ef2a5f42e6e1234db4c506bfb85fd48e3c8fdf362c5571eb6c2dbdaf8c2` |
+| RZRO | 0% → a plain wallet | closed; USDC is currency0 | `0x471779Bf350BC71fe18a81F6E4375342eC84284e` | `0xb306fc6f5857b67d44574e8e5e5095931fa8b9072b9aa507a4994b445a0d33ac` |
+
+**Run B, on Arc's USDC: `deployments/arc-testnet-v14-realusdc.json`.** Launch fee 0. `feeTo` and `feeToSetter` are the
+burner, which is also RARC's creator-fee destination.
+
+| Contract | Address |
+| --- | --- |
+| Arc's USDC | `0x3600000000000000000000000000000000000000` |
+| ArchitexLaunchpadV14 | `0x5abc3eA7416fAaE83d5B6d4046E3F67718EA4592` |
+| ArchitexLaunchHook (salt `0x…27a3`; no pool opened) | `0xa17E63F995831e60769743c7195e82835Ff8e8Ec` |
+| ArchitexV4Router | `0x433E576B36890F1D516C8C678BE932778f7b4c13` |
+| SplitPlugin | `0x67e087811E5953Ea447eD5c7ac83c3C7BDE3D7fe` |
+| HolderDistributionPlugin | `0x3C87c4AcDb4fB00F0C1E3567aFa6B9Eb940b316B` |
+| ComboPlugin | `0x9668A944A320326BB72f7DBEd93E1a4AC67C416A` |
+| RARC (1% → the burner, closed pool), on the curve | `0x516d7d4cA63F359CceB94c172496a63E2817b314` |
+
+The deploy transactions are the `deploy` rows under "Every transaction" below; Foundry's broadcasts are in
+`broadcast/DeployLaunchpadV14.s.sol/5042002/`.
+
+### Results, by step
+
+Run A, rUSDC:
+
+| step | transactions | checks | gas | USDC at 25 gwei | result |
+| --- | ---: | ---: | ---: | ---: | --- |
+| deploy | 7 | 36 | 12,134,854 | 0.303371 | deployed |
+| raw | 1 | 13 | 780,827 | 0.019521 | pass |
+| fund | 2 | 26 | 106,308 | 0.002658 | pass |
+| approve | 2 | 24 | 92,532 | 0.002313 | pass |
+| plan | 0 | 1 | 0 | 0 | pass |
+| create:wallet | 2 | 62 | 1,888,711 | 0.047218 | pass |
+| create:split | 2 | 42 | 2,054,995 | 0.051375 | pass |
+| create:holders | 2 | 42 | 1,868,186 | 0.046705 | pass |
+| create:combo | 2 | 42 | 2,207,526 | 0.055188 | pass |
+| create:zero | 4 | 72 | 1,984,668 | 0.049617 | pass |
+| curve:wallet | 2 | 36 | 195,475 | 0.004887 | pass |
+| curve:split | 2 | 33 | 195,475 | 0.004887 | pass |
+| curve:holders | 2 | 33 | 195,475 | 0.004887 | pass |
+| curve:combo | 2 | 33 | 195,475 | 0.004887 | pass |
+| curve:zero | 2 | 33 | 185,181 | 0.004630 | pass |
+| graduate:wallet | 9 | 172 | 2,545,761 | 0.063644 | pass |
+| graduate:split | 4 | 78 | 1,314,598 | 0.032865 | pass |
+| graduate:holders | 9 | 168 | 2,507,933 | 0.062698 | pass |
+| graduate:combo | 4 | 92 | 1,313,702 | 0.032843 | pass |
+| graduate:zero | 4 | 78 | 1,283,655 | 0.032091 | pass |
+| fund:raw | 3 | 36 | 136,359 | 0.003409 | pass |
+| pool:wallet | 2 | 40 | 318,943 | 0.007974 | pass |
+| pool:split | 2 | 40 | 318,283 | 0.007957 | pass |
+| pool:holders | 2 | 40 | 318,646 | 0.007966 | pass |
+| pool:combo | 2 | 40 | 319,135 | 0.007978 | pass |
+| pool:zero | 2 | 40 | 313,371 | 0.007834 | pass |
+| raw:wallet | 2 | 42 | 297,878 | 0.007447 | pass |
+| raw:holders | 2 | 42 | 296,475 | 0.007412 | pass |
+| lp | 3 | 51 | 492,468 | 0.012312 | pass |
+| sync:wallet | 1 | 17 | 81,048 | 0.002026 | pass |
+| syncBatch | 1 | 16 | 114,698 | 0.002867 | pass |
+| collect:wallet | 1 | 15 | 71,825 | 0.001796 | pass |
+| collect:split | 1 | 16 | 114,214 | 0.002855 | pass |
+| release:split:1 | 1 | 14 | 110,678 | 0.002767 | pass |
+| release:split:2 | 1 | 14 | 93,578 | 0.002339 | pass |
+| release:split:3 | 1 | 14 | 93,578 | 0.002339 | pass |
+| collect:holders | 1 | 20 | 236,664 | 0.005917 | pass |
+| collect:combo | 1 | 22 | 381,976 | 0.009549 | pass |
+| collect:zero | 1 | 14 | 39,039 | 0.000976 | pass |
+| sample | 0 | 12 | 0 | 0 | pass |
+| claim:holders | 1 | 20 | 96,480 | 0.002412 | pass |
+| claim:combo | 1 | 19 | 96,480 | 0.002412 | pass |
+| collectFees | 1 | 14 | 41,148 | 0.001029 | pass |
+| final | 0 | 48 | 0 | 0 | pass |
+| **total** | **97** | **1,762** | **37,434,301** | **0.935858** | **all pass** |
+
+Run B, Arc's USDC:
+
+| step | transactions | checks | gas | USDC at 25 gwei | result |
+| --- | ---: | ---: | ---: | ---: | --- |
+| deploy | 7 | 34 | 12,114,234 | 0.302856 | deployed |
+| approve | 1 | 12 | 55,438 | 0.001386 | pass |
+| plan | 0 | 1 | 0 | 0 | pass |
+| create:wallet | 2 | 57 | 1,832,737 | 0.045818 | pass |
+| curve:wallet | 2 | 36 | 223,974 | 0.005599 | pass |
+| sellAll:wallet | 1 | 13 | 98,835 | 0.002471 | pass |
+| collect:wallet | 1 | 15 | 56,923 | 0.001423 | pass |
+| collectFees | 1 | 14 | 56,110 | 0.001403 | pass |
+| final | 0 | 9 | 0 | 0 | pass |
+| **total** | **15** | **191** | **14,438,251** | **0.360956** | **all pass** |
+
+### The pool windows
+
+Every window went out in back-to-back batches the moment its graduation was mined, and every case landed inside the
+20 blocks, at most 5 blocks after graduation. The blocks each transaction landed in, with the surcharge a buy paid in
+that block (sells pay none):
+
+| Token | Graduation block | First batch | Second batch |
+| --- | ---: | --- | --- |
+| RWAL | 64,054,629 | lifting buy, capped buy, dump: 64,054,631 (+2, 8,100 bps); crash buy: 64,054,632 (+3, 7,650 bps) | lift back, buy after it, sell, exact-out buy: 64,054,634 (+5, 6,750 bps) |
+| RSPL | 64,054,699 | lifting buy, capped buy, sell: 64,054,702 (+3, 7,650 bps) | |
+| RHLD | 64,054,707 | lifting buy, capped buy: 64,054,709 (+2, 8,100 bps); dump, crash buy: 64,054,710 (+3, 7,650 bps) | all four: 64,054,712 (+5, 6,750 bps) |
+| RCMB | 64,054,721 | lifting buy: 64,054,722 (+1, 8,550 bps); capped buy, sell: 64,054,723 (+2, 8,100 bps) | |
+| RZRO | 64,054,729 | lifting buy, capped buy, sell: 64,054,731 (+2, 8,100 bps) | |
+
+By the blocks' timestamps, each window's transactions were all mined 1 to 3 seconds after its graduation: RWAL's
+graduation block is stamped 06:04:29 UTC and its second batch's block 06:04:32; RHLD's 06:05:09 and 06:05:11.
+
+The crash and the lift back, in both orientations:
+
+| | RWAL (USDC is currency0) | RHLD (USDC is currency1) |
+| --- | --- | --- |
+| graduation tick, the first reference | 366,200 | -366,201 |
+| after the lifting buy | 364,847 | -365,532 |
+| after the 150M-token dump | 375,315 | -375,613 |
+| crash buy: the new reference and its bid | 375,315: [382,400, 474,600], 1,530 rUSDC | -375,613: [-474,800, -382,600], 1,530 rUSDC |
+| lift back: its size, and the tick before and after it | 38,786 rUSDC: 374,971 to 364,476, 1,724 ticks above graduation | 61,929 rUSDC: -375,407 to -363,727, 2,474 ticks above graduation |
+| the lift back's bid | the crash bid's range, 26,180.55 rUSDC | the crash bid's range, 41,802.075 rUSDC |
+| the buy after the lift, from above graduation: its bid | the crash bid's range, 1,350 rUSDC | the crash bid's range, 1,350 rUSDC |
+| where a cap at the graduation price alone would have put that bid | [373,200, 465,400] | [-465,400, -373,200] |
+| where its own pre-buy price would have put it | [371,600, 463,800] | [-463,000, -370,800] |
+| the exact-out buy in the window: its bid | the crash bid's range, 1,720.279112 rUSDC | the crash bid's range, 2,577.513588 rUSDC |
+| `bidRefTick` at the end | 375,315 | -375,613 |
+
+### What the live run showed
+
+- **Both windows.** The curve's window buys landed 2 or 3 blocks after their launches (RWAL and RSPL 3, at 7,650 bps;
+  RHLD, RCMB and RZRO 2, at 8,100; RZRO's second and third 4 and 7 blocks after, at 7,200 and 5,850), and
+  `pendingSnipe` moved by exactly each surcharge. At graduation the curves' surcharges became the graduation bids:
+  765 rUSDC (RWAL, RSPL), 810 (RHLD, RCMB) and 2,115 (RZRO). In the pools' windows every buy paid the surcharge of the
+  block it landed in, and the window sells paid none.
+- **Graduation.** As on the fork: every pool opened with 24,999.999968 to 24,999.999971 rUSDC and 200M tokens at tick
+  366,200 (-366,201 for RHLD, the one token with USDC as currency1); 7,427,141 to 83,139,851 wei of tokens were left
+  over and burned; `bidRefTick` started at the graduation tick.
+- **Above graduation, the reference held.** The lifting buys (10,000 rUSDC) lifted the tick by 1,353 (RWAL), 1,014
+  (RSPL, RCMB), 669 (RHLD) and 1,428 (RZRO), and bid 8,100 rUSDC (7,650 on RSPL, 8,550 on RCMB) on the graduation
+  bid's range. Every capped buy (2,000 rUSDC) then bid on that range again, at salt 3, in both orientations; half its
+  own pre-buy price would have started its bid at 371,800 to 372,200 (-372,600 on RHLD) instead of 373,200
+  (-373,200).
+- **After the crash, the reference stayed down** (table above): the crash buy moved it to the crashed price, and a lift
+  back above graduation, the buy after it and the exact-out buy all still bid from half of it.
+- **Every bid** sat wholly under the market, none started above half the graduation price, and each of the 18 window
+  bids took everything it was given (`lockHeld` stayed 0). At the end RWAL and RHLD hold eight hook positions (the
+  full range and seven bids), the others four.
+- **Window gas.** No window transaction used more than 60.2% of its limit. The most any used beyond the estimate it was
+  sent with was 9,332 gas: RHLD's crash buy, estimated before the dump ahead of it had crashed the price.
+- **Fees.** At collection the creator fees paid out 986.335208 rUSDC to RWAL's wallet, 4,407.154131 to Split for RSPL
+  (then released to its three payees), 12,506.230637 to Holders for RHLD (9,522.947078 of it released from the hook in
+  that same transaction), 405.41498 to Combo for RCMB and nothing for RZRO; `feeTo` received the platform's
+  1,754.564217. At the end the launchpad holds 0 rUSDC, the hook's claims are 0, and the PoolManager holds 36 units
+  more than the 275,448.092177 rUSDC its positions are worth (rounding in the pools' favour).
+- **Dividends.** Over 21 s RHLD's stream grew by 2,907,273 units against the model's 2,907,272, and RCMB's by 49,269
+  against 49,266; each claim paid exactly `claimable`, leaving 2 and 1 units of dust.
+- **Run B.** The window buy (0.1 USDC) landed 2 blocks after the launch and paid 8,100 bps: 0.081 USDC to
+  `pendingSnipe`, where it stays, since RARC never graduates. A 1 USDC buy after the window, a sell of half (0.48514
+  USDC back) and a sell of the rest (0.50232 back) followed; the creator fees (0.021026) and the platform fees
+  (0.010513) came back to the burner, and RARC's curve keeps 1 unit of float. The same calls cost more gas on Arc's
+  USDC than on rUSDC: the window buy 206,459 (RWAL's: 121,823), a buy after the window 115,539 (99,291), a sell 108,435
+  (96,184).
+
+### Against the budget
+
+| Part | Budget (USDC) | Spent (USDC) |
+| --- | ---: | ---: |
+| Run A deploy | 0.30 | 0.303371 |
+| Run A drive | 0.63 | 0.632486 |
+| Run B deploy | 0.30 | 0.302856 |
+| Run B drive | 0.06 | 0.058100 |
+| Run B's surcharge, left in the launchpad for good | 0.54 to 0.86 (0.054 to 0.086 with `RUNB_WINDOW_USDC=0.1`) | 0.081000 |
+| Run B's curve float, left in the launchpad | | 0.000001 |
+| **Total** | **about 1.8 to 2.2 (about 1.34 to 1.38 with 0.1)** | **1.377815** |
+
+The burner went from 4.472875 to 3.095060 USDC. Run A's gas matched the fork's to within 1,112 in all (and 1,964 at
+most for any one step), and Run B's drive (2,324,017 gas) its estimate of about 2.3M.
+
+### What differed from the fork run
+
+- **RPC retries.** 14 RPC calls (reads, estimates or receipt polls) hit transient errors on Arc Testnet's public RPC
+  and were retried with backoff; the fork had none. No step failed and nothing was sent twice: 97 transactions for Run
+  A's 97 actions, 15 for Run B's.
+- **Later landings.** Arc mined transactions a block or two later than anvil did: the curve's window buys 2 or 3
+  blocks after their launch (fork: 1; RZRO's three at 2, 4 and 7 against 1, 2 and 3), the pools' first batches 1 to 3
+  blocks after graduation, split over two blocks on RWAL, RHLD and RCMB (fork: whole, 1 block after), and the second
+  batches 5 blocks after (fork: 3). Every case still landed inside its window, and the surcharges were lower: 765 or
+  810 rUSDC of curve surcharge per token (fork: 855), 2,115 on RZRO (2,430).
+- **The crash and the lift back.** The buys before each dump paid less surcharge and so put more into the pool, and the
+  crashes stopped a little higher: at 375,315 against the fork's 375,416, and -375,613 against -375,722. The crash
+  bids' ranges are the same on RWAL and one spacing higher on RHLD ([-474,800, -382,600] against [-475,000,
+  -382,800]). The lift back was sized for the next block's surcharge (7,200 bps) and landed a block later (6,750), so
+  it passed its 400-tick target: 1,724 ticks above graduation on RWAL and 2,474 on RHLD (fork: 2,440 and 4,588).
+- **More checks.** 1,762 against 1,721: where the window's transactions spread over more blocks, each block's books
+  are checked on their own (13 or 14 more checks per extra block, on RWAL, RHLD and RCMB).
+- **Gas and the hook's address.** 37,434,301 against 37,433,189 (+1,112). The hook's deploy used 12 gas less:
+  `3bc28ab`'s comment changes altered its metadata hash, so its init code, its mined CREATE2 salt (`0x…0266`; the
+  fork's was `0x…01ea`) and its address (`0x8c420B3E…e8Ec`; the fork's `0x5b2E249b…e8Ec`), and with it every pool id.
+  Every other address is the fork's, since the burner deployed at the same nonce. The drive used 1,124 more, from the
+  window trades' different surcharges and prices.
+- **The price of gas.** Arc Testnet charged exactly 25 gwei on all 112 transactions, the figure every cost here uses.
+
+### Every transaction
+
+Run A, rUSDC:
+
+| step | transaction | tx hash | gas | USDC at 25 gwei |
+| --- | --- | --- | ---: | ---: |
+| deploy | launchpad | `0x913aeab481c7690272cf4cecc321d0e5ca43c0f7967c14b07ff4ff1d732d28d2` | 5,264,637 | 0.131616 |
+| deploy | hook | `0xac69053c20c17c8888d65ed25a974f1ade6dffd351abc4013d5afd3a4dfcfe2f` | 2,878,852 | 0.071971 |
+| deploy | router | `0x8c1baabe9221f2938bd51c8fb729fb0200e047facf6a32eacb455532aaeaedf0` | 932,275 | 0.023307 |
+| deploy | initialize | `0x201154a6fa03da2d5c3ce86a4c0c7671ac44ecf5c3d58f3703304410f2e317fd` | 78,336 | 0.001958 |
+| deploy | split | `0xb0e1abea08ba042ed227f64865a47bdffe06c51ed656f2e59c71e05f80c08abb` | 1,040,036 | 0.026001 |
+| deploy | holders | `0x9fde1c3d25978f1e1d8ecaa62b9cbe74e94d100e747cedac7263a54b4d059237` | 574,991 | 0.014375 |
+| deploy | combo | `0xdd18452e784ee10c22f17b12f104bdb9c1220df6b46011c65437b185af321b91` | 1,365,727 | 0.034143 |
+| raw | deploy RawSwapper | `0xb57462199749ba1fe0c7fe0dd54fe460a3f5194de343c1d7da283ad6240dc6b2` | 780,827 | 0.019521 |
+| fund | mint 1000000 rUSDC to the burner | `0x995f1770c8b365ce22d059c19d8098ec8f9cdf7686f8751fdb3dbd2227eccb66` | 53,154 | 0.001329 |
+| fund | mint 50000 rUSDC to the raw | `0x883bb7105f032dc49c26ec6741979cccc5ac81fc9e960ec5e9a3fe995e39edb8` | 53,154 | 0.001329 |
+| approve | approve the launchpad | `0x92b7cb2af07c91cdc9f9325fc50707989828f2bf3607d76fa36c2c49e3d3985b` | 46,266 | 0.001157 |
+| approve | approve the router | `0x927b1bb486e223874f997094c6454c81b6712e1ad7847e775c693c9ae966c50b` | 46,266 | 0.001157 |
+| create:wallet | createToken RWAL | `0xf20e1b39cc47b4c6eb66e7179d44dbfb84b0c6057241d4ad4c958c0873fa6ef1` | 1,766,888 | 0.044172 |
+| create:wallet | buy RWAL in the curve's window (1) | `0xfdbc6c6653a5dd57eab93b85f7795c98191834a061d07d73757cee77ac704c2b` | 121,823 | 0.003046 |
+| create:split | createToken RSPL | `0xfcbe47c6c95c9e3d9edde2de8d9e15e68f5ae9fadab9823117e910138ec0e482` | 1,881,872 | 0.047047 |
+| create:split | buy RSPL in the curve's window (1) | `0x221eac0ea79049cfb3f19bb81d58a7aaa71ebf8cab75f2efe48508d3a8e6be7a` | 173,123 | 0.004328 |
+| create:holders | createToken RHLD | `0x52a1b1bf799861edf130da918e914cc9bd22c4d7effbc7238c8214a77a1e92e2` | 1,746,363 | 0.043659 |
+| create:holders | buy RHLD in the curve's window (1) | `0x42dfb876f94010a480f3df94169f84bf078130e3daed352755693538d9d0a156` | 121,823 | 0.003046 |
+| create:combo | createToken RCMB | `0x5a3023eb181b66f1d3a4384bdaba39a1f5d984ebd4f396a6698c5c9fa308c938` | 2,034,403 | 0.050860 |
+| create:combo | buy RCMB in the curve's window (1) | `0x4b6756ff418782926da90a9cba69f89c3387c1f7834652cef3c9fda604232383` | 173,123 | 0.004328 |
+| create:zero | createToken RZRO | `0x2a151471bead0b9ab15262afcb5b2b8e424856ad1ce1a40498c20006767ac24c` | 1,634,652 | 0.040866 |
+| create:zero | buy RZRO in the curve's window (1) | `0xaa47b5ea066b36b2073658c94d74a076305591e0e5495c625461281e86203981` | 150,872 | 0.003772 |
+| create:zero | buy RZRO in the curve's window (2) | `0xa6fcf6f9a68749ab8b2a464a8beabb5bb41c83ab80710613f0b8333915c33726` | 99,572 | 0.002489 |
+| create:zero | buy RZRO in the curve's window (3) | `0xde8df82292280cfa924a31807cb82e29bf0eef7f724704097b22fc90fab5b4c6` | 99,572 | 0.002489 |
+| curve:wallet | buy RWAL on the curve, after its window | `0x8f87340dd910815ab300b083d8b8a17e940399b2e39a168a07cbb138204d77ee` | 99,291 | 0.002482 |
+| curve:wallet | sell RWAL on the curve (half) | `0x0d8caa7e59f380ca82d30160c4d592c85e7bde01446969b0a1bbc63cf11dc58c` | 96,184 | 0.002405 |
+| curve:split | buy RSPL on the curve, after its window | `0x618af20799477e265b078813908f595ee943482d07522b1d278c14f5925ec6b4` | 99,291 | 0.002482 |
+| curve:split | sell RSPL on the curve (half) | `0x07d5ea672d779c370eb1216c0d9e8ed83937d24c3f01b9c1995a50170134fe11` | 96,184 | 0.002405 |
+| curve:holders | buy RHLD on the curve, after its window | `0x6b16745a82ff41d5e2754d3a4f1313f77220d3a013b2714d36169f8adc56efca` | 99,291 | 0.002482 |
+| curve:holders | sell RHLD on the curve (half) | `0x86f77e25f18854c6082e5c535754827a8dc1e231ba8ae7484dc23aaf1535344a` | 96,184 | 0.002405 |
+| curve:combo | buy RCMB on the curve, after its window | `0xf1ad32ed9197bca1667cecd7f68942270737a7f144d4be6ff40555e20bce4c35` | 99,291 | 0.002482 |
+| curve:combo | sell RCMB on the curve (half) | `0x66b4026211e07957b2d0b6212624ff480de55acb025c65eb0e3a4fb7217bd2f6` | 96,184 | 0.002405 |
+| curve:zero | buy RZRO on the curve, after its window | `0x0b85db060663d53b626bb931a7d5ae25237dbd5596caeafdc48431f31bc423de` | 94,140 | 0.002354 |
+| curve:zero | sell RZRO on the curve (half) | `0x59740539b3d1ceedc6a4a4bec230f339ec1c17133f4be0453ebdb40e5ee3265a` | 91,041 | 0.002276 |
+| graduate:wallet | buy RWAL out (graduation) | `0x98b74546cd2209cded88383b2c5e03c40d6a7e36fb6ef181742f82a1058c97a9` | 660,302 | 0.016508 |
+| graduate:wallet | buy RWAL in the pool's window (router) | `0xffb93b2347014d1921ffe7590c1d80a2232552daa1f7e783baafc644b38ace54` | 289,827 | 0.007246 |
+| graduate:wallet | buy RWAL again in the pool's window, above the graduation price (router) | `0x7725e36e9cd7dd24bcfea23d447eafb75f35e2b7a18da45a69454b1bf5a7e97f` | 239,359 | 0.005984 |
+| graduate:wallet | dump 150000000 RWAL under half the graduation price (router) | `0xa48c34c2b9f60b9b484f7a8f665ffa0cba9b9a8d078b6eed871fb82b6190a0b1` | 174,275 | 0.004357 |
+| graduate:wallet | buy RWAL in the pool's window after the crash (router) | `0x65781c490d67d0efff2d06541403ffada75f4bebb1025912a3c4f69025c734e9` | 286,423 | 0.007161 |
+| graduate:wallet | buy RWAL back above the graduation price in the window (router) | `0xbe3d02d250fc1ea5357c276ca69091d8e7e2477aba8535bf58de2225d35ba611` | 255,644 | 0.006391 |
+| graduate:wallet | buy RWAL in the window after that lift (router) | `0x6db6d17920c4709565f5488d2eb5d2bfb1576836235ef9dba972a05316fe7b2e` | 239,595 | 0.005990 |
+| graduate:wallet | sell RWAL in the pool's window (router) | `0xa0b6412090f8469f300d257272d56cff4f21d0c94ba6a3a08103da7701ed2064` | 158,418 | 0.003960 |
+| graduate:wallet | exact-out buy of 5000000 RWAL in the window (RawSwapper) | `0xcc7e1e67a71da546f8b9c4e9254ad6af7787de11d0cc2450aae0cea47d57152f` | 241,918 | 0.006048 |
+| graduate:split | buy RSPL out (graduation) | `0xbf3fda88d48493028983f69d01f6f2e491afb6df3fead247f0131ff08fad63e2` | 643,190 | 0.016080 |
+| graduate:split | buy RSPL in the pool's window (router) | `0xf666e00e03184beb1c0cace992a6187f929a74089f8a3aa27ebd021ede0dc651` | 273,571 | 0.006839 |
+| graduate:split | buy RSPL again in the pool's window, above the graduation price (router) | `0xad7bed38afb0cfa6a4ee5b456eee6dfe3a3e53bcdeb3f7b718bd32a164c5c4f7` | 239,487 | 0.005987 |
+| graduate:split | sell RSPL in the pool's window (router) | `0xccbfd9f97accea3ff6690435e3083e3ffed5d2df1f64b432d32a6b808999b792` | 158,350 | 0.003959 |
+| graduate:holders | buy RHLD out (graduation) | `0x63d40ab5191305f1a4595f9d5fcef9102a08732acdb619dcd58bd7e65907f8b4` | 643,537 | 0.016088 |
+| graduate:holders | buy RHLD in the pool's window (router) | `0x31b3de6c057f79fb8a3c202b9eb56d8053c99495e9b56f9ab4c91072f9ed5c7e` | 272,535 | 0.006813 |
+| graduate:holders | buy RHLD again in the pool's window, above the graduation price (router) | `0xba94daff273d8a5f258093e4cb22a597833b0166f8b9bb4ed14022ec0b056c6f` | 238,259 | 0.005956 |
+| graduate:holders | dump 150000000 RHLD under half the graduation price (router) | `0x0d00656ae5d11c8b1522d683f7c73ebe2389efe630b5f36b86fbb3610a832807` | 173,799 | 0.004345 |
+| graduate:holders | buy RHLD in the pool's window after the crash (router) | `0xbc23bb01a97b96ce1b86a8030beda3261ae7c238be746152db0ab46c48ca6830` | 288,330 | 0.007208 |
+| graduate:holders | buy RHLD back above the graduation price in the window (router) | `0xa304b7278348f1b1032a79eed2f37786afa5d306b7f034bc6444cf31b8b9d4d8` | 254,024 | 0.006351 |
+| graduate:holders | buy RHLD in the window after that lift (router) | `0x05aed72194cf2ca23f7338a52c7bcaca25a924d798274b7624e9270b185b84a0` | 238,307 | 0.005958 |
+| graduate:holders | sell RHLD in the pool's window (router) | `0xa6480a152cc72e68f36f74b685e824cc6b36138744041a299c2e72fdc70d46ad` | 157,464 | 0.003937 |
+| graduate:holders | exact-out buy of 5000000 RHLD in the window (RawSwapper) | `0x964db6cba8c3d8bfd1dc26606dc0bddf4419cf150c45ef3494990bcf7f5998b7` | 241,678 | 0.006042 |
+| graduate:combo | buy RCMB out (graduation) | `0x045bf24438fb584852dd5118be50e3f3dabc5820548d4dce173c0189e850e054` | 643,202 | 0.016080 |
+| graduate:combo | buy RCMB in the pool's window (router) | `0x4dd2ad46dcb14acd45c2fdaf0b7431bc44f2133122e4daa8df2519033b67b0c6` | 273,583 | 0.006840 |
+| graduate:combo | buy RCMB again in the pool's window, above the graduation price (router) | `0xc6d032af17d5ae25fc7316662e21ca2f8b04ccf5bd34dc0b3d103c981cbb960c` | 239,451 | 0.005986 |
+| graduate:combo | sell RCMB in the pool's window (router) | `0x433e346027d969fb83d55ecbd1be821393d63aaaef9da18bab6c33a8e423ab21` | 157,466 | 0.003937 |
+| graduate:zero | buy RZRO out (graduation) | `0x60967bb2fb73f17e75e5836f6fa7bbd6cfe5592450090a44e0442272cf3e4201` | 638,051 | 0.015951 |
+| graduate:zero | buy RZRO in the pool's window (router) | `0xf3e4cdc7ed58e6117f8b431431764678c99e1bdb69fe54479aa0399395095456` | 253,563 | 0.006339 |
+| graduate:zero | buy RZRO again in the pool's window, above the graduation price (router) | `0x6e9be64ac05c754f512805c7c78631999b127f05f8a3b65dab7ba32b1933fa4d` | 236,535 | 0.005913 |
+| graduate:zero | sell RZRO in the pool's window (router) | `0xcdaecd734f7d30f51d32fefec0ce8cf31867b91db9f1916c763d2d06909d53a4` | 155,506 | 0.003888 |
+| fund:raw | transfer 30000000 RWAL to the RawSwapper | `0xc74971b8e8d5887b6217f087e9f731df3b7cadac580491ebd4be99fea8856bb1` | 39,753 | 0.000994 |
+| fund:raw | transfer 30000000 RHLD to the RawSwapper | `0x6e9e2808596f9af21b1bfcd20bb419cfd5aed990d0caf637ab0ba1c53ad2f0a1` | 39,753 | 0.000994 |
+| fund:raw | transfer 30000000 RSPL to the RawSwapper | `0xd9d73525d9aaf612d09bab4fa72f43692b1f112cf0807394451cba58e2074f73` | 56,853 | 0.001421 |
+| pool:wallet | buy RWAL (router) | `0x74f089f050bca4c7b839d8d5877c26f183bf7ac9901c99496c5b8956ddfd2c57` | 160,621 | 0.004016 |
+| pool:wallet | sell RWAL (router) | `0x2fa0cdcb1838e376f971d878f179636d3e70da0a50278e32b74f950f8f37459c` | 158,322 | 0.003958 |
+| pool:split | buy RSPL (router) | `0x25e372ae0badebd2ffd6bdd35050b99f26c61d9869ec5d4d0429efded6aa26c4` | 159,769 | 0.003994 |
+| pool:split | sell RSPL (router) | `0x20a84d34800dfa34d9f293e111452d8fdecc9a0308c4812e3942f5ae798e36f9` | 158,514 | 0.003963 |
+| pool:holders | buy RHLD (router) | `0x90f109c9579a5ba13ef4729566c4f623e9fcd6a0871d4903b48036a140eaca93` | 160,218 | 0.004005 |
+| pool:holders | sell RHLD (router) | `0x5b01d5ac6e2444081f78ef20cad9a7502c0a3e1ae9465f84b4164f5b2190afe5` | 158,428 | 0.003961 |
+| pool:combo | buy RCMB (router) | `0x91bc9a912b35f4bc2c2b2fc9ca44ebac2cc5fd9b6dfc2718680c3f1ee8246c35` | 160,689 | 0.004017 |
+| pool:combo | sell RCMB (router) | `0xa278f832de2d586ae6ab67d3b4791ba9bda2989339367a06857d9ed70e597848` | 158,446 | 0.003961 |
+| pool:zero | buy RZRO (router) | `0x3e092416a0ed65a30eca786b487434f79b05f259691322ef64ca3f2c9b4fa715` | 157,765 | 0.003944 |
+| pool:zero | sell RZRO (router) | `0xfead8b6d7daffd1f898883f5e9bce3decd14b1822911538e59f67286ec7392bb` | 155,606 | 0.003890 |
+| raw:wallet | exact-out buy of 2000000 RWAL (RawSwapper) | `0x53c396305186c2df1d63abf8d1a14263ce631c0f62360bdf2ed19665bba9d38b` | 146,347 | 0.003659 |
+| raw:wallet | exact-out sell for 100 rUSDC of RWAL (RawSwapper) | `0x02be84df517ec38560115968a3c44d7c4be5db7e06cd818a4fa0c447d3eb411c` | 151,531 | 0.003788 |
+| raw:holders | exact-out buy of 2000000 RHLD (RawSwapper) | `0xd7cc22ec365127adc1cb09f52c360494734e8ff3716a44711ce5a55316113b93` | 146,896 | 0.003672 |
+| raw:holders | exact-out sell for 100 rUSDC of RHLD (RawSwapper) | `0x06b035532a5c2ace5acef13c5d975f02ae60536a511524400fccc7bcad619feb` | 149,579 | 0.003739 |
+| lp | add outside liquidity to the open RSPL pool (RawSwapper) | `0x28fd8bc4016f6d054fc1368342485f740a9ec48ca31a4410643b26cb33c068d0` | 203,175 | 0.005079 |
+| lp | buy RSPL through the outside liquidity (router) | `0x2700e8ff4c8267fe5470e9d9526f45ae0dedab8857fb77fb2eb1cb294d18e9a4` | 160,744 | 0.004019 |
+| lp | remove half the outside liquidity (RawSwapper) | `0x5eeaa518fd2a8cd2badc684caeebd3548a8bf10727c4eead806a5bef4d0efea9` | 128,549 | 0.003214 |
+| sync:wallet | syncPoolFees RWAL | `0x4420a3f04596d569cf917be6451ddfd1bb5c6704de2005f46756963a3b9e51a2` | 81,048 | 0.002026 |
+| syncBatch | syncPoolFeesBatch RSPL, RZRO, RWAL | `0xc18a60ed605b9c26d3a18b823765ce123b5e046579f74ef2ce809bcfe2dc3c1c` | 114,698 | 0.002867 |
+| collect:wallet | collectCreatorFees RWAL | `0x67aa341a3549de9ffe002e2c2922f4bc48f0b436fbfb492ff8a52c78e4d7f09b` | 71,825 | 0.001796 |
+| collect:split | collectCreatorFees RSPL | `0xd497d1d0cf2e08162a0a9661f616be30428ef140826829f3394bb4954b6e7932` | 114,214 | 0.002855 |
+| release:split:1 | Split release to payee 1 | `0xbfbd4fd0234a3e5ada3a9bc685a14d108f40e6408ae518bd9dbb5895301c89be` | 110,678 | 0.002767 |
+| release:split:2 | Split release to payee 2 | `0xf10b2aac37dfc5c8d311cb970a4ccf8a09537111e2f54a454c58ac6aa563179a` | 93,578 | 0.002339 |
+| release:split:3 | Split release to payee 3 | `0x7384740cf73fb82d30cc16e44a818194aeca399b8711683d820c7b06f03558e8` | 93,578 | 0.002339 |
+| collect:holders | collectCreatorFees RHLD | `0xf97a9a9b974006c82ebf6379d252a0609b797cbc4e61d78eaeb5638df6809a5e` | 236,664 | 0.005917 |
+| collect:combo | collectCreatorFees RCMB | `0x34ee403adccf13a207acf28dcd3e924ea49d4f077c0383e535d3d8e9ce2d875c` | 381,976 | 0.009549 |
+| collect:zero | collectCreatorFees RZRO | `0x92d992adde723f9287821502446a0bf509ed630055c97a4dd964d59e9050c583` | 39,039 | 0.000976 |
+| claim:holders | claim RHLD dividends | `0xc19a06f788975be8c74a1f695350e30991c3a0a036c162489cf059a1a5e25ba3` | 96,480 | 0.002412 |
+| claim:combo | claim RCMB dividends | `0xf773ab08fbce86eb8d75d9e11f5728439b9448794f0ce0a8e29e700b6b46b838` | 96,480 | 0.002412 |
+| collectFees | collectFees | `0xce40ba14927c59d6d4b8ae30544d8e1b599c356c545982c1110f013417be6efe` | 41,148 | 0.001029 |
+
+Run B, Arc's USDC:
+
+| step | transaction | tx hash | gas | USDC at 25 gwei |
+| --- | --- | --- | ---: | ---: |
+| deploy | launchpad | `0xffb23f546807a097b336e1a024c599afa342f1a49570ddd9d3d6d40ae431c849` | 5,244,473 | 0.131112 |
+| deploy | hook | `0xb45645c8013b14019a6a947dd7e44c52b791ce37871773c895d1ea9355915497` | 2,878,624 | 0.071966 |
+| deploy | router | `0x7e7cda7e65aa084dc8326bb168e0ee78d9717f28502469a777df782197f51170` | 932,047 | 0.023301 |
+| deploy | initialize | `0x01e261754bf42e3d86adfc08eff84599b32fdbe81cdca1ada21713e401c82008` | 78,336 | 0.001958 |
+| deploy | split | `0x63f3aba0de799d4d71972bdfe1e2184f58f0ed182dac01e5008616f08b8a8af6` | 1,040,036 | 0.026001 |
+| deploy | holders | `0x6361f470f391a27816b31c6ff932f2a3c087b6eb6fec211230a89e7de287ab49` | 574,991 | 0.014375 |
+| deploy | combo | `0x1c48f5898241768d610452e7257ef654d9bb0b6129ba8a6826f0d903052bb2cf` | 1,365,727 | 0.034143 |
+| approve | approve the launchpad | `0x685a9ffdcf7e4907da34991430cf7e59b42270eee0942a68e16e4c6b4cb46f9d` | 55,438 | 0.001386 |
+| create:wallet | createToken RARC | `0x29066d054f914ad50f7eb2a4245fd35127efa9f3e950f6a8857e9466033027e7` | 1,626,278 | 0.040657 |
+| create:wallet | buy RARC in the curve's window (1) | `0xe0e55a70759b4f7266cd1096ba46c1d7954ab45dda5e53b4a4e819c9d88cf522` | 206,459 | 0.005161 |
+| curve:wallet | buy RARC on the curve, after its window | `0x324582805f1a51ed4c3bdb43f2ff6c0c9738e3d7a442a0069576c21ac03542d1` | 115,539 | 0.002888 |
+| curve:wallet | sell RARC on the curve (half) | `0x42ede84f9b9b7f288c97f9495b2176e4c66ae4ff34cc4c2b4c021f44fac5862c` | 108,435 | 0.002711 |
+| sellAll:wallet | sell all RARC back to the curve | `0xf1f326fe3148ad8ea9721d76f9a1251c589ed0d16a60224c0781a4e93566fb2b` | 98,835 | 0.002471 |
+| collect:wallet | collectCreatorFees RARC | `0x4a966c020fb8f146cbad0ce7dabe24b5d96ebfef14de31050340079e74b54f6d` | 56,923 | 0.001423 |
+| collectFees | collectFees | `0x977ba47f8e865d62d032fdf3cf9dddec3e075c115ec0a0c7865dbed884c839f9` | 56,110 | 0.001403 |
+
+## The fork dry run (the pre-flight)
+
+Before the live run, the same scripts were proven on a local anvil fork of Arc Testnet. This section is that
+pre-flight's record.
 
 ```bash
 FOUNDRY_PROFILE=v14 forge build
@@ -326,7 +689,7 @@ Four more runs:
   every token sorts on the same side, so the planner ran the scenarios on RWAL alone). It recorded the trade, re-sent
   nothing (82 transactions, 82 distinct) and passed (1,588 checks).
 
-### Results, by step
+### Results, by step (fork)
 
 The final run, at `f9649d4`, from a fork of Arc Testnet at block 64,052,806:
 
@@ -378,7 +741,7 @@ The final run, at `f9649d4`, from a fork of Arc Testnet at block 64,052,806:
 | final | 0 | 48 | 0 | 0 | pass |
 | **total** | **97** | **1,721** | **37,433,189** | **0.935830** | **all pass** |
 
-### What the run showed
+### What the fork run showed
 
 - **Both windows.** All seven curve window buys paid the surcharge at their landed block (8,550 bps one block after the
   launch; RZRO's three at 8,550, 8,100 and 7,650), and `pendingSnipe` moved by exactly that each time. In the pool's
@@ -422,7 +785,7 @@ The final run, at `f9649d4`, from a fork of Arc Testnet at block 64,052,806:
   (4,411,408 units against 4,411,405, and 46,974 against 46,960: `streamRate` is rounded down); each claim paid exactly
   `claimable` at its block; 2 units of dust in RHLD (two holders) and 1 in RCMB at the end.
 
-### Gas per transaction
+### Gas per transaction (fork)
 
 | step | transaction | gas | USDC at 25 gwei |
 | --- | --- | ---: | ---: |
@@ -576,5 +939,6 @@ The final run, at `f9649d4`, from a fork of Arc Testnet at block 64,052,806:
   the fork, anvil mined each batch whole in one block, at 1 and 3 blocks after graduation, and an in-flight kill and
   restart still landed the second batch at 8. The checks use the landed block either way (a late buy must pay no
   surcharge and place no bid), and the final step fails if the above-graduation (cap), crash or lift-back case is
-  missing in either orientation. The batches' minimums assume nobody else trades these pools meanwhile; if someone does, a buy can
-  revert on its minimum, which stops the step (a re-run re-checks what landed).
+  missing in either orientation. Live, the first batches landed 1 to 3 blocks after graduation and the second 5. The
+  batches' minimums assume nobody else trades these pools meanwhile; if someone does, a buy can revert on its minimum,
+  which stops the step (a re-run re-checks what landed).
