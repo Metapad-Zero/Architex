@@ -159,3 +159,90 @@ None.
 - **The real Universal Router bytecode:** I tested V4Router's logic through Uniswap's prebuilt MockV4Router instead.
 - **Uniswap's routing allowlist:** whether it accepts a hook that adds a position inside afterSwap is unknown.
 - **Arc's gas price and block gas limit:** the gas findings are in gas units, not USDC.
+
+---
+
+## Follow-up review of the final fix (39a78b4, 2026-09-25)
+
+The same reviewer re-checked the running lowest window price (`bidRefTick`) and the `lockHeld` change, with 20 more
+PoCs (`contracts-v14/test/review9b`, kept as regression tests). Verdict: no High, Medium or Low.
+
+**What was done about it:** I1 (anyone can push the reference down on purpose, at a cost, with no profit found) is an
+accepted limit in V14-SPEC §10 with its measured costs; I2 (an honest dip sets the level for the rest of the window)
+is in §5; the six spec and NatSpec errors are corrected (snipe-paying buys only move the reference, the §5 pump
+figures, §9's event rule, §10's tick sharing, §12's dust minimums); the rehearsal's model is being updated on its
+branch.
+
+**Verdict:** no High, Medium or Low. I found no way to land a window bid above where its own buyer's dump, or a sandwicher's back-run, ends. The `lockHeld` change keeps the claims equal to `pendingPlatform + pendingCreator + lockHeld` on every path, including both early returns. Two informational notes cover pushing the reference down on purpose and after an honest dip, plus six spec or NatSpec errors.
+
+The PoCs are in `/Users/angusdurrie/Development/arc-dex/.claude/worktrees/v14-review3/contracts-v14/test/review9b/`, untracked and not committed. The worktree is detached at 39a78b4. The full `FOUNDRY_PROFILE=v14 forge test` passes: 167 tests (your 147 plus 20 new).
+
+## What holds
+
+**1. No bid above a buyer's own dump or a back-run** (`RefFuzz.t.sol`; 5,000 runs per USDC sort order).
+- `testFuzz_ownDumpNeverReachesOwnBids`: a trader holding only what he buys makes up to 12 random moves, then sells everything after the window.
+  - The moves are exact-in buys, exact-out buys, price-limited partial fills, dust exact-out buys, partial sells and block steps, over one or two pools.
+  - Some runs start after a dump of up to 600M tokens.
+  - No bid placed during the sequence ever gave up USDC.
+- `testFuzz_aSandwichNeverReachesTheVictimsBid`: one to five front-run buys of any kind, some across blocks. The victim buys through the router (exact in, no minimum out) or exact out, then the back-run sells. Nothing is ever taken.
+- `test_theOwnDumpSequencesPlaceBids` and `test_theSandwichSequencesPlaceBids`: fixed draws place and check 48 and 20 bids, so the fuzzes are not vacuous.
+- **Why it holds:** a bid starts from half the lowest price any window buy that paid a snipe fee has started from.
+  - A trader holding only what he bought can never push the price below where his first buy started.
+  - A sandwicher's first buy starts at the pre-attack market, and the back-run ends above it.
+  - Dust buys whose fee rounds to 0 don't move the reference, but the largest is 34 raw units (0.000034 USDC), so they can't move the price either.
+
+**2. The `lockHeld` books** (`LockHeldSync.t.sol`).
+- `testFuzz_lockHeldMovesByTheSnipeFeeMinusTheBid`: sequences of up to 8 window buys of every kind.
+  - After each buy, `lockHeld` moves by exactly the snipe fee minus `BidLocked.usdc`, the books stay square, and `lockHeld` stays at 2 or less (5,000 runs per order).
+  - In practice nothing is ever left over: 40 varied buys in either sort order kept `lockHeld` at 0.
+- `test_anEmptyRangeBooksTheFeeAndTheBooksStaySquare` and `test_noLiquidityBooksTheFeeAndTheBooksStaySquare` force the two early returns by writing the pool's price and `bidRefTick` into storage. In both, the fee is booked to `lockHeld` and the books stay square.
+- Neither early return is reachable by trading.
+  - An empty range needs a price about 1e22 times cheaper than graduation.
+  - `liquidity == 0` needs a reference pricier than graduation, which it can never be.
+  - If the empty range were ever reached, every later window fee would wait for good, because the reference never moves back.
+
+## Informational
+
+**I1: a deliberate push now lowers every later window bid, in one transaction, with the price restored.** This is the same class as review #7's L2. It is new since 82d410d, where a same-transaction push had no lasting effect.
+
+Cost of a sell, a 0.001 USDC buy and the buy-back, all in one transaction (`RefGrief.t.sol::test_whatLoweringTheReferenceCosts`):
+
+| Block | 82M-token push (reference to 50% of graduation) | 300M-token push (reference to 16%) |
+|---|---|---|
+| 0 | 69,287 USDC | 142,969 USDC |
+| 5 | 15,484 | 31,950 |
+| 10 | 6,105 | 12,597 |
+| 15 | 2,207 | 4,555 |
+| 19 | 418 | 864 |
+
+- **Holding the push across the window instead:** it costs 150 USDC if nobody buys the dip. Two snipers buying 2,000 USDC each during it raise the cost to 24,790, because they buy at a sixth of the price and the griefer pays for it when he buys back.
+- **What it does** (`test_whatLoweringTheReferenceDoesAndWhoGains`): a 300M poison at block 9 costs 15,075 USDC.
+  - Later snipers' bids then start at 7.9% of the market they bought at, instead of 50%.
+  - A 450M-token dump after the window gets 41,956 USDC instead of 44,202.
+  - A buyer of 100M tokens right after that dump saves 1,038 USDC.
+- **Can anyone profit?** I found no one.
+  - That saving is far below the cost.
+  - Dumpers, and a rugging creator, want bids high, not low.
+  - A creator poisoning his own launch loses on his dump more than he saves buying back.
+- **No fix keeps L1 closed.** To stop the chunked refund, the reference has to follow a crash within the same transaction, and a poison is exactly a crash that is undone afterwards. I suggest listing it in §10 with these numbers.
+
+**I2: an honest dip sets the level for the rest of the window** (`test_anHonestDipSetsTheLevelForTheRestOfTheWindow`).
+- Scenario: a 300M-token dump at block 1, a 3,000 USDC buy at block 2, and a 60,000 USDC recovery.
+- A block-10 sniper's bid then starts at 5.6% of the market he bought at. Graduation was 70.6% of that market, so under 82d410d's cap the bid would have started around 35%.
+- §5 already accepts this; the numbers are there for the owner's call.
+
+## Spec and NatSpec errors
+1. **§5:** "27,358 at block 10 and 47,347 at block 19" are option A's numbers. At 39a78b4 they are 27,113 and 47,262, as review9's `WindowHarvest` log shows.
+2. **§5, the interface header, the `bidRefTick` comment and the hook's header** say "the lowest price any window buy has started from". It should be any window buy that paid a snipe fee.
+   - An exact-out buy of up to 34 raw units, whose fee rounds to 0, neither places a bid nor moves the reference.
+   - Worth telling integrators: when USDC is currency0, the lowest price is the highest tick.
+3. **§10:** "bids from buys above graduation all share the graduation bid's ticks" should say buys above the pool's reference. After a dip that is the dip's range, and only a new low opens new ticks.
+4. **§9:** "a window buy emits ModifyLiquidity ... and BidLocked" is true only for a window buy whose snipe fee is not 0.
+5. **§12.3:** "FeesExceedAmount under about 30 raw USDC units in the opening block" is off at higher creator fees.
+   - The largest exact-in buy refused in the opening block is 19 raw units with no creator fee; 29, 39 and 49 at 1%, 3% and 5%; and 252 at 10%.
+   - After the window it is 1, or 2 with any creator fee.
+6. **The `v14-rehearsal` branch (d71e7ba), which has 39a78b4 merged,** still models a window bid from "the cheaper of the price before the buy and the graduation price" (`scripts/v14-rehearsal.ts` lines 1357-1396).
+   - A recovery after an in-window dip would fail its `BidLocked` check.
+   - Its `launchOf` check (line 2033) compares six fields and lacks `bidRefTick`.
+
+The rest of §5 checks out. The griefing figures (85,840, 8,599, 7,835 and 8,307 USDC) are unchanged at 39a78b4, and the sandwich and split-buy claims hold under the fuzzes. I did not remeasure §5's gas table.

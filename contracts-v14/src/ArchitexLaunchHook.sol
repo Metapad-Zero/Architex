@@ -49,7 +49,8 @@ interface IBurnable {
 ///
 /// Bids: snipe fees become USDC-only liquidity below the price the moment they are collected, bids nobody can ever
 /// withdraw. The curve's, at graduation, from half the graduation price down; a pool buy's, inside that buy, from half
-/// the lowest price any window buy has started from (the graduation price to begin with; `bidRefTick`), down. That
+/// the lowest price any window buy that paid a snipe fee has started from (the graduation price to begin with;
+/// `bidRefTick`), down. That
 /// reference only ever moves down, and a buy only moves the price up, so a bid is always wholly below the market when
 /// it is placed and no sequence of buys (split, front-run or spread over blocks) can lift a later bid above where its
 /// own dump ends; after a crash, bids follow the price down. Nothing is held for later but a unit or two of rounding,
@@ -83,7 +84,8 @@ contract ArchitexLaunchHook is BaseHook, IUnlockCallback, IArchitexLaunchHook {
     /// @inheritdoc IArchitexLaunchHook
     uint256 public constant MAX_TOTAL_FEE_BPS = 9900;
     /// @dev A bid starts this many ticks below the price it is placed from (the graduation price, or for a window buy the
-    ///      lowest price any window buy has started from), about half of it: a sniper who dumps the moment the window
+    ///      lowest price any window buy that paid a snipe fee has started from), about half of it: a sniper who dumps the
+    ///      moment the window
     ///      closes is not paid back out of his own surcharge (Argus's F-1), and no bid can be planted above the market.
     int24 public constant BID_DISCOUNT_TICKS = 6932;
     /// @dev A bid runs from its top down about 10,000 times (a multiple of the tick spacing), not to the extreme tick:
@@ -399,7 +401,8 @@ contract ArchitexLaunchHook is BaseHook, IUnlockCallback, IArchitexLaunchHook {
 
         _collect(l.token, f);
         // Only a buy inside the window pays a snipe fee, and its beforeSwap kept the price before it. Its bid starts from
-        // the lowest price any window buy has started from, this one included (the graduation price to begin with): the
+        // the lowest price any window buy that paid a snipe fee has started from, this one included (the graduation price
+        // to begin with): the
         // reference only moves down, so buys that lift the price cannot stack bids above where their dump will end
         // (Claude review #9, L1, and its residual after a crash), and after a crash bids follow the price down.
         if (f.snipe != 0) {
