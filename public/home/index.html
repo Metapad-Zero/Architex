@@ -7,7 +7,10 @@
 // Old share links (architex.fun/#swap, #pools/..., #launch/...) and home-screen installs made before the move open it.
 (function(){var own=['top','about','features','why','product','ecosystem','mission','technology','contracts'];
 function app(){var h=location.hash.slice(1);return h&&own.indexOf(h)<0}
-if(app()||navigator.standalone===true||matchMedia('(display-mode: standalone)').matches){location.replace('/app/'+location.search+(app()?location.hash:''));return}
+// Anyone who has used the app in this browser (a saved wallet, a connection, a recent trade) goes straight back to it.
+// architex.fun/?home shows the landing regardless.
+function returning(){if(location.pathname!=='/'||/(^|[?&])home\b/.test(location.search))return false;try{for(var i=0;i<localStorage.length;i++){var k=localStorage.key(i)||'';if((k.indexOf('architex.')===0&&k.indexOf('architex.home.')!==0)||k==='wagmi.recentConnectorId')return true}}catch(e){}return false}
+if(app()||returning()||navigator.standalone===true||matchMedia('(display-mode: standalone)').matches){location.replace('/app/'+location.search+(app()?location.hash:''));return}
 addEventListener('hashchange',function(){if(app())location.replace('/app/'+location.search+location.hash)});
 var t=null;try{t=localStorage.getItem('architex.home.theme')}catch(e){}if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);
 document.documentElement.classList.add('js');

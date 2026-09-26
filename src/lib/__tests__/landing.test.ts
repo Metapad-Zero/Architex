@@ -24,10 +24,14 @@ const FORWARDER = LANDING.match(/<script>([\s\S]*?)<\/script>/)?.[1] ?? ''
  * Where the forwarder sends a visitor, or undefined when the landing stays. `later` is a hash put in the address bar
  * once the landing is open: the browser fires hashchange for that and does not load the page again.
  */
-function forward(hash: string, opts: { search?: string; ios?: boolean; installed?: boolean; later?: string } = {}): string | undefined {
+function forward(
+  hash: string,
+  opts: { search?: string; ios?: boolean; installed?: boolean; later?: string; pathname?: string; stored?: string[] } = {},
+): string | undefined {
   let target: string | undefined
   const listeners: Array<() => void> = []
-  const location = { hash, search: opts.search ?? '', replace: (url: string) => { target = url } }
+  const location = { hash, search: opts.search ?? '', pathname: opts.pathname ?? '/', replace: (url: string) => { target = url } }
+  const stored = opts.stored ?? []
   const root = { setAttribute() {}, classList: { add() {} } }
   runInNewContext(FORWARDER, {
     location,
@@ -36,7 +40,7 @@ function forward(hash: string, opts: { search?: string; ios?: boolean; installed
     addEventListener: (type: string, listener: () => void) => {
       if (type === 'hashchange') listeners.push(listener)
     },
-    localStorage: { getItem: () => null },
+    localStorage: { getItem: () => null, length: stored.length, key: (i: number) => stored[i] ?? null },
     document: { documentElement: root, querySelectorAll: () => [] },
     setTimeout: () => 0,
   })
@@ -93,5 +97,19 @@ describe('landing page', () => {
     expect(forward('', { ios: true })).toBe('/app/')
     expect(forward('#about', { installed: true })).toBe('/app/')
     expect(forward('#pools', { ios: true })).toBe('/app/#pools')
+  })
+
+  test('anyone who has used the app in this browser goes straight back to it', () => {
+    expect(forward('', { stored: ['architex.wallet.keystore'] })).toBe('/app/')
+    expect(forward('', { stored: ['wagmi.recentConnectorId'] })).toBe('/app/')
+    expect(forward('', { stored: ['architex.recent.5042'] })).toBe('/app/')
+    expect(forward('#pools', { stored: ['architex.lastPair'] })).toBe('/app/#pools')
+  })
+
+  test('the landing stays for new visitors, its own settings, ?home, and outside the root', () => {
+    expect(forward('', { stored: ['architex.home.theme', 'something.else'] })).toBe(undefined)
+    expect(forward('', { stored: ['architex.wallet.keystore'], search: '?home' })).toBe(undefined)
+    expect(forward('#about', { stored: ['architex.wallet.keystore'], search: '?home' })).toBe(undefined)
+    expect(forward('', { stored: ['architex.wallet.keystore'], pathname: '/home/' })).toBe(undefined)
   })
 })
