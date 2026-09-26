@@ -12,6 +12,7 @@ import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {ArchitexLaunchpadV14} from "../src/ArchitexLaunchpadV14.sol";
 import {ArchitexLaunchHook} from "../src/ArchitexLaunchHook.sol";
 import {ArchitexV4Router} from "../src/ArchitexV4Router.sol";
+import {IArchitexLaunchHook} from "../src/interfaces/IArchitexLaunchHook.sol";
 import {MockUSDC} from "./utils/MockUSDC.sol";
 import {RawSwapper, V14Base} from "./V14Base.sol";
 
@@ -32,6 +33,8 @@ contract V14Handler is Test {
     uint256 public donations;
     /// @dev Bids placed anywhere but wholly under the market (checked on every buy's BidLocked).
     uint256 public bidsAboveMarket;
+    /// @dev Bids whose top is above half the graduation price.
+    uint256 public bidsAboveHalfGraduation;
     uint256 public bidsPlaced;
 
     constructor(
@@ -152,7 +155,10 @@ contract V14Handler is Test {
                 tick := signextend(2, shr(160, slot0))
             }
             ++bidsPlaced;
-            if (address(usdc) < t ? tick >= lower : tick < upper) ++bidsAboveMarket;
+            bool u0 = address(usdc) < t;
+            if (u0 ? tick >= lower : tick < upper) ++bidsAboveMarket;
+            (, IArchitexLaunchHook.Launch memory l) = hook.launchOf(t);
+            if (u0 ? lower < l.graduationTick + 6932 : upper > l.graduationTick - 6932) ++bidsAboveHalfGraduation;
         }
     }
 
@@ -235,6 +241,7 @@ contract LaunchpadV14InvariantTest is V14Base {
             assertLe(hook.lockHeld(handler.tokens(i)), 2, "snipe fees waiting");
         }
         assertEq(handler.bidsAboveMarket(), 0, "a bid placed above the market");
+        assertEq(handler.bidsAboveHalfGraduation(), 0, "a bid starting above half the graduation price");
         assertEq(handler.donations(), 0, "a donation landed");
     }
 
