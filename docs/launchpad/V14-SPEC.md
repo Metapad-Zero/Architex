@@ -85,7 +85,7 @@ the BUSL `Position.sol`, so the hook reads the pool's price with its own copy of
     the launchpad and return the amounts, which the launchpad books in the same places v1.3's launch router did
     (`pendingFees`, `pendingCreatorFees`). `collectCreatorFees` syncs first, so collection and every plugin work
     unchanged. Until a sync, the hook's `pendingPlatform(token)` and `pendingCreator(token)` show what it holds;
-  - during the opening window (§5) it also takes the surcharge, held as claims too;
+  - during the opening window (§5) a buy also pays the surcharge, which the same `afterSwap` turns into a bid (§5);
   - a swap that a price limit stops early is refused when the fees were fixed on the trader's own USDC, so nobody pays
     fees on USDC the pool did not take or give (`PartialFill`).
 - **LP fee [proposed]:** 0 for closed pools, as in v1.3's launch pools; the trading cost is the platform and creator
@@ -102,7 +102,7 @@ the BUSL `Position.sol`, so the hook reads the pool's price with its own copy of
   2. adds the graduation liquidity: the 200M pool tokens and the USDC the curve raised, as one full-range position
      owned by the hook, locked forever (v1.3 minted the LP to the burn address instead);
   3. turns the curve's anti-snipe collection (§5), with any USDC the full-range position could not take, into the
-     hook's claims and locks it as the token's first bid;
+     token's first bid, from half the graduation price down;
   4. burns any tokens rounding leaves over, as v1.3 does.
 - **LaunchToken v1.4:** excludes the PoolManager from dividends (v4 holds every pool's tokens there) instead of the
   launch pair; everything else in V13-SPEC §3 carries over. Transfers into the PoolManager before graduation are
@@ -119,23 +119,32 @@ the BUSL `Position.sol`, so the hook reads the pool's price with its own copy of
   **[proposed]**. It has no size limit: a creator (or a bot that launches) can buy the whole curve surcharge-free in
   the launch transaction, about 25,126 USDC, and graduate it there; every buyer after pays the pool's 90% in that block
   (Claude review #7, informational).
-- **Where it goes [decided]: locked into the pool.**
-  - In the pool: the hook holds it as claims and anyone can call `lock(token)` to add it as locked liquidity: a
-    USDC-only position of its own (a fresh salt for every bid, never re-added to) whose top is **half** the graduation
-    price and which runs about 10,000 times lower (`BID_SPAN_TICKS`, 92,200 ticks), a bid nobody can ever withdraw.
-    It is anchored to the graduation price alone, so pushing the price before a `lock` cannot move it; while the price
-    is under the bid's top, `lock` places nothing and the USDC waits as claims. Adding it needs no swap, so there is
-    nothing to sandwich (the Deepen pool review's lesson), and it never reaches the extreme tick the full-range
-    position uses, so no outside LP can fill that tick to hold it off.
+- **Where it goes [decided]: locked into the pool, the moment it is paid [owner's choice, 2026-09-25].**
+  - In the pool: the buy that pays the surcharge also places it, inside the same swap (`afterSwap`), as locked
+    liquidity: a USDC-only position of its own (a fresh salt for every bid, never re-added to) whose top is **half the
+    price just before that buy** and which runs about 10,000 times lower (`BID_SPAN_TICKS`, 92,200 ticks), a bid nobody
+    can ever withdraw. Nothing waits and there is no separate lock step. A buy only moves the price up, so the bid is
+    always wholly under the market when it is placed. Adding it needs no swap, so there is nothing to sandwich (the
+    Deepen pool review's lesson), and it never reaches the extreme tick the full-range position uses, so no outside LP
+    can fill that tick to block it (which would now block the buy itself).
+  - Moving where a bid lands means trading inside the window. Pushing the price down before someone's buy has to be
+    undone with a buy that pays the surcharge (review #8's scenario: about 86,000 USDC to undo, against 8,300 after the
+    window). Planting one above the market means pumping with surcharged buys first (50,000 USDC put in that way came
+    back as 4,726). After the window no bid can be added or moved at all.
+  - Why not a separate `lock`: v1.4 first had one, anchored to the graduation price so a push could not move the bid
+    (Claude review #7, L2). After a crash the claims then waited, and anyone could push the price over the bid's top,
+    lock, and sell into a bid above the market: up to 30% of the waiting fees in one transaction (Claude review #8).
   - The discount is why a sniper who dumps the moment the window closes is not paid back out of his own surcharge
     (Argus found that sending snipe fees to holders refunded snipers 27 to 90%). One who holds through graduation and
     then dumps into the pool does get part back from the bid it became: measured (Claude review #7), nothing at a
     5,000 USDC snipe, 4.8% of the surcharge at 20,000 and 13.8% at 100,000.
-  - On the curve there is no pool yet: the launchpad holds it for the token (`pendingSnipe`) and the hook locks it in at
-    graduation, the same way, at the graduation price. If a curve never graduates it stays in the launchpad for good
-    (the default the owner did not change). The curve's parameters stay identical for every token; like the other fees,
-    the snipe fee comes off a buy before the rest moves the curve, so a buy inside the window moves the price less than
-    the same gross buy after it.
+  - On the curve there is no pool yet: the launchpad holds it for the token (`pendingSnipe`) and the hook places it at
+    graduation, the same way, from half the graduation price. If a curve never graduates it stays in the launchpad for
+    good (the default the owner did not change). The curve's parameters stay identical for every token; like the other
+    fees, the snipe fee comes off a buy before the rest moves the curve, so a buy inside the window moves the price
+    less than the same gross buy after it.
+  - Cost: a buy inside the pool's window also adds a position, about 80,000 more gas than the same buy after the
+    window (measured; the pool's first adds a little more for new ticks), a fraction of a cent on Arc.
 
 ## 6. Open or closed pools [decided: D3]
 
@@ -182,16 +191,15 @@ the BUSL `Position.sol`, so the hook reads the pool's price with its own copy of
 - **Pool fees wait for a sync.** The launchpad's `pendingFees` and `pendingCreatorFees` count a pool's fees only once
   synced; until then the hook's `pendingPlatform` and `pendingCreator` hold them. `collectCreatorFees` syncs first;
   `collectFees` does not, so the platform syncs its tokens (`syncPoolFeesBatch`) before collecting.
-- **Snipe fees wait while the price is under the bid's top.** If a token trades below half its graduation price,
-  `lock` places nothing and the USDC stays as the hook's claims until the price comes back, for good if it never does.
-  Nobody can withdraw it either way. Placing the bid lower instead would let anyone move it by pushing the price first
-  (Claude review #7, L2).
-- **Nothing that unlocks runs inside someone else's unlock.** A graduating buy, `lock` and `syncPoolFees` revert
-  `AlreadyUnlocked` when called from inside a v4 unlock; `collectCreatorFees` then skips the sync and pays what the
-  launchpad already holds.
-- **A USDC blocklist.** Circle can blocklist any address. On the launchpad it stops only payouts: pools keep trading
-  and their fees wait as the hook's claims. On the hook it stops graduations (the hook passes the curve's USDC into the
-  pool), while the curve keeps trading both ways.
+- **Rounding dust.** A bid takes all but a unit or two of what it is given; the rest joins the next bid, and after
+  the window's last buy it stays with the hook for good.
+- **Nothing that unlocks runs inside someone else's unlock.** A graduating buy (a `createToken` whose first buy
+  graduates included), `syncPoolFees` and `syncPoolFeesBatch` revert `AlreadyUnlocked` when called from inside a v4
+  unlock; `collectCreatorFees` then skips the sync and pays what the launchpad already holds.
+- **A USDC blocklist.** Circle can blocklist any address. On the launchpad it stops everything that moves USDC through
+  the launchpad: curve buys and sells, graduations, launches that pay a launch fee, syncs and payouts. Graduated pools
+  keep trading, and their fees wait as the hook's claims. On the hook it stops only graduations (the hook passes the
+  curve's USDC into the pool); the curve keeps trading both ways.
 - **Sells need no approval.** The router pulls a seller's tokens through the token itself, always from its own caller
   (v1.3's launch router did the same). A contract that holds launch tokens and relays arbitrary calls to targets other
   than the token can be made to sell them through the router; wallets and ordinary contracts cannot.
@@ -207,13 +215,16 @@ The v1.3 bar: unit, fuzz and invariant tests against a real v4 PoolManager; end-
 graduation; adversarial reviews (Claude lenses and Grok) until no High is open; an Arc Testnet rehearsal; the owner
 deploys to mainnet; then the Uniswap routing allowlist submission with a live pool. New invariants to add to V13-SPEC
 §6: the hook never lets a swap skip the fees; the locked positions can never shrink; only the launchpad can create a
-pool with the hook; a closed pool's liquidity only ever grows; the hook holds no USDC and its claims are exactly what
-it owes (pool fees not yet synced, USDC waiting for a bid); `lock` never reverts once there is something to lock; no
+pool with the hook; a closed pool's liquidity only ever grows; the hook holds no USDC and its claims are at least what
+it owes (pool fees not yet synced, a bid's rounding; anyone can add claims to the hook, which then stay there); snipe
+fees never wait (at most a unit or two per token is ever held); every bid is placed wholly under the market; no
 donation ever lands.
 
-Reviews so far: Grok #7 (`GROK-REVIEW-7.md`: no High; the router fix, the spec corrections) and Claude #7
-(`CLAUDE-REVIEW-7.md`: no High; one Medium and two Lows, all fixed, their PoCs kept as regression tests in
-`contracts-v14/test/review7`).
+Reviews so far: Grok #7 (`GROK-REVIEW-7.md`: no High; the router fix, the spec corrections), Claude #7
+(`CLAUDE-REVIEW-7.md`: no High; one Medium and two Lows, all fixed), Grok #8 (`GROK-REVIEW-8.md`: no findings) and
+Claude #8 (`CLAUDE-REVIEW-8.md`: no High; one Medium, fixed by placing snipe fees inside the buy that pays them). The
+reviews' PoCs are kept as regression tests in `contracts-v14/test/review7` and `contracts-v14/test/review8`. The Arc
+Testnet rehearsal is `V14-REHEARSAL.md`.
 
 ## 12. Still open
 

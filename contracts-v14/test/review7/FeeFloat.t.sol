@@ -14,14 +14,15 @@ abstract contract FeeFloatTest is ReviewBase {
         uint256 float = usdc.balanceOf(POOL_MANAGER); // this pool's USDC only, as on a thin PoolManager
         uint256 usdcIn = 30_000e6;
         assertGt(_ceil(usdcIn * 9_050, 1e4), float, "the fees exceed every USDC the PoolManager holds");
-        uint256 held0 = hook.lockHeld(token);
+        uint256 bids0 = hook.bidCount(token);
 
         vm.prank(carol);
         uint256 got = router.buy(token, usdcIn, 0, carol, MAX);
 
         assertGt(got, 0, "filled");
         assertEq(usdc.balanceOf(POOL_MANAGER), float + usdcIn, "the whole buy is in the PoolManager");
-        assertEq(hook.lockHeld(token) - held0, _ceil(usdcIn * 9_000, 1e4), "the surcharge, held as claims");
+        assertEq(hook.bidCount(token), bids0 + 1, "the surcharge, a bid inside the buy");
+        assertLe(hook.lockHeld(token), 2, "nothing waits");
         assertEq(hook.pendingPlatform(token), _ceil(usdcIn * 50, 1e4), "the platform fee, held as claims");
         _assertHookClean(token);
         _assertSolvent();

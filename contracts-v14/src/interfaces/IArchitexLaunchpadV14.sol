@@ -203,8 +203,9 @@ interface IArchitexLaunchpadV14 is IArchitexLaunchpadLite {
     /// @notice Permissionless: pays `token`'s accrued creator fees to its plugin (V13-SPEC §2.1). A plugin that declared
     ///         IArchitexFeePlugin at launch (Curve.pluginHooks) gets an exact allowance and onFees, and must pull
     ///         exactly the amount; any other address gets a plain transfer. If this reverts, the fees stay accrued.
-    ///         onFees runs inside the launchpad's reentrancy guard: a plugin cannot buy, sell (on the curve or through
-    ///         the launch router) or collect from inside it, so buybacks must be separate calls.
+    ///         onFees runs inside the launchpad's reentrancy guard: a plugin cannot buy or sell on the curve, sync or
+    ///         collect from inside it. Pool trades (through the v4 router or the PoolManager) do work there, since a
+    ///         pool swap never calls the launchpad; the exact-pull check still holds.
     function collectCreatorFees(address token) external returns (uint256 amount);
     /// @notice Permissionless: has the hook release `token`'s pool fees (held as its claims in the PoolManager, so no
     ///         swap ever moves USDC) to the launchpad and books them: platform fees to `pendingFees`, creator fees to

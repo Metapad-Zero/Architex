@@ -42,9 +42,16 @@ interface IBurnable {
 ///   ceil(net * r / (1e4 - r)) with r the total bps, and the total splits platform first, creator next, the snipe fee
 ///   last, each rounded up and capped by what is left (v1.3's exact-fill split).
 ///   afterSwap keeps every fee in the PoolManager as the hook's ERC-6909 USDC claims (mint), credited to the token:
-///   platform and creator fees until the launchpad releases them (`release`), the snipe fee until `lock` puts it in
-///   the pool. A swap never moves USDC and never calls anything but the PoolManager, so it works whatever the
-///   PoolManager's USDC float, whenever the buyer's router settles, and whatever happens to the launchpad's address.
+///   platform and creator fees until the launchpad releases them (`release`). A buy's snipe fee does not wait: the same
+///   afterSwap turns it into a bid (below). A swap never moves USDC and never calls anything but the PoolManager, so it
+///   works whatever the PoolManager's USDC float, whenever the buyer's router settles, and whatever happens to the
+///   launchpad's address.
+///
+/// Bids: snipe fees become USDC-only liquidity below the price the moment they are collected, bids nobody can ever
+/// withdraw. The curve's, at graduation, from half the graduation price down; a pool buy's, inside that buy, from half
+/// the price just before it down. A buy only moves the price up, so a bid is always wholly below the market when it is
+/// placed, and moving where one lands means trading inside the snipe window, where every buy pays the surcharge.
+/// Nothing is held for later but a unit or two of rounding, which joins the next bid.
 ///
 /// Positions: the graduation position is full range (salt 0); every bid gets a fresh salt, so a later bid never
 /// touches an older position. Nobody may donate (a donation accrues fees to in-range positions, and a position that
@@ -73,9 +80,10 @@ contract ArchitexLaunchHook is BaseHook, IUnlockCallback, IArchitexLaunchHook {
     uint256 public constant SNIPE_START_BPS = 9000;
     /// @inheritdoc IArchitexLaunchHook
     uint256 public constant MAX_TOTAL_FEE_BPS = 9900;
-    /// @dev A locked bid starts this many ticks below the reference price, about half of it: a sniper who dumps the
-    ///      moment the window closes is not paid back out of his own surcharge (Argus's F-1), and pushing the price
-    ///      before a `lock` cannot move the bid anywhere worth selling into.
+    /// @dev A bid starts this many ticks below the price it is placed from (the price just before the buy that paid it,
+    ///      or the graduation price), about half of it: a sniper who dumps the moment the window closes is not paid back
+    ///      out of his own surcharge (Argus's F-1), and planting a bid above the market would take doubling the price
+    ///      first, inside the window, where every buy pays the surcharge.
     int24 public constant BID_DISCOUNT_TICKS = 6932;
     /// @dev A bid runs from its top down about 10,000 times (a multiple of the tick spacing), not to the extreme tick:
     ///      the extreme tick is shared with the full-range position, and an outside LP in an open pool could fill its
@@ -85,8 +93,7 @@ contract ArchitexLaunchHook is BaseHook, IUnlockCallback, IArchitexLaunchHook {
 
     uint256 private constant _BPS = 10_000;
     uint8 private constant _OP_GRADUATE = 1;
-    uint8 private constant _OP_LOCK = 2;
-    uint8 private constant _OP_RELEASE = 3;
+    uint8 private constant _OP_RELEASE = 2;
 
     /// @inheritdoc IArchitexLaunchHook
     address public immutable launchpad;
@@ -102,6 +109,9 @@ contract ArchitexLaunchHook is BaseHook, IUnlockCallback, IArchitexLaunchHook {
     mapping(address token => uint256) public pendingCreator;
     /// @inheritdoc IArchitexLaunchHook
     mapping(address token => uint256) public bidCount;
+    /// @dev The pool's tick before the swap in progress, when that swap is a buy inside the snipe window: set in
+    ///      beforeSwap, read in afterSwap, where the buy's snipe fee becomes a bid placed from this price.
+    int24 private transient _tickBeforeBuy;
 
     struct Fees {
         uint256 platform;
@@ -163,13 +173,6 @@ contract ArchitexLaunchHook is BaseHook, IUnlockCallback, IArchitexLaunchHook {
     }
 
     /// @inheritdoc IArchitexLaunchHook
-    function lock(address token) external returns (uint128 liquidity) {
-        if (_launches[_keyFor(token).toId()].token == address(0)) revert UnknownLaunch();
-        if (lockHeld[token] == 0) revert NothingToLock();
-        liquidity = abi.decode(poolManager.unlock(abi.encode(_OP_LOCK, token, 0, 0, 0)), (uint128));
-    }
-
-    /// @inheritdoc IArchitexLaunchHook
     function release(address token) external returns (uint256 platformFee, uint256 creatorFee) {
         if (msg.sender != launchpad) revert OnlyLaunchpad();
         platformFee = pendingPlatform[token];
@@ -181,12 +184,11 @@ contract ArchitexLaunchHook is BaseHook, IUnlockCallback, IArchitexLaunchHook {
         poolManager.unlock(abi.encode(_OP_RELEASE, token, platformFee + creatorFee, 0, 0));
     }
 
-    /// @notice The PoolManager's callback for `graduate`, `lock` and `release`, which run inside its unlock.
+    /// @notice The PoolManager's callback for `graduate` and `release`, which run inside its unlock.
     function unlockCallback(bytes calldata data) external onlyPoolManager returns (bytes memory) {
         (uint8 op, address token, uint256 a, uint256 b, uint256 c) =
             abi.decode(data, (uint8, address, uint256, uint256, uint256));
         if (op == _OP_GRADUATE) return abi.encode(_openPool(token, a, b, c));
-        if (op == _OP_LOCK) return abi.encode(_lockBid(token));
         // Release: turn `a` of the hook's claims back into USDC, paid to the launchpad.
         poolManager.burn(address(this), _usdcId(), a);
         poolManager.take(Currency.wrap(usdc), launchpad, a);
@@ -226,33 +228,34 @@ contract ArchitexLaunchHook is BaseHook, IUnlockCallback, IArchitexLaunchHook {
         (uint256 tokensUsed, uint256 usdcUsed) = l.usdcIs0 ? (used1, used0) : (used0, used1);
         emit PoolOpened(token, poolId, sqrtPriceX96, tokensUsed, usdcUsed, liquidity, l.open);
         if (tokenAmount > tokensUsed) IBurnable(token).burn(tokenAmount - tokensUsed);
-        // Everything else becomes claims, then the bid: the curve's snipe fees and whatever USDC the position left.
+        // Everything else becomes claims, then the first bid, from half the graduation price down: the curve's snipe
+        // fees and whatever USDC the position left.
         uint256 toLock = lockAmount + (usdcAmount - usdcUsed);
         if (toLock != 0) {
             _pay(Currency.wrap(usdc), toLock);
             poolManager.mint(address(this), _usdcId(), toLock);
             lockHeld[token] += toLock;
-            _lockBid(token);
+            _placeBid(_launches[poolId], key, l.graduationTick);
         }
     }
 
-    /// @dev Adds the USDC claims held for `token` as a fresh position (its own salt) that holds only USDC: from half the
-    ///      graduation price down about 10,000 times. Paid by burning claims. Does nothing while the price is below the
-    ///      bid's top (the range would not be one-sided): the claims wait. Anything the position cannot take stays held.
-    function _lockBid(address token) private returns (uint128 liquidity) {
+    /// @dev Adds all the USDC claims held for `l.token` as a fresh position (its own salt) holding only USDC, from half the
+    ///      price at `refTick` down BID_SPAN_TICKS, paid by burning claims. Called with the graduation price (at
+    ///      graduation) and with the price just before a buy (inside that buy, which has since moved the price up), so the
+    ///      range is always wholly on the USDC side of the current price. What the position cannot take (a unit or two of
+    ///      rounding) stays held and joins the next bid.
+    function _placeBid(Launch memory l, PoolKey memory key, int24 refTick) private {
+        address token = l.token;
         uint256 amount = lockHeld[token];
-        if (amount == 0) return 0;
-        PoolKey memory key = _keyFor(token);
-        Launch memory l = _launches[key.toId()];
-        (, int24 tick) = PoolState.getSlot0(poolManager, key.toId());
-        (int24 lower, int24 upper, bool ok) = _bidRange(l, tick);
-        if (!ok) return 0;
+        (int24 lower, int24 upper) = _bidRange(l.usdcIs0, refTick);
+        // Empty only for a reference within a discount of the extreme tick, which no curve's pool can reach.
+        if (lower >= upper) return;
         uint160 sqrtA = TickMath.getSqrtPriceAtTick(lower);
         uint160 sqrtB = TickMath.getSqrtPriceAtTick(upper);
-        liquidity = l.usdcIs0
+        uint128 liquidity = l.usdcIs0
             ? LiquidityAmounts.getLiquidityForAmount0(sqrtA, sqrtB, amount)
             : LiquidityAmounts.getLiquidityForAmount1(sqrtA, sqrtB, amount);
-        if (liquidity == 0) return 0;
+        if (liquidity == 0) return;
         uint256 salt = ++bidCount[token];
         (BalanceDelta added,) = poolManager.modifyLiquidity(
             key,
@@ -269,21 +272,19 @@ contract ArchitexLaunchHook is BaseHook, IUnlockCallback, IArchitexLaunchHook {
         emit BidLocked(token, used, liquidity, lower, upper);
     }
 
-    /// @dev The range of a bid, anchored to the graduation price so nobody can move it by pushing the price first: its
-    ///      top about half the graduation price, its bottom about 10,000 times lower. `ok` only while the whole range is
-    ///      on the USDC side of the current price. With USDC as currency0 a higher tick is a cheaper token and a range
-    ///      above the current tick holds only currency0; with USDC as currency1 it is the other way round.
-    function _bidRange(Launch memory l, int24 tick) private pure returns (int24 lower, int24 upper, bool ok) {
-        int24 minTick = TickMath.minUsableTick(TICK_SPACING);
-        int24 maxTick = TickMath.maxUsableTick(TICK_SPACING);
-        if (l.usdcIs0) {
-            lower = _ceilTick(int256(l.graduationTick) + BID_DISCOUNT_TICKS + 1);
+    /// @dev A bid's range: its top about half the price at `refTick` (BID_DISCOUNT_TICKS past it, rounded away from the
+    ///      price onto the tick spacing), its bottom BID_SPAN_TICKS further, clamped to the usable ticks. With USDC as
+    ///      currency0 a higher tick is a cheaper token and a range above the current tick holds only currency0; with
+    ///      USDC as currency1 it is the other way round.
+    function _bidRange(bool usdcIs0, int24 refTick) private pure returns (int24 lower, int24 upper) {
+        if (usdcIs0) {
+            int24 maxTick = TickMath.maxUsableTick(TICK_SPACING);
+            lower = _ceilTick(int256(refTick) + BID_DISCOUNT_TICKS + 1);
             upper = lower + BID_SPAN_TICKS > maxTick ? maxTick : lower + BID_SPAN_TICKS;
-            ok = tick < lower && lower < upper;
         } else {
-            upper = _floorTick(int256(l.graduationTick) - BID_DISCOUNT_TICKS);
+            int24 minTick = TickMath.minUsableTick(TICK_SPACING);
+            upper = _floorTick(int256(refTick) - BID_DISCOUNT_TICKS);
             lower = upper - BID_SPAN_TICKS < minTick ? minTick : upper - BID_SPAN_TICKS;
-            ok = tick >= upper && lower < upper;
         }
     }
 
@@ -319,12 +320,16 @@ contract ArchitexLaunchHook is BaseHook, IUnlockCallback, IArchitexLaunchHook {
 
     function _beforeSwap(address, PoolKey calldata key, SwapParams calldata params, bytes calldata)
         internal
-        view
         override
         returns (bytes4, BeforeSwapDelta, uint24)
     {
         Launch memory l = _launch(key);
         bool isBuy = params.zeroForOne == l.usdcIs0;
+        // A buy inside the window pays a snipe fee that afterSwap turns into a bid from the price before this buy.
+        if (isBuy && _snipeBps(l) != 0) {
+            (, int24 tick) = PoolState.getSlot0(poolManager, key.toId());
+            _tickBeforeBuy = tick;
+        }
         bool exactIn = params.amountSpecified < 0;
         if (exactIn != isBuy) return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
         Fees memory f = _specifiedFees(l, isBuy, params.amountSpecified);
@@ -374,6 +379,8 @@ contract ArchitexLaunchHook is BaseHook, IUnlockCallback, IArchitexLaunchHook {
         }
 
         _collect(l.token, f);
+        // Only a buy inside the window pays a snipe fee, and its beforeSwap kept the price before it.
+        if (f.snipe != 0) _placeBid(l, key, _tickBeforeBuy);
         emit PoolTrade(
             l.token,
             sender,
