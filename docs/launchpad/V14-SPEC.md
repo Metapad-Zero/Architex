@@ -159,20 +159,21 @@ the BUSL `Position.sol`, so the hook reads the pool's price with its own copy of
     fees, the snipe fee comes off a buy before the rest moves the curve, so a buy inside the window moves the price
     less than the same gross buy after it.
   - Cost: a buy inside the pool's window also adds a position. Measured through Uniswap's V4Router against the same
-    buy after the window (integration review #9b; receipt gas, then the gas limit the transaction needs):
+    buy after the window (integration review #9b, at 39a78b4; receipt gas, then the gas limit the transaction needs):
 
     | The bid lands on | Receipt | Gas limit |
     | --- | --- | --- |
-    | ticks an earlier bid opened (the usual case now that bids share the pool's reference) | +78k | +101k |
-    | new ticks | +121k to +124k | +146k to +149k |
-    | new ticks and a new tick-bitmap word | +139k to +142k | +164k to +167k |
-    | the pool's first bid | +170k to +173k | +196k to +199k |
+    | the pool's reference ticks, opened by an earlier bid (the usual case: bids share the reference) | +78k to +79k | +81k |
+    | new ticks (only when the buy starts at a new low, which also moves the reference) | +125k to +128k | +129k to +132k |
+    | the pool's first bid | +170k to +173k | +175k to +178k |
 
-    A fraction of a cent on Arc either way. Because it depends on tick state other trades change (a new low opens new
-    ticks), a gas estimate taken a moment earlier can come up short: while `snipeBpsOf(token) > 0`, integrators should
-    re-estimate right before sending with at least 30% headroom (or +200k), never size a limit from an earlier window
-    buy's receipt, and expect a sell just before their buy to add up to about 60k. `lockHeld` is written only when the
-    rounding it holds changes, so a window buy carries no storage write-and-refund on top.
+    A fraction of a cent on Arc either way. Another buy landing first no longer changes what a window buy needs; a
+    sell to a new low landing first can add about 48k to 51k (about 20%). So while `snipeBpsOf(token) > 0`,
+    integrators should re-estimate right before sending with at least 25% headroom (the site uses 30%, or +200k) and
+    never size a limit from an earlier window buy's receipt. `lockHeld` is written only when the rounding it holds
+    changes, so a window buy carries no storage write-and-refund; a new tick-bitmap word cannot be reached inside a
+    window (the nearest is about 36 times below the graduation price, and selling every remaining token moves it about
+    25 times).
   - A pool can end up with many bids (one per window buy). Nothing iterates over them; Deepen pool v1.4's cap must be
     a running total of the USDC in the hook's locked positions, never a loop over bids.
 
