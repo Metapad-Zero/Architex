@@ -54,7 +54,7 @@ abstract contract WindowBuyFlowsTest is Review9Base {
     }
 
     /// @dev The one bid in `logs` sits where the hook puts a window buy's bid made from `pre`: from the cheaper of `pre`
-    ///      and the graduation tick (review #9's L1 fix).
+    ///      and the pool's reference, the lowest price any window buy has started from (graduation's to begin with).
     function _assertRange(address token, Vm.Log[] memory logs, int24 pre) internal view {
         Bid[] memory bids = _bidsIn(logs, token);
         assertEq(bids.length, 1, "one bid");

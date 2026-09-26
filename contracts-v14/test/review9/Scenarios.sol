@@ -139,7 +139,8 @@ abstract contract Scenarios is Review9Base {
     function _grief(uint256 blocksIn, uint256 undoAfter) internal returns (uint256 cost, uint256 topBps) {
         uint256 snap = vm.snapshotState();
         address token = _open(0, blocksIn);
-        (, int24 honestRef) = _slot0(token);
+        (, int24 tick0) = _slot0(token);
+        int24 honestRef = _cheaper(_usdcIs0(token), tick0, _refOf(token)); // where an unpushed buy's bid would start
         vm.prank(bob);
         IERC20(token).transfer(address(raw), 100_000_000e18);
         uint256 usdc0 = usdc.balanceOf(address(raw));
@@ -155,10 +156,10 @@ abstract contract Scenarios is Review9Base {
         vm.revertToState(snap);
     }
 
-    /// @dev A bid's top over the top an unpushed buy from `honestRef` would have had, in USDC per token (bps).
+    /// @dev A bid's top over the top a bid placed from `honestRef` would have had, in USDC per token (bps).
     function _topRatioBps(address token, Bid memory bid, int24 honestRef) internal view returns (uint256) {
         bool u0 = _usdcIs0(token);
-        (int24 lo, int24 hi) = _expectedRange(token, honestRef);
+        (int24 lo, int24 hi) = _rangeFrom(u0, honestRef);
         int256 d = u0 ? int256(lo) - bid.lower : int256(bid.upper) - hi; // <= 0: the pushed top is not higher
         uint256 r = uint256(TickMath.getSqrtPriceAtTick(int24(d)));
         return FullMath.mulDiv(r * r, 1e4, 1 << 192);

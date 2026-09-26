@@ -13,16 +13,15 @@ import {Scenarios} from "./Scenarios.sol";
 ///         - 20,000 USDC: nothing back; 50,000: 2% (block 10) to 9% (block 19); 100,000: 8% to 23%; 250,000: 24% to 47%;
 ///         - 1,000,000 in 50 buys: 33% (block 5), 53% (block 10), 67% (block 15), 76% (block 19); at block 10 that was
 ///           238,626 USDC more back (780,900 against 542,274).
-///         Since the fix (82d410d) a window bid starts from the cheaper of the pre-buy price and the graduation price,
-///         so no bid starts above half the graduation price. With the market at or above half the graduation price a
-///         chunked sniper now gets back no more than one buy does (asserted below for every size and block measured).
-///         Bids still follow a crash down, and nothing waits.
-///         Residual, not fixed by the cap: once a dump has taken the market under half the graduation price inside the
-///         window, chunks that lift the price back above it place their bids at half the graduation price, above the
-///         crashed market, and the dump at the close sells into them. Measured at block 19 (share of the surcharge back,
-///         50 buys against 1): after a 100M-token dump (about 44% of graduation) 0.1% to 0.2%; after 150M (about 33%)
-///         1.2% to 2.7%; after 300M (about 16%) 7.6% to 13.1%; after 600M (about 6%) 21.6% to 33.7%. The residual test
-///         bounds it.
+///         The first fix (82d410d) placed a window bid from the cheaper of the pre-buy price and the graduation price.
+///         With the market at or above half the graduation price that stopped it, but after a dump had taken the market
+///         under half the graduation price inside the window, chunks lifting the price back placed their bids at up to
+///         half the graduation price, above the crashed market. Measured then at block 19 (share of the surcharge back,
+///         50 buys against 1): after a 100M-token dump (about 44% of graduation) 0.1% to 0.2%; after 150M (about 33%) 1.2%
+///         to 2.7%; after 300M (about 16%) 7.6% to 13.1%; after 600M (about 6%) 21.6% to 33.7%.
+///         Now a window bid starts from the lowest price any window buy has started from (the graduation price to begin
+///         with), which only ever moves down: a chunked sniper gets back no more than one buy does, at graduation and
+///         after any crash (asserted below). Bids still follow a crash down, and nothing waits.
 abstract contract ChunkedRefundTest is Scenarios {
     /// @dev Back with one buy and with `chunks` buys, and the share of the surcharge the chunks got back (bps).
     function _refund(uint256 crash, uint256 blocksIn, uint256 total, uint256 chunks)
@@ -61,9 +60,9 @@ abstract contract ChunkedRefundTest is Scenarios {
         this.oneSize(5, 1_000_000e6);
     }
 
-    /// @dev What the cap keeps from review #8's fix, and where it binds: after a crash under half the graduation price
-    ///      the next window buy's bid follows the price down; above graduation a bid starts from the graduation price.
-    function test_bidsFollowACrashDownAndStartNoHigherThanGraduation() public {
+    /// @dev After a crash under half the graduation price the next window buy's bid follows the price down, and a later
+    ///      lift far above graduation does not move later bids back up.
+    function test_bidsFollowACrashDownAndNeverMoveBackUp() public {
         address token = _graduateWithCurveSnipe(0, false, dave, 0);
         (, IArchitexLaunchHook.Launch memory l) = hook.launchOf(token);
         vm.prank(bob);
@@ -83,37 +82,37 @@ abstract contract ChunkedRefundTest is Scenarios {
         vm.prank(alice);
         router.buy(token, 1_000e6, 0, alice, MAX);
         bids = _bidsIn(vm.getRecordedLogs(), token);
-        (lo, hi) = _rangeFrom(l.usdcIs0, l.graduationTick);
-        assertEq(bids[0].lower, lo, "capped at half the graduation price");
+        (lo, hi) = _rangeFrom(l.usdcIs0, crashed);
+        assertEq(bids[0].lower, lo, "still from the crash: the reference never moves back up");
         assertEq(bids[0].upper, hi);
         assertLe(hook.lockHeld(token), 2, "nothing waits");
         _assertHookClean(token);
         _assertSolvent();
     }
 
-    // ─── The residual, bounded ────────────────────────────────────────────────
+    // ─── After a crash, too ───────────────────────────────────────────────────
 
-    function oneCrashed(uint256 crash, uint256 blocksIn, uint256 total, uint256 maxBps) external {
+    function oneCrashed(uint256 crash, uint256 blocksIn, uint256 total) external {
         require(msg.sender == address(this));
         (uint256 one, uint256 many, uint256 bps) = _refund(crash, blocksIn, total, 50);
         console2.log("  dump (M tokens), block, total USDC", crash / 1e24, blocksIn, total / 1e6);
         console2.log("    back with 1 / with 50 (USDC), surcharge back (bps)", one / 1e6, many / 1e6, bps);
-        assertLt(bps, maxBps, "within the measured bound");
+        assertLe(many, one, "50 buys get back no more than one buy");
         assertLt(many, total, "still a loss");
     }
 
-    /// @dev After a dump under half the graduation price in the opening block, chunks that lift the price back above
-    ///      it get part of their surcharge back again: bounded by the measured figures with room.
-    function test_afterACrashUnderHalfGraduationTheRefundStaysBounded() public {
+    /// @dev After a dump under half the graduation price in the opening block, the cases the first fix left open
+    ///      (measured then: up to 3,371 bps of the surcharge back): no more than one buy gets back.
+    function test_afterACrashTheRefundIsGoneToo() public {
         console2.log("after a dump in the opening block: snipe then dump at the close, 1 buy vs. 50 buys:");
-        this.oneCrashed(100_000_000e18, 19, 100_000e6, 100); // measured 21 bps
-        this.oneCrashed(150_000_000e18, 19, 100_000e6, 500); // measured 270
-        this.oneCrashed(150_000_000e18, 19, 1_000_000e6, 500); // measured 115
-        this.oneCrashed(300_000_000e18, 19, 250_000e6, 2_000); // measured 1,314
-        this.oneCrashed(600_000_000e18, 19, 100_000e6, 4_500); // measured 3,371
-        this.oneCrashed(600_000_000e18, 19, 1_000_000e6, 3_000); // measured 2,161
-        this.oneCrashed(600_000_000e18, 10, 250_000e6, 4_500);
-        this.oneCrashed(600_000_000e18, 15, 250_000e6, 4_500);
+        this.oneCrashed(100_000_000e18, 19, 100_000e6);
+        this.oneCrashed(150_000_000e18, 19, 100_000e6);
+        this.oneCrashed(150_000_000e18, 19, 1_000_000e6);
+        this.oneCrashed(300_000_000e18, 19, 250_000e6);
+        this.oneCrashed(600_000_000e18, 19, 100_000e6);
+        this.oneCrashed(600_000_000e18, 19, 1_000_000e6);
+        this.oneCrashed(600_000_000e18, 10, 250_000e6);
+        this.oneCrashed(600_000_000e18, 15, 250_000e6);
     }
 }
 

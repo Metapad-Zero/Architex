@@ -13,6 +13,7 @@ import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {TransientStateLibrary} from "@uniswap/v4-core/src/libraries/TransientStateLibrary.sol";
 import {SqrtPriceMath} from "@uniswap/v4-core/src/libraries/SqrtPriceMath.sol";
+import {IArchitexLaunchHook} from "../../src/interfaces/IArchitexLaunchHook.sol";
 import {Review8Base} from "../review8/Review8Base.sol";
 
 /// @dev Claude review #9: runs any list of swaps, over any pools, inside ONE PoolManager unlock. Before each swap it
@@ -119,11 +120,19 @@ abstract contract Review9Base is Review8Base {
         return a < b ? a : b;
     }
 
-    /// @dev The range the hook gives the bid of a window buy made from pool tick `pre`: from the cheaper of `pre` and the
-    ///      graduation price.
+    /// @dev The pool's bid reference (`bidRefTick`): the lowest price any window buy has started from, graduation's to
+    ///      begin with.
+    function _refOf(address token) internal view returns (int24) {
+        (, IArchitexLaunchHook.Launch memory l) = hook.launchOf(token);
+        return l.bidRefTick;
+    }
+
+    /// @dev The range the hook gives the bid of a single window buy made from pool tick `pre`: from the cheaper of `pre`
+    ///      and the pool's reference. The same whether read before that buy or after it (the buy leaves the reference at
+    ///      exactly that cheaper tick). For several buys in one unlock, track the reference yourself (TransientTick).
     function _expectedRange(address token, int24 pre) internal view returns (int24 lower, int24 upper) {
         bool u0 = _usdcIs0(token);
-        (lower, upper) = _rangeFrom(u0, _cheaper(u0, pre, _gradTick(token)));
+        (lower, upper) = _rangeFrom(u0, _cheaper(u0, pre, _refOf(token)));
     }
 
     // ─── Logs ─────────────────────────────────────────────────────────────────

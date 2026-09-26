@@ -12,9 +12,9 @@ import {Review9Base} from "./Review9Base.sol";
 ///         700M tokens (the pool's price down about 20 times) and a prior buy of up to 2M USDC by someone else, then a
 ///         window buy of any size, exact in (from 0.001 USDC to 5M USDC) or exact out (any number of tokens, up to
 ///         95% of what the pool holds, and with a price limit that stops it part way). Every such buy succeeds and, if its
-///         snipe fee is not 0, places exactly one bid, from the cheaper of its pre-swap tick and the graduation tick
-///         (review #9's L1 fix), wholly on the USDC side of the price it leaves and never above half the graduation
-///         price; the hook's claims stay exactly its books and nothing but a unit or two waits. (Unlike the invariant
+///         snipe fee is not 0, places exactly one bid, from the cheaper of its pre-swap tick and the pool's reference (the
+///         lowest price any window buy has started from, graduation's to begin with: review #9's L1 fix), wholly on the
+///         USDC side of the price it leaves and never above half the graduation price; the hook's claims stay exactly its books and nothing but a unit or two waits. (Unlike the invariant
 ///         handlers, nothing here swallows a revert.)
 abstract contract WindowBuyNeverRevertsTest is Review9Base {
     struct In {
@@ -75,7 +75,7 @@ abstract contract WindowBuyNeverRevertsTest is Review9Base {
             assertEq(placed.length, 1, "one bid");
             assertEq(hook.bidCount(token), bids + 1);
             (int24 lo, int24 hi) = _expectedRange(token, pre);
-            assertEq(placed[0].lower, lo, "from the cheaper of the pre-swap and graduation ticks");
+            assertEq(placed[0].lower, lo, "from the cheaper of the pre-swap tick and the pool's reference");
             assertEq(placed[0].upper, hi);
             (int24 gLo, int24 gHi) = _rangeFrom(u0, _gradTick(token));
             assertTrue(u0 ? lo >= gLo : hi <= gHi, "never above half the graduation price");

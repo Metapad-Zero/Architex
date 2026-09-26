@@ -122,25 +122,30 @@ the BUSL `Position.sol`, so the hook reads the pool's price with its own copy of
 - **Where it goes [decided]: locked into the pool, the moment it is paid [owner's choice, 2026-09-25].**
   - In the pool: the buy that pays the surcharge also places it, inside the same swap (`afterSwap`), as locked
     liquidity: a USDC-only position of its own (a fresh salt for every bid, never re-added to) whose top is **half the
-    cheaper of the price just before that buy and the graduation price** and which runs about 10,000 times lower
-    (`BID_SPAN_TICKS`, 92,200 ticks), a bid nobody can ever withdraw. Nothing waits and there is no separate lock step.
-    A buy only moves the price up, so the bid is always wholly under the market when it is placed; after a crash
-    inside the window the next buy's bid follows the price down, and no bid ever starts above half the graduation
-    price. It never reaches the extreme tick the full-range position uses, so no outside LP can fill that tick to block
+    lowest price any window buy has started from** (this one included, the graduation price to begin with: the
+    pool's `bidRefTick`, which only ever moves down) and which runs about 10,000 times lower (`BID_SPAN_TICKS`, 92,200
+    ticks), a bid nobody can ever withdraw. Nothing waits and there is no separate lock step. A buy only moves the
+    price up, so the bid is always wholly under the market when it is placed; after a crash inside the window the
+    next buy's bid follows the price down, and no later lift moves bids back up. It never reaches the extreme tick the full-range position uses, so no outside LP can fill that tick to block
     it (which would now block the buy itself).
   - Nobody can plant a bid above the market, or profit from moving one (Claude review #9, all measured in tests):
     - a pump-and-dump with the attacker's own window buys always loses: 50,000 USDC put in comes back as 4,726 in
       the opening block, 27,358 at block 10 and 47,347 at block 19;
-    - the buy that places a bid can be sandwiched like any buy, but a front-run cannot lift its bid above half the
-      graduation price, so the back-run takes nothing from the bid (the site never sends a buy without a minimum out);
-    - splitting a big window buy into many small ones cannot stack bids above the buyer's own dump. Before the
-      graduation-price cap, 1,000,000 USDC split into 50 buys at block 19 got 76% of its surcharge back (review #9's
-      L1); with it, the same as one buy.
+    - the buy that places a bid can be sandwiched like any buy, but a front-run cannot lift the reference its bid is
+      placed from, so the back-run takes nothing from the bid, before or after a crash (the site never sends a buy
+      without a minimum out);
+    - splitting a big window buy into many small ones, or spreading it over blocks, cannot stack bids above the
+      buyer's own dump: it gets back no more than one buy does. Placing each bid from the price just before its own
+      buy let 1,000,000 USDC split into 50 buys at block 19 get 76% of its surcharge back (Claude review #9, L1);
+      capping that at the graduation price still let 22% to 34% back after a dump to about a sixteenth of graduation
+      (review #9's residual); the running lowest price closes both.
   - Pushing the price down before someone's buy (a sell) only makes that buyer's bid land lower, and gives him a
     cheaper buy. Undoing the push inside the window costs the surcharge, which deters it early in the window only:
     undoing a 100M-token push around a 5,000 USDC buy cost 85,840 USDC in the opening block, about 8,600 at block 19,
     and 7,835 if the griefer waits one block past the window, against 8,307 with no window at all (review #9's I2).
-    It never pays. After the window no bid can be added or moved at all.
+    It never pays, but since the reference only moves down, a hard dump inside the window with one buy after it
+    lowers every later window bid too: they end deeper under the market, never above it. After the window no bid can
+    be added or moved at all.
   - Why not a separate `lock`: v1.4 first had one, anchored to the graduation price so a push could not move the bid
     (Claude review #7, L2). After a crash the claims then waited, and anyone could push the price over the bid's top,
     lock, and sell into a bid above the market: up to 30% of the waiting fees in one transaction (Claude review #8).
@@ -153,10 +158,21 @@ the BUSL `Position.sol`, so the hook reads the pool's price with its own copy of
     good (the default the owner did not change). The curve's parameters stay identical for every token; like the other
     fees, the snipe fee comes off a buy before the rest moves the curve, so a buy inside the window moves the price
     less than the same gross buy after it.
-  - Cost: a buy inside the pool's window also adds a position, measured at about 56,000 to 93,000 more gas than the
-    same buy after the window when its bid lands on ticks an earlier bid already opened, and about 117,000 to 176,000
-    when it opens new ones (the range is warm versus cold storage), a fraction of a cent on Arc. The V4Quoter's gas
-    estimate for a whole window buy is about 301,000.
+  - Cost: a buy inside the pool's window also adds a position. Measured through Uniswap's V4Router against the same
+    buy after the window (integration review #9b; receipt gas, then the gas limit the transaction needs):
+
+    | The bid lands on | Receipt | Gas limit |
+    | --- | --- | --- |
+    | ticks an earlier bid opened (the usual case now that bids share the pool's reference) | +78k | +101k |
+    | new ticks | +121k to +124k | +146k to +149k |
+    | new ticks and a new tick-bitmap word | +139k to +142k | +164k to +167k |
+    | the pool's first bid | +170k to +173k | +196k to +199k |
+
+    A fraction of a cent on Arc either way. Because it depends on tick state other trades change (a new low opens new
+    ticks), a gas estimate taken a moment earlier can come up short: while `snipeBpsOf(token) > 0`, integrators should
+    re-estimate right before sending with at least 30% headroom (or +200k), never size a limit from an earlier window
+    buy's receipt, and expect a sell just before their buy to add up to about 60k. `lockHeld` is written only when the
+    rounding it holds changes, so a window buy carries no storage write-and-refund on top.
   - A pool can end up with many bids (one per window buy). Nothing iterates over them; Deepen pool v1.4's cap must be
     a running total of the USDC in the hook's locked positions, never a loop over bids.
 
@@ -193,8 +209,17 @@ the BUSL `Position.sol`, so the hook reads the pool's price with its own copy of
 
 ## 9. Site, charts and listing feeds
 
-- Trade history and charts read the PoolManager's `Swap` events for the token's pool id, plus the hook's fee events;
-  prices and liquidity from StateView.
+- Trade history and charts read the hook's `PoolTrade` events (the trader's side) with the PoolManager's `Swap` events
+  for the token's pool id (the pool's side); prices and liquidity from StateView. Rules for any indexer (integration
+  review #9b, reconstructed exactly in its tests):
+  - the PoolManager's `Swap` is the pool's side: on a buy its USDC is net of the platform, creator and snipe fees (in
+    the window as little as 10% of what the trader paid), on a sell it is gross; its `fee` is always 0, so generic v4
+    indexers see these pools as 0% fee and undercount buy volume;
+  - a buy's trader paid `PoolTrade.usdcAmount`; a sell's received `usdcAmount - platformFee - creatorFee`;
+  - each `Swap` is followed by its own `PoolTrade` before the next `Swap` in that pool, in multi-swap transactions
+    too; a window buy emits `ModifyLiquidity` (sender the hook) and `BidLocked` between the two, and `BidLocked`'s USDC
+    is the snipe fee to within 2 units of rounding;
+  - the hook's claims moving are the PoolManager's ERC-6909 `Transfer` events, not USDC transfers.
 - The lister feeds (CoinGecko standard) list v1.4 pools by pool id; the token list and docs add the hook, the
   launchpad and the router.
 - The builder gains the open/closed choice; the token page shows it, the anti-snipe window, and which pool the token
@@ -235,14 +260,17 @@ deploys to mainnet; then the Uniswap routing allowlist submission with a live po
 §6: the hook never lets a swap skip the fees; the locked positions can never shrink; only the launchpad can create a
 pool with the hook; a closed pool's liquidity only ever grows; the hook holds no USDC and its claims are at least what
 it owes (pool fees not yet synced, a bid's rounding; anyone can add claims to the hook, which then stay there); snipe
-fees never wait (at most a unit or two per token is ever held); every bid is placed wholly under the market, and none
-starts above half the graduation price; no donation ever lands.
+fees never wait (at most a unit or two per token is ever held); every bid is placed wholly under the market, from half
+the pool's reference, which only ever moves down and starts at the graduation price; no donation ever lands; quotes
+through Uniswap's V4Quoter equal fills through its V4Router, fees and bids included.
 
 Reviews so far: Grok #7 (`GROK-REVIEW-7.md`: no High; the router fix, the spec corrections), Claude #7
 (`CLAUDE-REVIEW-7.md`: no High; one Medium and two Lows, all fixed), Grok #8 (`GROK-REVIEW-8.md`: no findings) and
 Claude #8 (`CLAUDE-REVIEW-8.md`: no High; one Medium, fixed by placing snipe fees inside the buy that pays them) and
-Claude #9 (`CLAUDE-REVIEW-9.md`: no High or Medium; one Low, fixed by capping a window buy's bid at half the
-graduation price). Grok #9 did not run (the Grok Build balance was exhausted). The reviews' PoCs are kept as
+Claude #9 (`CLAUDE-REVIEW-9.md`: no High or Medium; one Low, fixed by placing every window bid from the lowest price
+any window buy has started from) and its integration lens #9b (`INTEGRATION-REVIEW-9.md`: compatible with Uniswap's
+V4Quoter, V4Router, multi-hop routes and every payment style; one Low about window-buy gas, reduced and documented in
+§5). Grok #9 did not run (the Grok Build balance was exhausted). The reviews' PoCs are kept as
 regression tests in `contracts-v14/test/review7`, `review8` and `review9`. The Arc Testnet rehearsal is
 `V14-REHEARSAL.md` (on branch `v14-rehearsal` until it merges).
 
@@ -252,6 +280,19 @@ regression tests in `contracts-v14/test/review7`, `review8` and `review9`. The A
    where they are).
 2. Deepen pool v1.4 (buys through the PoolManager, adds to the hook's locked position) and the site's v4 trading,
    charts and listing feeds.
-3. The Uniswap routing allowlist submission, and asking 0x and KyberSwap to route the hook.
+3. The Uniswap routing allowlist submission, and asking 0x and KyberSwap to route the hook. Nothing in the v4 sources
+   rules the hook out (flags 0x28EC pass `isValidHookAddress`; no liquidity-return deltas). The submission should
+   explain: both swap return-delta flags (fees always in USDC, with the formulas); the liquidity added inside
+   `afterSwap` (only in the first 20 blocks, always wholly out of range below the price, after the swap so it cannot
+   change that swap's output, and reproduced exactly by the V4Quoter); the surcharge (up to 90%, the total capped at
+   99%, time-bounded, readable through `snipeBpsOf`); `PartialFill` (exact-in buys and exact-out sells revert when a
+   price limit stops them; the Universal Router, V4Router and V4Quoter use extreme limits and never hit it); dust
+   minimums (`FeesExceedAmount` under about 30 raw USDC units in the opening block, 3 after the window); closed pools
+   refusing outside liquidity (PositionManager mints revert `WrappedError(ClosedPool)`, which affects LP screens, not
+   routing); donations refused, initialize restricted, no admin or upgrade path, fees fixed. Aggregators that simulate
+   off-chain (KyberSwap, 0x) must model the per-token creator fee (`launchOf`), the 50 bps platform fee, the window's
+   block schedule from `openBlock`, the rounding (each component rounded up; exact-out gross-up with the platform share
+   first) and the 99% cap; quoter-based routing works as-is, and a quote landing a block later in the window fills at
+   least as well.
 4. Evidence for the owner's curve-first call: mercuri, the one Arc launchpad already doing curve-then-Uniswap, had 39
    launches and no graduation by 2026-09-25; Argus, straight into Uniswap, had 168,000 launches (much of it bot flow).
