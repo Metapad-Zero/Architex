@@ -371,6 +371,9 @@ interface Amounts {
   windowBuy: bigint
   curveBuy: bigint
   graduateOffer: bigint
+  /** the first buy in the pool's window: big enough to lift the price at least a tick spacing above graduation even
+   *  at a 10% creator fee and the window's highest surcharge, so the next buy's bid shows the cap (V14-SPEC §5) */
+  poolWindowLift: bigint
   poolWindowBuy: bigint
   poolWindowSell: bigint
   rawWindowOutBuy: bigint
@@ -389,13 +392,14 @@ const A: Amounts = REAL
   ? {
       windowBuy: usd(Number(process.env.RUNB_WINDOW_USDC ?? '1')),
       curveBuy: usd(1),
-      graduateOffer: 0n, poolWindowBuy: 0n, poolWindowSell: 0n, rawWindowOutBuy: 0n, dump: 0n, poolBuy: 0n, poolSell: 0n, rawOutBuy: 0n,
+      graduateOffer: 0n, poolWindowLift: 0n, poolWindowBuy: 0n, poolWindowSell: 0n, rawWindowOutBuy: 0n, dump: 0n, poolBuy: 0n, poolSell: 0n, rawOutBuy: 0n,
       rawOutSellUsdc: 0n, rawTokens: 0n, rawUsdc: 0n, lpUsdc: 0n, lpTokens: 0n, burnerMint: 0n,
     }
   : {
       windowBuy: usd(1000),
       curveBuy: usd(1000),
       graduateOffer: usd(60_000),
+      poolWindowLift: usd(10_000),
       poolWindowBuy: usd(2000),
       poolWindowSell: tokens(1_000_000),
       rawWindowOutBuy: tokens(5_000_000),
@@ -603,6 +607,15 @@ function bidRange(usdcIs0: boolean, refTick: number): { lower: number; upper: nu
   }
   const upper = floorTick(refTick - BID_DISCOUNT_TICKS)
   return { lower: Math.max(upper - BID_SPAN_TICKS, MIN_T), upper }
+}
+/** V14-SPEC §5 (Claude review #9's L1): a window buy's bid is placed from the cheaper token price of the pool's tick
+ *  just before the buy and the graduation tick, so no bid ever starts above half the graduation price. With USDC as
+ *  currency0 a higher tick is a cheaper token. */
+const cheaperOf = (usdcIs0: boolean, a: number, b: number) => (usdcIs0 ? Math.max(a, b) : Math.min(a, b))
+/** Whether a bid's top is at or below half the graduation price: past (or at) the graduation bid's top tick. */
+const notAboveGraduationBid = (usdcIs0: boolean, graduationTick: number, r: { lower: number; upper: number }) => {
+  const g = bidRange(usdcIs0, graduationTick)
+  return usdcIs0 ? r.lower >= g.lower : r.upper <= g.upper
 }
 /** Whether a range is wholly on the USDC side of `tick`, in v4's own terms: a position takes currency0 alone while
  *  tick < lower, currency1 alone while tick >= upper. */
@@ -1339,8 +1352,10 @@ function modelPoolTrade(pool: V4.PoolModel, usdcIs0: boolean, creatorBps: bigint
 }
 
 interface CheckedTrade extends PoolTradeModel {
-  /** the pool's tick just before the trade, which a bid placed inside it is placed from */
+  /** the pool's tick just before the trade */
   tickBefore: number
+  /** the tick a bid placed inside the trade is placed from: the cheaper of tickBefore and the graduation tick */
+  refTick: number
   /** the bid the trade placed: a buy inside the pool's window turns its surcharge into one (V14-SPEC §5) */
   bid?: BidModel
   /** lockHeld after the trade: a unit or two of rounding at most */
@@ -1348,8 +1363,9 @@ interface CheckedTrade extends PoolTradeModel {
 }
 /** Checks one pool trade (router or RawSwapper) at its block against the model: events, pool state, books. A buy inside
  *  the window must place its surcharge (with the unit or two of rounding any earlier bid left) as a bid of its own: a
- *  fresh position at salt bidCount + 1, from half the pool's price just before the buy, wholly on the USDC side of the
- *  price the buy leaves, paid by burning the claims, nothing but rounding left waiting. Any other trade places nothing. */
+ *  fresh position at salt bidCount + 1, from half the cheaper of the pool's price just before the buy and the
+ *  graduation price (so its top is never above half the graduation price), wholly on the USDC side of the price the buy
+ *  leaves, paid by burning the claims, nothing but rounding left waiting. Any other trade places nothing. */
 async function checkPoolTrade(what: string, k: Kind, sent: Sent, side: Side, exact: 'in' | 'out', amount: bigint, trader: 'burner' | 'raw'): Promise<CheckedTrade> {
   const { receipt } = sent
   const B = receipt.blockNumber
@@ -1369,15 +1385,19 @@ async function checkPoolTrade(what: string, k: Kind, sent: Sent, side: Side, exa
   // The bid, placed after the swap (in afterSwap) with everything the hook holds for the token.
   const held0 = await rd<bigint>(HOOK, ABI.hook, 'lockHeld', [token], B0)
   const bids0 = await rd<bigint>(HOOK, ABI.hook, 'bidCount', [token], B0)
-  const bid = m.fees.snipe > 0n ? modelBid(pool, rec.usdcIs0, before.tick, held0 + m.fees.snipe) : undefined
+  const refTick = cheaperOf(rec.usdcIs0, before.tick, rec.graduationTick)
+  const bid = m.fees.snipe > 0n ? modelBid(pool, rec.usdcIs0, refTick, held0 + m.fees.snipe) : undefined
   const heldAfter = held0 + m.fees.snipe - (bid?.used ?? 0n)
   const hookModifies = eventsOf<ModifyEvent>(receipt, POOL_MANAGER, ABI.pm, 'ModifyLiquidity').filter((e) => getAddress(e.sender) === HOOK)
   if (bid) {
     const salt = pad(toHex(bids0 + 1n), { size: 32 })
-    const range = bidRange(rec.usdcIs0, before.tick)
-    check(`${what}: BidLocked == model, its range from half the price just before the buy (tick ${before.tick})`, eventsOf(receipt, HOOK, ABI.hook, 'BidLocked'), [{
+    const range = bidRange(rec.usdcIs0, refTick)
+    const from = refTick === before.tick ? `the price just before the buy (tick ${before.tick})` : `the graduation price (tick ${refTick}): the price before the buy (tick ${before.tick}) was above it`
+    check(`${what}: BidLocked == model, its range from half the cheaper of the price before the buy and the graduation price: ${from}`, eventsOf(receipt, HOOK, ABI.hook, 'BidLocked'), [{
       token, usdc: bid.used, liquidity: bid.liquidity, tickLower: range.lower, tickUpper: range.upper,
     }])
+    const gradTop = rec.usdcIs0 ? bidRange(true, rec.graduationTick).lower : bidRange(false, rec.graduationTick).upper
+    checkThat(`${what}: the bid's top is not above half the graduation price`, notAboveGraduationBid(rec.usdcIs0, rec.graduationTick, bid), `top at tick ${rec.usdcIs0 ? bid.lower : bid.upper}, half the graduation price at ${gradTop}`)
     checkThat(`${what}: the bid is wholly on the USDC side of the price the buy left`, usdcSide(rec.usdcIs0, bid, m.swap.tick), `tick ${m.swap.tick} after, bid [${bid.lower}, ${bid.upper}]`)
     check(`${what}: Uniswap ModifyLiquidity: a fresh position, salt ${bids0 + 1n}`, hookModifies, [{ id: rec.poolId, sender: HOOK, tickLower: bid.lower, tickUpper: bid.upper, liquidityDelta: bid.liquidity, salt }])
     check(`${what}: the bid's position (owner the hook, salt ${bids0 + 1n})`, await rd(STATE_VIEW, ABI.stateView, 'getPositionInfo', [rec.poolId, HOOK, bid.lower, bid.upper, salt], B), [bid.liquidity, 0n, 0n])
@@ -1417,7 +1437,7 @@ async function checkPoolTrade(what: string, k: Kind, sent: Sent, side: Side, exa
   if (bid) {
     check(`${what}: the PoolManager's ${U} grew by the whole buy (the bid only turned claims into liquidity)`, (s1.get('usdc:poolManager') ?? 0n) - (s0.get('usdc:poolManager') ?? 0n), m.paid)
   }
-  return { ...m, tickBefore: before.tick, bid, heldAfter }
+  return { ...m, tickBefore: before.tick, refTick, bid, heldAfter }
 }
 
 // ── Steps ─────────────────────────────────────────────────────────────────────
@@ -1840,12 +1860,15 @@ async function curveTrades(k: Kind, first: boolean) {
 
 /** The sell-out buy (graduation, V14-SPEC §4), then right away, inside the pool's 20-block window, sent before any check
  *  reads the chain so they land in time:
- *  - the other tokens: a router buy, which places its surcharge as a bid from half the graduation price (the price
- *    just before it), and a router sell (no surcharge, no bid);
- *  - the scenario tokens (one per pool orientation): a dump of 150M tokens that takes the price under half the
- *    graduation price, then a router buy whose bid must follow the price down (from half the crashed price just before
- *    it, nothing left waiting), then a router sell, then an exact-out buy through the RawSwapper (the surcharge on a net
- *    amount, placed the same way).
+ *  - every token: a router buy from the graduation price, whose bid lands on the graduation bid's range and which lifts
+ *    the price at least a tick spacing (poolWindowLift), then a second router buy from above the graduation price,
+ *    whose bid must still start from half the graduation price, not half its own pre-buy price (V14-SPEC §5's cap,
+ *    Claude review #9's L1);
+ *  - the scenario tokens (one per pool orientation): then a dump of 150M tokens that takes the price under half the
+ *    graduation price, and a router buy whose bid must follow the price down (from half the crashed price just before
+ *    it, nothing left waiting);
+ *  - every token: a router sell (no surcharge, no bid); and on the scenario tokens an exact-out buy through the
+ *    RawSwapper (the surcharge on a net amount, placed the same way).
  *  Everything is then checked in order, at the blocks the transactions landed in. */
 async function graduate(k: Kind, first: boolean) {
   const id = `graduate:${k}`
@@ -1862,12 +1885,17 @@ async function graduate(k: Kind, first: boolean) {
       return [token, A.graduateOffer, out, me, await deadline()]
     }, A.graduateOffer)
     // The quote at the latest block is a floor for a buy landing later: the surcharge only falls.
-    const windowBuy = (what: string) => tx(id, what, ROUTER, ABI.router, 'buy', async () => [
-      token, A.poolWindowBuy, await simulate<bigint>(ROUTER, ABI.router, 'quoteBuy', [token, A.poolWindowBuy], head), me, await deadline(),
+    const windowBuy = (what: string, amount: bigint) => tx(id, what, ROUTER, ABI.router, 'buy', async () => [
+      token, amount, await simulate<bigint>(ROUTER, ABI.router, 'quoteBuy', [token, amount], head), me, await deadline(),
     ])
+    const wBuy = await windowBuy(`buy ${s.symbol} in the pool's window (router)`, A.poolWindowLift)
+    const wBuy2 = await windowBuy(`buy ${s.symbol} again in the pool's window, above the graduation price (router)`, A.poolWindowBuy)
     let dump: Sent | undefined
-    if (feature) dump = await tx(id, `dump ${fmt18(A.dump)} ${s.symbol} under half the graduation price (router)`, ROUTER, ABI.router, 'sell', async () => [token, A.dump, 0n, me, await deadline()])
-    const wBuy = await windowBuy(feature ? `buy ${s.symbol} in the pool's window after the crash (router)` : `buy ${s.symbol} in the pool's window (router)`)
+    let crashBuy: Sent | undefined
+    if (feature) {
+      dump = await tx(id, `dump ${fmt18(A.dump)} ${s.symbol} under half the graduation price (router)`, ROUTER, ABI.router, 'sell', async () => [token, A.dump, 0n, me, await deadline()])
+      crashBuy = await windowBuy(`buy ${s.symbol} in the pool's window after the crash (router)`, A.poolWindowBuy)
+    }
     const wSell = await tx(id, `sell ${s.symbol} in the pool's window (router)`, ROUTER, ABI.router, 'sell', async () => {
       const out = await simulate<bigint>(ROUTER, ABI.router, 'quoteSell', [token, A.poolWindowSell], head)
       return [token, A.poolWindowSell, out, me, await deadline()]
@@ -1883,28 +1911,50 @@ async function graduate(k: Kind, first: boolean) {
     const rec = poolRec(k)
     const gradBid = bidRange(rec.usdcIs0, rec.graduationTick)
     const gradTop = rec.usdcIs0 ? gradBid.lower : gradBid.upper
-    if (dump) {
-      const d = await checkPoolTrade('crash: dump (router)', k, dump, 'sell', 'in', A.dump, 'burner')
-      checkThat('crash: the dump took the price under half the graduation price (past the graduation bid\'s top)', pastBidTop(rec.usdcIs0, rec.graduationTick, d.swap.tick), `tick ${rec.graduationTick} at graduation, ${d.swap.tick} after the dump, graduation bid's top at ${gradTop}`)
-    }
-    const what = feature ? 'crash: window buy after the dump (router)' : 'window buy (router)'
-    const wb = await checkPoolTrade(what, k, wBuy, 'buy', 'in', wBuy.args[1] as bigint, 'burner')
+    const topOf = (r: { lower: number; upper: number }) => (rec.usdcIs0 ? r.lower : r.upper)
+    // Pricier (a dearer token) means a lower tick with USDC as currency0, a higher one otherwise.
+    const pricier = (a: number, b: number) => (rec.usdcIs0 ? a < b : a > b)
+
+    const wb = await checkPoolTrade('window buy (router)', k, wBuy, 'buy', 'in', wBuy.args[1] as bigint, 'burner')
     progress.notes[`${id}:poolWindowBps`] = wb.snipeBps.toString()
     if (!wb.bid) note("the pool's window buy landed after the window: no surcharge, no bid")
-    else if (feature) {
-      checkThat('crash: the buy started from under half the graduation price', pastBidTop(rec.usdcIs0, rec.graduationTick, wb.tickBefore), `tick ${wb.tickBefore} before the buy`)
-      const top = rec.usdcIs0 ? wb.bid.lower : wb.bid.upper
-      checkThat("crash: its bid followed the price down: from half the crashed price, past the graduation bid's top", rec.usdcIs0 ? wb.bid.lower > gradBid.lower : wb.bid.upper < gradBid.upper,
-        `bid [${wb.bid.lower}, ${wb.bid.upper}] from tick ${wb.tickBefore}; graduation bid [${gradBid.lower}, ${gradBid.upper}]; tops ${top} vs ${gradTop}`)
-      check('crash: nothing waits after the buy (lockHeld ≤ 2 units)', wb.heldAfter <= 2n, true)
-      progress.notes[`${id}:crashBid`] = `${wb.bid.lower},${wb.bid.upper},${wb.tickBefore}`
-    } else {
-      check('window buy: its bid is placed from half the graduation price (the first trade after graduation)', [wb.tickBefore, wb.bid.lower, wb.bid.upper], [rec.graduationTick, gradBid.lower, gradBid.upper])
-    }
+    else check('window buy: the first trade after graduation, so its bid lands on the graduation bid\'s range', [wb.tickBefore, wb.bid.lower, wb.bid.upper], [rec.graduationTick, gradBid.lower, gradBid.upper])
     const B0 = wBuy.receipt.blockNumber - 1n
     const quoted = await rd<bigint>(ROUTER, ABI.router, 'quoteBuy', [token, wBuy.args[1]], B0)
     const q0 = modelPoolTrade(await poolAt('quote model', k, B0), rec.usdcIs0, BigInt(rec.creatorBps), snipeBpsAt(BigInt(rec.openBlock), B0, BigInt(rec.creatorBps)), 'buy', 'in', wBuy.args[1] as bigint)
     check("window buy: router.quoteBuy at the block before == model with that block's surcharge", quoted, q0.received)
+
+    const wb2 = await checkPoolTrade('window buy above the graduation price (router)', k, wBuy2, 'buy', 'in', wBuy2.args[1] as bigint, 'burner')
+    if (!wb2.bid) note('the second window buy landed after the window: no surcharge, no bid')
+    else {
+      checkThat('above graduation: the buy started from a price above the graduation price (the first buy lifted it)', pricier(wb2.tickBefore, rec.graduationTick), `tick ${wb2.tickBefore} before the buy, ${rec.graduationTick} at graduation`)
+      // Half the price before the buy would give a higher range: the lift must be at least a spacing, or the cap and
+      // the old rule agree and nothing is shown.
+      const uncapped = bidRange(rec.usdcIs0, wb2.tickBefore)
+      checkThat('above graduation: the lift was big enough that the cap decides the range (half the price before the buy is a tick spacing or more above half the graduation price)',
+        topOf(uncapped) !== gradTop, `tick ${wb2.tickBefore} before the buy; a bid from it would start at ${topOf(uncapped)}, half the graduation price is at ${gradTop}`)
+      check("above graduation: its bid is capped at half the graduation price: the graduation bid's range, not half the price before the buy", [wb2.refTick, wb2.bid.lower, wb2.bid.upper], [rec.graduationTick, gradBid.lower, gradBid.upper])
+      if (topOf(uncapped) !== gradTop) {
+        note(`the first window buy lifted the tick from ${rec.graduationTick} to ${wb2.tickBefore}; without the cap the next bid would have started at tick ${topOf(uncapped)}, above half the graduation price at ${gradTop}`)
+        progress.notes[`${id}:cappedBid`] = `${wb2.tickBefore},${topOf(uncapped)},${gradTop}`
+      }
+    }
+    if (dump) {
+      const d = await checkPoolTrade('crash: dump (router)', k, dump, 'sell', 'in', A.dump, 'burner')
+      checkThat('crash: the dump took the price under half the graduation price (past the graduation bid\'s top)', pastBidTop(rec.usdcIs0, rec.graduationTick, d.swap.tick), `tick ${rec.graduationTick} at graduation, ${d.swap.tick} after the dump, graduation bid's top at ${gradTop}`)
+    }
+    if (crashBuy) {
+      const cb = await checkPoolTrade('crash: window buy after the dump (router)', k, crashBuy, 'buy', 'in', crashBuy.args[1] as bigint, 'burner')
+      if (!cb.bid) note('the crash buy landed after the window: no surcharge, no bid')
+      else {
+        checkThat('crash: the buy started from under half the graduation price', pastBidTop(rec.usdcIs0, rec.graduationTick, cb.tickBefore), `tick ${cb.tickBefore} before the buy`)
+        check('crash: its bid is placed from the crashed price, the cheaper of the two', cb.refTick, cb.tickBefore)
+        checkThat("crash: its bid followed the price down: from half the crashed price, past the graduation bid's top", rec.usdcIs0 ? cb.bid.lower > gradBid.lower : cb.bid.upper < gradBid.upper,
+          `bid [${cb.bid.lower}, ${cb.bid.upper}] from tick ${cb.tickBefore}; graduation bid [${gradBid.lower}, ${gradBid.upper}]; tops ${topOf(cb.bid)} vs ${gradTop}`)
+        check('crash: nothing waits after the buy (lockHeld ≤ 2 units)', cb.heldAfter <= 2n, true)
+        progress.notes[`${id}:crashBid`] = `${cb.bid.lower},${cb.bid.upper},${cb.tickBefore}`
+      }
+    }
     const sellModel = await checkPoolTrade('window sell (router): pays no surcharge, places no bid', k, wSell, 'sell', 'in', wSell.args[1] as bigint, 'burner')
     check('window sell: quote at the block before == fill (a sell has no surcharge to change)', await rd<bigint>(ROUTER, ABI.router, 'quoteSell', [token, wSell.args[1]], wSell.receipt.blockNumber - 1n), sellModel.received)
     if (rawOut) await checkPoolTrade('exact-out buy in the window (RawSwapper)', k, rawOut, 'buy', 'out', A.rawWindowOutBuy, 'raw')
@@ -2430,6 +2480,8 @@ async function finalState() {
         const pos = positionsAt(k, B)
         line.push(`tick ${pool.tick}, ${pos.filter((p) => p.owner === HOOK).length} hook positions (${(s.get(`hook.bids:${x}`) ?? 0n).toString()} bids)`)
         check(`${x}: hook.bidCount == the bid positions`, s.get(`hook.bids:${x}`), BigInt(pos.filter((p) => p.owner === HOOK && p.lower !== MIN_T).length))
+        const bids = pos.filter((p) => p.owner === HOOK && p.lower !== MIN_T)
+        check(`${x}: no bid starts above half the graduation price (V14-SPEC §11)`, bids.filter((b) => !notAboveGraduationBid(rec.usdcIs0, rec.graduationTick, b)).map((b) => `[${b.lower}, ${b.upper}]`), [])
         line.push(`lockHeld ${fmt(s.get(`hook.lockHeld:${x}`) ?? 0n)}, USDC is currency${rec.usdcIs0 ? '0' : '1'}`)
       }
       if (usesHolders(k) && !REAL) await conservation(`${x} final`, token, B)
@@ -2469,9 +2521,14 @@ async function finalState() {
     if (!REAL) {
       const bps = made.map((k) => BigInt(progress.notes[`graduate:${k}:poolWindowBps`] ?? '0'))
       checkThat("the pool's surcharge was exercised: window buys paid it and placed it as bids", bps.some((b) => b > 0n), `window buys paid ${bps.join(', ')} bps`)
+      // Both cases, in both pool orientations: the cap and the crash each pick a different end of _cheaperOf.
+      const sides = (ks: Kind[]) => [...new Set(ks.map((k) => `USDC as currency${poolRec(k).usdcIs0 ? '0' : '1'}`))].sort()
+      const graduated = made.filter((k) => progress.pools[k])
+      const capped = graduated.filter((k) => progress.notes[`graduate:${k}:cappedBid`])
+      check(`the cap was exercised in every orientation: a window buy from above the graduation price got the graduation bid's range (${capped.map(sym).join(', ') || 'none'})`, sides(capped), sides(graduated))
       const crashed = progress.features.filter((k) => progress.notes[`graduate:${k}:crashBid`])
-      checkThat('the crash case was exercised: a window buy after a dump under half the graduation price placed its bid from the crashed price',
-        crashed.length > 0, `${crashed.map(sym).join(', ') || 'none'} of ${progress.features.map(sym).join(', ')}`)
+      check(`the crash case was exercised in every orientation: a window buy after a dump under half the graduation price placed its bid from the crashed price (${crashed.map(sym).join(', ') || 'none'})`,
+        sides(crashed), sides(progress.features))
     }
   }, true)
 }
