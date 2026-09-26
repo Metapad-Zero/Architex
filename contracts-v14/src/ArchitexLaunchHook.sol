@@ -49,10 +49,11 @@ interface IBurnable {
 ///
 /// Bids: snipe fees become USDC-only liquidity below the price the moment they are collected, bids nobody can ever
 /// withdraw. The curve's, at graduation, from half the graduation price down; a pool buy's, inside that buy, from half
-/// the cheaper of the price just before it and the graduation price, down. A buy only moves the price up, so a bid is
-/// always wholly below the market when it is placed, and no bid ever starts above half the graduation price: a buyer
-/// who lifts the price in many small buys cannot stack his own bids above where his dump will end. Nothing is held for
-/// later but a unit or two of rounding, which joins the next bid.
+/// the lowest price any window buy has started from (the graduation price to begin with; `bidRefTick`), down. That
+/// reference only ever moves down, and a buy only moves the price up, so a bid is always wholly below the market when
+/// it is placed and no sequence of buys (split, front-run or spread over blocks) can lift a later bid above where its
+/// own dump ends; after a crash, bids follow the price down. Nothing is held for later but a unit or two of rounding,
+/// which joins the next bid.
 ///
 /// Positions: the graduation position is full range (salt 0); every bid gets a fresh salt, so a later bid never
 /// touches an older position. Nobody may donate (a donation accrues fees to in-range positions, and a position that
@@ -81,9 +82,9 @@ contract ArchitexLaunchHook is BaseHook, IUnlockCallback, IArchitexLaunchHook {
     uint256 public constant SNIPE_START_BPS = 9000;
     /// @inheritdoc IArchitexLaunchHook
     uint256 public constant MAX_TOTAL_FEE_BPS = 9900;
-    /// @dev A bid starts this many ticks below the price it is placed from (the cheaper of the price just before the buy
-    ///      that paid it and the graduation price), about half of it: a sniper who dumps the moment the window closes is
-    ///      not paid back out of his own surcharge (Argus's F-1), and no bid can be planted above the market.
+    /// @dev A bid starts this many ticks below the price it is placed from (the graduation price, or for a window buy the
+    ///      lowest price any window buy has started from), about half of it: a sniper who dumps the moment the window
+    ///      closes is not paid back out of his own surcharge (Argus's F-1), and no bid can be planted above the market.
     int24 public constant BID_DISCOUNT_TICKS = 6932;
     /// @dev A bid runs from its top down about 10,000 times (a multiple of the tick spacing), not to the extreme tick:
     ///      the extreme tick is shared with the full-range position, and an outside LP in an open pool could fill its
@@ -165,7 +166,8 @@ contract ArchitexLaunchHook is BaseHook, IUnlockCallback, IArchitexLaunchHook {
             open: open,
             creatorFeeBps: creatorFeeBps,
             openBlock: uint64(block.number),
-            graduationTick: 0
+            graduationTick: 0,
+            bidRefTick: 0
         });
         liquidity = abi.decode(
             poolManager.unlock(abi.encode(_OP_GRADUATE, token, tokenAmount, usdcAmount, lockAmount)), (uint128)
@@ -207,6 +209,7 @@ contract ArchitexLaunchHook is BaseHook, IUnlockCallback, IArchitexLaunchHook {
 
         uint160 sqrtPriceX96 = _sqrtPriceX96(amount0, amount1);
         l.graduationTick = poolManager.initialize(key, sqrtPriceX96);
+        l.bidRefTick = l.graduationTick;
 
         int24 lower = TickMath.minUsableTick(TICK_SPACING);
         int24 upper = TickMath.maxUsableTick(TICK_SPACING);
@@ -234,28 +237,38 @@ contract ArchitexLaunchHook is BaseHook, IUnlockCallback, IArchitexLaunchHook {
         if (toLock != 0) {
             _pay(Currency.wrap(usdc), toLock);
             poolManager.mint(address(this), _usdcId(), toLock);
-            lockHeld[token] += toLock;
-            _placeBid(_launches[poolId], key, l.graduationTick);
+            _placeBid(_launches[poolId], key, l.graduationTick, toLock);
         }
     }
 
     /// @dev Adds all the USDC claims held for `l.token` as a fresh position (its own salt) holding only USDC, from half the
     ///      price at `refTick` down BID_SPAN_TICKS, paid by burning claims. Called with the graduation price (at
-    ///      graduation) and with the cheaper of the price just before a buy and the graduation price (inside that buy,
-    ///      which has since moved the price up), so the range is always wholly on the USDC side of the current price.
+    ///      graduation) and with a price no higher than the one just before a buy (inside that buy, which has since moved
+    ///      the price up), so the range is always wholly on the USDC side of the current price.
     ///      What the position cannot take (a unit or two of rounding) stays held and joins the next bid.
-    function _placeBid(Launch memory l, PoolKey memory key, int24 refTick) private {
+    ///      `extra` is the new USDC (claims already minted) joining what is held; `lockHeld` is written only when what is
+    ///      left over changes, so a bid that takes everything costs no storage write (a write and a refund would still
+    ///      raise the gas a buy has to be sent with).
+    function _placeBid(Launch memory l, PoolKey memory key, int24 refTick, uint256 extra) private {
         address token = l.token;
-        uint256 amount = lockHeld[token];
+        uint256 held = lockHeld[token];
+        uint256 amount = held + extra;
         (int24 lower, int24 upper) = _bidRange(l.usdcIs0, refTick);
-        // Empty only for a reference within a discount of the extreme tick, which no curve's pool can reach.
-        if (lower >= upper) return;
-        uint160 sqrtA = TickMath.getSqrtPriceAtTick(lower);
-        uint160 sqrtB = TickMath.getSqrtPriceAtTick(upper);
-        uint128 liquidity = l.usdcIs0
-            ? LiquidityAmounts.getLiquidityForAmount0(sqrtA, sqrtB, amount)
-            : LiquidityAmounts.getLiquidityForAmount1(sqrtA, sqrtB, amount);
-        if (liquidity == 0) return;
+        uint128 liquidity;
+        // The range is empty only for a reference within a discount of the extreme tick, which no curve's pool reaches.
+        if (lower < upper) {
+            liquidity = l.usdcIs0
+                ? LiquidityAmounts.getLiquidityForAmount0(
+                    TickMath.getSqrtPriceAtTick(lower), TickMath.getSqrtPriceAtTick(upper), amount
+                )
+                : LiquidityAmounts.getLiquidityForAmount1(
+                    TickMath.getSqrtPriceAtTick(lower), TickMath.getSqrtPriceAtTick(upper), amount
+                );
+        }
+        if (liquidity == 0) {
+            if (extra != 0) lockHeld[token] = amount;
+            return;
+        }
         uint256 salt = ++bidCount[token];
         (BalanceDelta added,) = poolManager.modifyLiquidity(
             key,
@@ -268,7 +281,7 @@ contract ArchitexLaunchHook is BaseHook, IUnlockCallback, IArchitexLaunchHook {
         if ((l.usdcIs0 ? added.amount1() : added.amount0()) != 0) revert BidNotOneSided();
         uint256 used = uint256(uint128(-(l.usdcIs0 ? added.amount0() : added.amount1())));
         poolManager.burn(address(this), _usdcId(), used);
-        lockHeld[token] = amount - used;
+        if (amount - used != held) lockHeld[token] = amount - used;
         emit BidLocked(token, used, liquidity, lower, upper);
     }
 
@@ -385,10 +398,15 @@ contract ArchitexLaunchHook is BaseHook, IUnlockCallback, IArchitexLaunchHook {
         }
 
         _collect(l.token, f);
-        // Only a buy inside the window pays a snipe fee, and its beforeSwap kept the price before it. The bid starts from
-        // the cheaper of that and the graduation price, so buys that lift the price above graduation cannot stack bids
-        // above where their dump will end (Claude review #9, L1); after a crash it still follows the price down.
-        if (f.snipe != 0) _placeBid(l, key, _cheaperOf(l.usdcIs0, _tickBeforeBuy, l.graduationTick));
+        // Only a buy inside the window pays a snipe fee, and its beforeSwap kept the price before it. Its bid starts from
+        // the lowest price any window buy has started from, this one included (the graduation price to begin with): the
+        // reference only moves down, so buys that lift the price cannot stack bids above where their dump will end
+        // (Claude review #9, L1, and its residual after a crash), and after a crash bids follow the price down.
+        if (f.snipe != 0) {
+            int24 ref = _cheaperOf(l.usdcIs0, _tickBeforeBuy, l.bidRefTick);
+            if (ref != l.bidRefTick) _launches[key.toId()].bidRefTick = ref;
+            _placeBid(l, key, ref, f.snipe);
+        }
         emit PoolTrade(
             l.token,
             sender,
@@ -443,7 +461,7 @@ contract ArchitexLaunchHook is BaseHook, IUnlockCallback, IArchitexLaunchHook {
         poolManager.mint(address(this), _usdcId(), f.platform + f.creator + f.snipe);
         pendingPlatform[token] += f.platform;
         pendingCreator[token] += f.creator;
-        if (f.snipe != 0) lockHeld[token] += f.snipe;
+        // The snipe fee's claims are placed as a bid by the caller, in the same call (_placeBid books any rounding).
     }
 
     // ─── Views ────────────────────────────────────────────────────────────────

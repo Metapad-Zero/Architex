@@ -456,6 +456,40 @@ abstract contract LaunchpadV14Test is V14Base {
         _assertSolvent();
     }
 
+    function test_aRecoveryInsideTheWindowNeverLiftsLaterBids() public {
+        address token = _launch(0, creatorWallet, "", false, 0);
+        _step(pad.SNIPE_BLOCKS());
+        vm.prank(bob);
+        pad.buy(token, 1_000_000e6, 0, bob, MAX);
+        bool u0 = _usdcIs0(token);
+
+        // A dump inside the window, then the first buy after it: its bid follows the price down and sets the reference.
+        vm.prank(bob);
+        router.sell(token, 150_000_000e18, 0, bob, MAX);
+        (, int24 crashed,,) = _slot0(_key(token));
+        vm.prank(carol);
+        router.buy(token, 3_000e6, 0, carol, MAX);
+        (, IArchitexLaunchHook.Launch memory l) = hook.launchOf(token);
+        assertEq(l.bidRefTick, crashed, "the reference fell to the crash");
+        (int24 lower, int24 upper) = _expectedBid(u0, crashed);
+
+        // A big buy lifts the price well back up; the next window buy's bid still starts from the crash, not the lift
+        // (split buys, a front-run or a lift held across blocks cannot stack bids above a dump: Claude review #9).
+        _step(3);
+        vm.prank(dave);
+        router.buy(token, 60_000e6, 0, dave, MAX); // most of it is surcharge this early: about 13,800 USDC moves the price
+        (, int24 lifted,,) = _slot0(_key(token));
+        assertTrue(u0 ? lifted < crashed - 6_932 : lifted > crashed + 6_932, "the price more than doubled back");
+        vm.recordLogs();
+        vm.prank(carol);
+        router.buy(token, 3_000e6, 0, carol, MAX);
+        _assertBid(vm.getRecordedLogs(), token, hook.bidCount(token), lower, upper);
+        (, l) = hook.launchOf(token);
+        assertEq(l.bidRefTick, crashed, "it never moves back up");
+        _assertHookClean(token);
+        _assertSolvent();
+    }
+
     // ─── Helpers ──────────────────────────────────────────────────────────────
 
     /// @dev A bid's range, recomputed from V14-SPEC §5: its top about half the price at `ref` (the tick before the buy
