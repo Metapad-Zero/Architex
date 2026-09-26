@@ -2997,7 +2997,9 @@ try {
   if (SIGNER === 'anvil') {
     await rpc('anvil_impersonateAccount', [me])
     const bal = await nativeOf(me, await latest())
-    if (bal < 100n * E18) await rpc('anvil_setBalance', [me, toHex(100n * E18)])
+    // Only when it runs low: anvil writes a new balance into the latest block's state, so a top-up on every restart
+    // would show up in the books of a block the run has not checked yet.
+    if (bal < 10n * E18) await rpc('anvil_setBalance', [me, toHex(100n * E18)])
     if (RUSDC_OWNER !== me) {
       // The actor is someone else (an anvil default account, say): the owner mints rUSDC and is feeTo, as itself.
       await rpc('anvil_impersonateAccount', [RUSDC_OWNER])
