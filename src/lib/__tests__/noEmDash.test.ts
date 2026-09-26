@@ -15,6 +15,7 @@ const FOLDERS = ['src/content', 'src/components', 'src/hooks']
 /** Everything else whose strings reach the screen: receipts, errors, form checks, chain names, the bulletin, the page head. */
 const FILES = [
   'index.html',
+  'public/home/index.html',
   'public/site.webmanifest',
   'server/listing/service.ts',
   'server/listing/tokenlist.ts',

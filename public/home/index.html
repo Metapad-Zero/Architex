@@ -3,9 +3,12 @@
 <head>
 <meta charset="utf-8">
 <script>
-// Old share links (architex.fun/#swap, #pools/..., #launch/...) belong to the app, which now lives on app.architex.fun.
-(function(){var own=['top','about','features','why','product','ecosystem','mission','technology','contracts'];var h=location.hash.slice(1);
-if(h&&own.indexOf(h)<0){location.replace('https://app.architex.fun/'+location.search+location.hash);return}
+// The app lives at /app/ on this same origin, so passkeys and browser wallets saved on architex.fun keep working.
+// Old share links (architex.fun/#swap, #pools/..., #launch/...) and home-screen installs made before the move open it.
+(function(){var own=['top','about','features','why','product','ecosystem','mission','technology','contracts'];
+function app(){var h=location.hash.slice(1);return h&&own.indexOf(h)<0}
+if(app()||navigator.standalone===true||matchMedia('(display-mode: standalone)').matches){location.replace('/app/'+location.search+(app()?location.hash:''));return}
+addEventListener('hashchange',function(){if(app())location.replace('/app/'+location.search+location.hash)});
 var t=null;try{t=localStorage.getItem('architex.home.theme')}catch(e){}if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);
 document.documentElement.classList.add('js');
 setTimeout(function(){document.querySelectorAll('.rv').forEach(function(e){if(e.getBoundingClientRect().top<innerHeight)e.classList.add('in')})},2500)})();
@@ -386,7 +389,7 @@ footer{padding:50px 0 60px;border-top:1px solid var(--line)}
         <svg class="moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
       </button>
       <a class="icon-btn" href="https://x.com/architexdex" target="_blank" rel="noopener" aria-label="Architex on X"><svg viewBox="0 0 24 24"><path fill="currentColor" d="M18.9 2H22l-7.6 8.7L23 22h-6.8l-5.3-6.9L4.8 22H1.7l8.1-9.3L1 2h7l4.8 6.3L18.9 2zm-1.2 18h1.9L6.4 3.9H4.4L17.7 20z"/></svg></a>
-      <a class="btn btn-ink btn-sm" href="https://app.architex.fun/#swap">Open app</a>
+      <a class="btn btn-ink btn-sm" href="/app/#swap">Open app</a>
     </div>
   </div>
 </header>
@@ -400,8 +403,8 @@ footer{padding:50px 0 60px;border-top:1px solid var(--line)}
       <p class="lead rv d2">Swap. Pool. Launch. Every price in USDC.</p>
       <p class="sub rv d2">Architex is a fast, plain-spoken DEX and token launchpad on Arc, Circle's USDC-native chain. Quotes appear as you type, fees are paid in dollars, and every contract is verified on chain.</p>
       <div class="cta-row rv d3">
-        <a class="btn btn-y" href="https://app.architex.fun/#swap">Start swapping <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a>
-        <a class="btn btn-ghost" href="https://app.architex.fun/#launch/new">Launch a token</a>
+        <a class="btn btn-y" href="/app/#swap">Start swapping <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a>
+        <a class="btn btn-ghost" href="/app/#launch/new">Launch a token</a>
       </div>
       <div class="hero-facts rv d4">
         <div><b class="tnum">100%</b>of core swap fees to LPs</div>
@@ -547,7 +550,7 @@ footer{padding:50px 0 60px;border-top:1px solid var(--line)}
             <div class="qrow"><span>Route</span><b>USDC → EURC</b></div>
             <div class="qrow"><span>Minimum received</span><b class="tnum" id="amt-min">230.32 EURC</b></div>
             <div class="qrow"><span>Price impact</span><b class="tnum">0.04%</b></div>
-            <a class="btn btn-y" href="https://app.architex.fun/#swap">Swap</a>
+            <a class="btn btn-y" href="/app/#swap">Swap</a>
           </div>
           <div class="act">
             <h4>Recent activity</h4>
@@ -577,8 +580,8 @@ footer{padding:50px 0 60px;border-top:1px solid var(--line)}
       <h2 class="rv d1">One exchange.<br><span class="g">Many moving parts.</span></h2>
       <p class="intro rv d2">The core AMM, the launchpad and its plugin marketplace share one set of contracts and one dollar. A token launched today trades on the same rails as USDC and EURC.</p>
       <div class="cta-row rv d3" style="margin-top:30px">
-        <a class="btn btn-ink" href="https://app.architex.fun/#docs">Read the docs</a>
-        <a class="btn btn-ghost" href="https://app.architex.fun/#pools">Browse pools</a>
+        <a class="btn btn-ink" href="/app/#docs">Read the docs</a>
+        <a class="btn btn-ghost" href="/app/#pools">Browse pools</a>
       </div>
     </div>
   </div>
@@ -641,7 +644,7 @@ footer{padding:50px 0 60px;border-top:1px solid var(--line)}
         <div class="fact"><small>License</small><b>MIT</b></div>
       </div>
       <div class="cta-row rv d4">
-        <a class="btn btn-y" href="https://app.architex.fun/#swap">Open Architex</a>
+        <a class="btn btn-y" href="/app/#swap">Open Architex</a>
         <a class="btn btn-ghost" href="https://x.com/architexdex" target="_blank" rel="noopener">Follow @architexdex</a>
       </div>
       <div class="warn rv d4"><b>Beta.</b> The Architex contracts have not been audited by a third party. Only use funds you can afford to lose.</div>
@@ -658,8 +661,8 @@ footer{padding:50px 0 60px;border-top:1px solid var(--line)}
       <h2>Built for dollars. Built for Arc.</h2>
       <p>Swap in seconds, keep the full fee on your liquidity, or launch something new for a single USDC.</p>
       <div class="cta-row" style="justify-content:center">
-        <a class="btn btn-ink" href="https://app.architex.fun/#swap">Open the app</a>
-        <a class="btn btn-ghost" href="https://app.architex.fun/#launch/new">Launch a token</a>
+        <a class="btn btn-ink" href="/app/#swap">Open the app</a>
+        <a class="btn btn-ghost" href="/app/#launch/new">Launch a token</a>
       </div>
     </div>
   </div>
@@ -674,8 +677,8 @@ footer{padding:50px 0 60px;border-top:1px solid var(--line)}
         <p>A fast, honest DEX and launchpad for Arc, Circle's USDC-native chain.</p>
       </div>
       <div class="foot-links">
-        <div><b>Product</b><a href="https://app.architex.fun/#swap">Swap</a><a href="https://app.architex.fun/#pools">Pools</a><a href="https://app.architex.fun/#launch">Launchpad</a></div>
-        <div><b>Learn</b><a href="https://app.architex.fun/#docs">Docs</a><a href="#why">Why Architex</a><a href="#contracts">Contracts</a></div>
+        <div><b>Product</b><a href="/app/#swap">Swap</a><a href="/app/#pools">Pools</a><a href="/app/#launch">Launchpad</a></div>
+        <div><b>Learn</b><a href="/app/#docs">Docs</a><a href="#why">Why Architex</a><a href="#contracts">Contracts</a></div>
         <div><b>Social</b><a href="https://x.com/architexdex" target="_blank" rel="noopener">X / Twitter</a></div>
       </div>
     </div>

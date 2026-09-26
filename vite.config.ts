@@ -1,11 +1,38 @@
-import { defineConfig } from 'vite'
+import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
+import fs from 'fs'
 import path from 'path'
 import { nodePolyfills } from 'vite-plugin-node-polyfills'
 import { devMetadata } from './server/devMetadata'
 
+/**
+ * The production layout: the landing page at /, the app at /app/. Both stay on architex.fun, one origin, so the
+ * passkeys, browser wallets and settings people saved before the move are all still there. The landing's source is
+ * public/home/index.html (the dev server keeps the app at / and the landing at /home/); the build moves both pages.
+ */
+function landingAtRoot(): Plugin {
+  let outDir = ''
+  return {
+    name: 'architex:landing-at-root',
+    apply: 'build',
+    configResolved(config) {
+      outDir = path.resolve(config.root, config.build.outDir)
+    },
+    closeBundle() {
+      const home = path.join(outDir, 'home')
+      const landing = path.join(home, 'index.html')
+      const app = path.join(outDir, 'index.html')
+      if (!fs.existsSync(landing) || !fs.existsSync(app)) return
+      fs.mkdirSync(path.join(outDir, 'app'), { recursive: true })
+      fs.renameSync(app, path.join(outDir, 'app', 'index.html'))
+      fs.renameSync(landing, app)
+      if (fs.readdirSync(home).length === 0) fs.rmdirSync(home)
+    },
+  }
+}
+
 export default defineConfig({
-  plugins: [react(), nodePolyfills(), devMetadata()],
+  plugins: [react(), nodePolyfills(), devMetadata(), landingAtRoot()],
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
