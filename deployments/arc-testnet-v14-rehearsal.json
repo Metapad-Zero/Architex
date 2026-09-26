@@ -1,0 +1,88 @@
+{
+  "chainId": 5042002,
+  "network": "Arc Testnet",
+  "mode": "rehearsal-usdc",
+  "deployer": "0x7212fA4Fe663d063A7a83dA0467d592ed3A51D46",
+  "commit": "3bc28ab",
+  "usdc": "0x309297011592BA9a157204e57EB0AF2175D8ceed",
+  "poolManager": "0x8366a39CC670B4001A1121B8F6A443A643e40951",
+  "create2Deployer": "0x4e59b44847b379578588920cA78FbF26c0B4956C",
+  "launchpad": "0x5a0eFD7b3ac83686E5a08d8004f181443A13CC58",
+  "hook": "0x8c420B3EC4d92d50Ff2928476d26A26e63e768ec",
+  "hookSalt": "0x0000000000000000000000000000000000000000000000000000000000000266",
+  "router": "0xf87C6Da66dCb64991208E1189Ea0e8e74bb90664",
+  "plugins": {
+    "split": "0xfd8e55DD52992Dc6B9ea7Af52fab70Ee28F5CD1f",
+    "holders": "0x17B608b4B55045c5380437E0E28752BC31194e2D",
+    "combo": "0x3CeA455cE9320Ac479cA59284D02ca91c78D1b5d"
+  },
+  "launchFee": "1000000",
+  "feeTo": "0x7212fA4Fe663d063A7a83dA0467d592ed3A51D46",
+  "feeToSetter": "0x7212fA4Fe663d063A7a83dA0467d592ed3A51D46",
+  "deployedAt": "2026-09-26T06:03:07.000Z",
+  "txs": {
+    "launchpad": "0x913aeab481c7690272cf4cecc321d0e5ca43c0f7967c14b07ff4ff1d732d28d2",
+    "hook": "0xac69053c20c17c8888d65ed25a974f1ade6dffd351abc4013d5afd3a4dfcfe2f",
+    "router": "0x8c1baabe9221f2938bd51c8fb729fb0200e047facf6a32eacb455532aaeaedf0",
+    "initialize": "0x201154a6fa03da2d5c3ce86a4c0c7671ac44ecf5c3d58f3703304410f2e317fd",
+    "split": "0xb0e1abea08ba042ed227f64865a47bdffe06c51ed656f2e59c71e05f80c08abb",
+    "holders": "0x9fde1c3d25978f1e1d8ecaa62b9cbe74e94d100e747cedac7263a54b4d059237",
+    "combo": "0xdd18452e784ee10c22f17b12f104bdb9c1220df6b46011c65437b185af321b91"
+  },
+  "rehearsal": {
+    "actor": "0x7212fA4Fe663d063A7a83dA0467d592ed3A51D46",
+    "signer": "key",
+    "rawSwapper": "0x69cf92c006C5bC512646BD6984e47d1Da024FB09",
+    "tokens": {
+      "RWAL": {
+        "address": "0xD7aD75F24f84e3E263b3580a461AE70d93B8E958",
+        "kind": "wallet",
+        "creatorFeeBps": 100,
+        "open": false,
+        "usdcIsCurrency0": true,
+        "poolId": "0x27f2e8b1db71ff6b99d8e0db366cfbbaec009bdcfdbab0c5cdaf921a62231ccd"
+      },
+      "RSPL": {
+        "address": "0x9A96EfCfd6b6184f5b448e9151c83639cec9cd33",
+        "kind": "split",
+        "creatorFeeBps": 1000,
+        "open": true,
+        "usdcIsCurrency0": true,
+        "poolId": "0xea152fb5ef6979804de3a0d4089e60e82f5b131890cc22de028c64247c794412"
+      },
+      "RHLD": {
+        "address": "0x2fB747e32255B07e7BDFF9b1b43ddc44f90fE1DD",
+        "kind": "holders",
+        "creatorFeeBps": 1000,
+        "open": false,
+        "usdcIsCurrency0": false,
+        "poolId": "0xdd1ccfe203b4cdb1e2cc91c66cac7d6c72a74874f0d136403641d8e3445e1f21"
+      },
+      "RCMB": {
+        "address": "0x357227Fd75205822B93B35F3Fb518da7792f0a78",
+        "kind": "combo",
+        "creatorFeeBps": 100,
+        "open": true,
+        "usdcIsCurrency0": true,
+        "poolId": "0x9d111ef2a5f42e6e1234db4c506bfb85fd48e3c8fdf362c5571eb6c2dbdaf8c2"
+      },
+      "RZRO": {
+        "address": "0x471779Bf350BC71fe18a81F6E4375342eC84284e",
+        "kind": "zero",
+        "creatorFeeBps": 0,
+        "open": false,
+        "usdcIsCurrency0": true,
+        "poolId": "0xb306fc6f5857b67d44574e8e5e5095931fa8b9072b9aa507a4994b445a0d33ac"
+      }
+    },
+    "steps": 43,
+    "transactions": 97,
+    "checks": 1762,
+    "gas": {
+      "deploy": "12134854",
+      "drive": "25299447"
+    },
+    "usdcAt25Gwei": "0.935858",
+    "finishedAt": "2026-09-26T06:07:37.588Z"
+  }
+}
