@@ -12,8 +12,9 @@ import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 ///         fee, as v1.3's launch router did, but it never moves USDC during a swap: the fees stay in the PoolManager as
 ///         the hook's ERC-6909 claims until the launchpad releases them (`release`, from its `syncPoolFees` or a
 ///         collection). For SNIPE_BLOCKS blocks after a pool opens, buys also pay a surcharge that starts at
-///         SNIPE_START_BPS and falls to 0 block by block; it is held as claims and locked into the pool as USDC-only
-///         liquidity below half the graduation price (V14-SPEC §5), so nobody can ever withdraw it.
+///         SNIPE_START_BPS and falls to 0 block by block. Inside the same buy it becomes USDC-only liquidity from half the
+///         price before that buy down (V14-SPEC §5), a bid nobody can ever withdraw; the curve's snipe fees become one
+///         at graduation, from half the graduation price down.
 ///
 ///         Only the launchpad opens pools with this hook (at graduation), and only the hook itself adds liquidity to a
 ///         closed pool; an open pool (the creator's choice at launch) takes anyone's liquidity. Nobody may donate to a
@@ -64,7 +65,6 @@ interface IArchitexLaunchHook {
     error UnknownLaunch();
     error AlreadyOpened();
     error FeesExceedAmount();
-    error NothingToLock();
     error DonationsRefused();
     error BidNotOneSided();
 
@@ -80,7 +80,8 @@ interface IArchitexLaunchHook {
     function SNIPE_START_BPS() external view returns (uint256);
     /// @notice 9,900: platform, creator and snipe fees together take at most 99% of a trade.
     function MAX_TOTAL_FEE_BPS() external view returns (uint256);
-    /// @notice 6,932 ticks, about half the price: a bid's top sits this far below the graduation price.
+    /// @notice 6,932 ticks, about half the price: a bid's top sits this far below the price it is placed from (the price
+    ///         just before the buy that paid it, or the graduation price).
     function BID_DISCOUNT_TICKS() external view returns (int24);
     /// @notice 92,200 ticks, about 10,000 times: how far down a bid runs from its top.
     function BID_SPAN_TICKS() external view returns (int24);
@@ -89,9 +90,10 @@ interface IArchitexLaunchHook {
     function usdc() external view returns (address);
 
     /// @notice Opens `token`'s pool at the price of the amounts given and locks them in one full-range position, then
-    ///         locks `lockAmount` (the curve's snipe fees) as a bid. Launchpad only, inside the sell-out buy, after it
-    ///         has sent the hook `tokenAmount` tokens and `usdcAmount + lockAmount` USDC. Tokens the position cannot
-    ///         take are burned; USDC it cannot take joins the bid.
+    ///         adds `lockAmount` (the curve's snipe fees) as the first bid, from half the graduation price down.
+    ///         Launchpad only, inside the sell-out buy, after it has sent the hook `tokenAmount` tokens and
+    ///         `usdcAmount + lockAmount` USDC. Tokens the position cannot take are burned; USDC it cannot take joins
+    ///         the bid.
     function graduate(
         address token,
         uint256 tokenAmount,
@@ -101,20 +103,18 @@ interface IArchitexLaunchHook {
         uint16 creatorFeeBps
     ) external returns (PoolId poolId, uint128 liquidity);
 
-    /// @notice Locks the snipe fees held for `token` into its pool as a bid. Anyone may call it. Does nothing (returns 0)
-    ///         while the price is below the bid's top: the USDC waits for the price to come back.
-    function lock(address token) external returns (uint128 liquidity);
-
     /// @notice Launchpad only: pays `token`'s pool fees out of the hook's claims to the launchpad and returns them.
     function release(address token) external returns (uint256 platformFee, uint256 creatorFee);
 
-    /// @notice USDC claims held for `token`, waiting to be locked by `lock`.
+    /// @notice USDC claims held for `token`'s next bid: the rounding the last bid could not take (a unit or two), which
+    ///         joins the next one. Snipe fees themselves never wait.
     function lockHeld(address token) external view returns (uint256);
     /// @notice Platform fees from `token`'s pool, held as claims until the launchpad releases them.
     function pendingPlatform(address token) external view returns (uint256);
     /// @notice Creator fees from `token`'s pool, held as claims until the launchpad releases them.
     function pendingCreator(address token) external view returns (uint256);
-    /// @notice How many bids `token`'s pool has; each is its own position (salt = its number).
+    /// @notice How many bids `token`'s pool has: the graduation bid (when the curve collected snipe fees) and one per buy
+    ///         in the pool's snipe window. Each is its own position (salt = its number).
     function bidCount(address token) external view returns (uint256);
     /// @notice The pool key a token graduates into (known before graduation).
     function poolKeyOf(address token) external view returns (PoolKey memory);

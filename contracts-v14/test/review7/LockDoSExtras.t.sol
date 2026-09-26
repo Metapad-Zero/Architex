@@ -16,7 +16,8 @@ import {ReviewBase, Flash} from "./ReviewBase.sol";
 ///         2. In an open pool every bid shared its far tick with the full-range position, and an outside LP could fill
 ///            that tick's liquidity cap (about 21M USDC, parked, not spent) so every later bid reverted
 ///            (TickLiquidityOverflow; Grok review #7's Low too). Bids now run BID_SPAN_TICKS down from their top and
-///            never reach the far tick.
+///            never reach the far tick, so a window buy still places its bid with the far tick full (and since bids are
+///            placed inside buys, a revert there would have stopped the buy itself).
 abstract contract LockDoSExtrasTest is ReviewBase {
     using PoolIdLibrary for PoolKey;
 
@@ -36,14 +37,11 @@ abstract contract LockDoSExtrasTest is ReviewBase {
         assertEq(in0 + in1, 0, "no fee ever accrues to the full-range position");
     }
 
-    function test_fillingTheFarTickNoLongerBlocksLock() public {
+    function test_fillingTheFarTickCannotStopABid() public {
         address token = _launch(0, creatorWallet, "", true, 0); // open pool
         _step(pad.SNIPE_BLOCKS());
         vm.prank(bob);
-        pad.buy(token, 1_000_000e6, 0, bob, MAX);
-        vm.prank(carol);
-        router.buy(token, 5_000e6, 0, carol, MAX); // opening-window buy: fees held for lock()
-        _step(hook.SNIPE_BLOCKS());
+        pad.buy(token, 1_000_000e6, 0, bob, MAX); // graduates: the pool's opening block, its 90% window
 
         PoolKey memory key = _key(token);
         bool u0 = _usdcIs0(token);
@@ -59,7 +57,10 @@ abstract contract LockDoSExtrasTest is ReviewBase {
         (gross,) = StateLibrary.getTickLiquidity(manager, key.toId(), farTick);
         assertEq(gross, Pool.tickSpacingToMaxLiquidityPerTick(200), "the far tick is full");
 
-        assertGt(hook.lock(token), 0, "lock() still works");
+        uint256 bids0 = hook.bidCount(token);
+        vm.prank(carol);
+        router.buy(token, 5_000e6, 0, carol, MAX); // an opening-window buy: its surcharge becomes a bid inside it
+        assertEq(hook.bidCount(token), bids0 + 1, "the bid still goes in");
         assertLe(hook.lockHeld(token), 2);
         _assertHookClean(token);
     }

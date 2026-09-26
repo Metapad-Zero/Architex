@@ -2,8 +2,11 @@
 pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
+import {Vm} from "forge-std/Vm.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {ArchitexLaunchpadV14} from "../src/ArchitexLaunchpadV14.sol";
@@ -13,17 +16,23 @@ import {MockUSDC} from "./utils/MockUSDC.sol";
 import {RawSwapper, V14Base} from "./V14Base.sol";
 
 /// @dev Drives random launches, curve and pool trades (exact in through the router, exact out through a raw swapper),
-///      graduations, locks, donation attempts, syncs and collections across a few tokens, in blocks inside and after
-///      both snipe windows.
+///      graduations, donation attempts, syncs and collections across a few tokens, in blocks inside and after both
+///      snipe windows, and checks every bid a buy or a graduation places against the pool's price right after.
 contract V14Handler is Test {
+    using PoolIdLibrary for PoolKey;
+
+    IPoolManager internal constant MANAGER = IPoolManager(0x8366a39CC670B4001A1121B8F6A443A643e40951);
+
     ArchitexLaunchpadV14 internal immutable pad;
     ArchitexLaunchHook internal immutable hook;
     ArchitexV4Router internal immutable router;
     RawSwapper internal immutable raw;
     MockUSDC internal immutable usdc;
     address[] public tokens;
-    uint256 public lockReverts;
     uint256 public donations;
+    /// @dev Bids placed anywhere but wholly under the market (checked on every buy's BidLocked).
+    uint256 public bidsAboveMarket;
+    uint256 public bidsPlaced;
 
     constructor(
         ArchitexLaunchpadV14 pad_,
@@ -77,7 +86,9 @@ contract V14Handler is Test {
         address t = tokens[i % tokens.length];
         if (!pad.isGraduated(t)) return;
         amount = bound(amount, 1e6, 50_000e6);
+        vm.recordLogs();
         router.buy(t, amount, 0, address(this), type(uint256).max);
+        _checkBids(t);
     }
 
     function poolSell(uint256 i, uint256 frac) external {
@@ -104,6 +115,7 @@ contract V14Handler is Test {
         }
         bool zeroForOne = buyTokens == usdcIs0;
         int256 specified = buyTokens ? int256(bound(amount, 1e18, 1_000_000e18)) : int256(bound(amount, 1e6, 1_000e6));
+        vm.recordLogs();
         try raw.swap(
             key,
             SwapParams({
@@ -111,24 +123,36 @@ contract V14Handler is Test {
                 amountSpecified: specified,
                 sqrtPriceLimitX96: zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
             })
-        ) {}
-            catch {}
+        ) {
+            _checkBids(t);
+        } catch {}
     }
 
     function graduate(uint256 i) external {
         if (tokens.length == 0) return;
         address t = tokens[i % tokens.length];
         if (pad.isGraduated(t)) return;
+        vm.recordLogs();
         pad.buy(t, 1_000_000e6, 0, address(this), type(uint256).max);
+        _checkBids(t);
     }
 
-    function lock(uint256 i) external {
-        if (tokens.length == 0) return;
-        address t = tokens[i % tokens.length];
-        if (!pad.isGraduated(t) || hook.lockHeld(t) == 0) return;
-        try hook.lock(t) {}
-        catch {
-            ++lockReverts;
+    /// @dev Every BidLocked in the last call must sit wholly on the USDC side of the pool's price now.
+    function _checkBids(address t) internal {
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32 sig = keccak256("BidLocked(address,uint256,uint128,int24,int24)");
+        for (uint256 j; j < logs.length; ++j) {
+            if (logs[j].topics[0] != sig || address(uint160(uint256(logs[j].topics[1]))) != t) continue;
+            (,, int24 lower, int24 upper) = abi.decode(logs[j].data, (uint256, uint128, int24, int24));
+            bytes32 slot0 = MANAGER.extsload(
+                keccak256(abi.encodePacked(PoolId.unwrap(hook.poolKeyOf(t).toId()), bytes32(uint256(6))))
+            );
+            int24 tick;
+            assembly ("memory-safe") {
+                tick := signextend(2, shr(160, slot0))
+            }
+            ++bidsPlaced;
+            if (address(usdc) < t ? tick >= lower : tick < upper) ++bidsAboveMarket;
         }
     }
 
@@ -179,13 +203,18 @@ contract LaunchpadV14InvariantTest is V14Base {
         targetContract(address(handler));
     }
 
+    /// @dev Coverage: the bid check only means something if bids were placed.
+    function afterInvariant() public {
+        emit log_named_uint("run: bids placed and checked against the market", handler.bidsPlaced());
+    }
+
     /// @dev The launchpad's USDC is exactly its books: platform and creator fees, curve snipe fees, live curve floats.
     function invariant_launchpadUsdcIsItsBooks() public view {
         _assertSolvent();
     }
 
     /// @dev The hook keeps no launch token and no USDC; its claims are exactly what it owes: pool fees not yet released
-    ///      and USDC waiting for a bid.
+    ///      and the rounding the last bid left.
     function invariant_hookHoldsOnlyWhatItOwes() public view {
         uint256 n = handler.tokensLength();
         uint256 owed;
@@ -198,9 +227,14 @@ contract LaunchpadV14InvariantTest is V14Base {
         assertEq(_hookClaims(), owed, "hook claims == what it owes");
     }
 
-    /// @dev lock() never reverts once there is something to lock (it waits instead), and no donation ever lands.
-    function invariant_lockNeverRevertsAndNobodyDonates() public view {
-        assertEq(handler.lockReverts(), 0, "lock reverted");
+    /// @dev Snipe fees never wait (each becomes a bid in the buy, or the graduation, that collects it), every bid lands
+    ///      wholly under the market, and no donation ever lands.
+    function invariant_nothingWaitsBidsSitUnderTheMarketNobodyDonates() public view {
+        uint256 n = handler.tokensLength();
+        for (uint256 i; i < n; ++i) {
+            assertLe(hook.lockHeld(handler.tokens(i)), 2, "snipe fees waiting");
+        }
+        assertEq(handler.bidsAboveMarket(), 0, "a bid placed above the market");
         assertEq(handler.donations(), 0, "a donation landed");
     }
 

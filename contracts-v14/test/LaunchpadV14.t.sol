@@ -236,37 +236,37 @@ abstract contract LaunchpadV14Test is V14Base {
         _assertSolvent();
     }
 
-    function test_poolSnipeFeeFallsBlockByBlockAndIsLocked() public {
+    function test_aWindowBuysSnipeFeeBecomesABidInThatBuy() public {
         address token = _launch(100, creatorWallet, "", false, 0);
         _step(pad.SNIPE_BLOCKS());
         vm.prank(bob);
         pad.buy(token, 1_000_000e6, 0, bob, MAX);
         assertEq(hook.snipeBpsOf(token), 9000, "graduation block: 90%");
+        uint256 bids0 = hook.bidCount(token); // a graduation bid only if rounding left the curve's USDC a unit
+        (, int24 before,,) = _slot0(_key(token));
 
+        uint256 pmUsdc = usdc.balanceOf(POOL_MANAGER);
+        vm.recordLogs();
         vm.prank(carol);
         router.buy(token, 1_000e6, 0, carol, MAX);
-        uint256 held = hook.lockHeld(token);
-        assertEq(held, _ceil(1_000e6 * 9000, 1e4), "90% held by the hook");
+        // The 90% became liquidity inside the buy, from half the price before it: nothing waits, no USDC moved out.
+        (int24 lower, int24 upper) = _expectedBid(_usdcIs0(token), before);
+        uint256 used = _assertBid(vm.getRecordedLogs(), token, bids0 + 1, lower, upper);
+        assertApproxEqAbs(used, _ceil(1_000e6 * 9000, 1e4), 2, "the whole surcharge, as a bid");
+        assertLe(hook.lockHeld(token), 2, "nothing waits");
+        assertEq(usdc.balanceOf(POOL_MANAGER), pmUsdc + 1_000e6, "the whole buy stays in the PoolManager");
 
         _step(10);
         assertEq(hook.snipeBpsOf(token), 4500);
         _step(10);
         assertEq(hook.snipeBpsOf(token), 0);
 
-        // Sells never pay it.
+        // Sells never pay it, and buys after the window place nothing.
         vm.prank(bob);
         router.sell(token, 1_000_000e18, 0, bob, MAX);
-        assertEq(hook.lockHeld(token), held, "sells pay no snipe fee");
-
-        // The surcharge never left the PoolManager: the lock turns the hook's claims into liquidity.
-        uint256 pmUsdc = usdc.balanceOf(POOL_MANAGER);
-        uint256 claims = _hookClaims();
-        vm.prank(dave);
-        uint128 liquidity = hook.lock(token);
-        assertGt(liquidity, 0, "locked as liquidity");
-        assertLe(hook.lockHeld(token), 2);
-        assertApproxEqAbs(claims - _hookClaims(), held, 2, "claims into the pool");
-        assertEq(usdc.balanceOf(POOL_MANAGER), pmUsdc, "no USDC moved");
+        vm.prank(carol);
+        router.buy(token, 1_000e6, 0, carol, MAX);
+        assertEq(hook.bidCount(token), bids0 + 1, "no new bids");
         _assertHookClean(token);
         _assertSolvent();
     }
@@ -399,72 +399,75 @@ abstract contract LaunchpadV14Test is V14Base {
         raw.donate(key, usdcIs0 ? 1e6 : 0, usdcIs0 ? 0 : 1e6);
     }
 
-    function test_everyBidIsItsOwnPositionAnchoredToTheGraduationPrice() public {
+    function test_eachWindowBuyPlacesItsOwnBidFromThePriceBeforeIt() public {
+        address token = _launch(0, creatorWallet, "", false, 0);
+        _step(pad.SNIPE_BLOCKS());
+        vm.prank(bob);
+        pad.buy(token, 1_000_000e6, 0, bob, MAX);
+        uint256 bids0 = hook.bidCount(token);
+        bool u0 = _usdcIs0(token);
+
+        (, int24 t1,,) = _slot0(_key(token));
+        vm.recordLogs();
+        vm.prank(carol);
+        router.buy(token, 2_000e6, 0, carol, MAX); // opening block: 90%
+        (int24 lower, int24 upper) = _expectedBid(u0, t1);
+        _assertBid(vm.getRecordedLogs(), token, bids0 + 1, lower, upper);
+
+        _step(5);
+        (, int24 t2,,) = _slot0(_key(token));
+        assertTrue(u0 ? t2 < t1 : t2 > t1, "the first buy moved the price up");
+        vm.recordLogs();
+        vm.prank(carol);
+        router.buy(token, 2_000e6, 0, carol, MAX); // still in the window
+        (lower, upper) = _expectedBid(u0, t2);
+        _assertBid(vm.getRecordedLogs(), token, bids0 + 2, lower, upper);
+        _assertHookClean(token);
+    }
+
+    function test_afterACrashTheNextWindowBuysBidFollowsThePriceDown() public {
         address token = _launch(0, creatorWallet, "", false, 0);
         _step(pad.SNIPE_BLOCKS());
         vm.prank(bob);
         pad.buy(token, 1_000_000e6, 0, bob, MAX);
         (, IArchitexLaunchHook.Launch memory l) = hook.launchOf(token);
-        (int24 lower, int24 upper) = _expectedBid(l);
+        bool u0 = l.usdcIs0;
 
-        vm.prank(carol);
-        router.buy(token, 2_000e6, 0, carol, MAX); // opening block: 90% held
-        vm.recordLogs();
-        hook.lock(token);
-        _assertBid(vm.getRecordedLogs(), token, 1, lower, upper);
-
-        _step(5);
-        vm.prank(carol);
-        router.buy(token, 2_000e6, 0, carol, MAX); // still in the window
-        vm.recordLogs();
-        hook.lock(token);
-        _assertBid(vm.getRecordedLogs(), token, 2, lower, upper);
-        assertEq(hook.bidCount(token), 2, "two bids, two positions");
-        _assertHookClean(token);
-    }
-
-    function test_aBidWaitsWhileThePriceIsBelowItsTop() public {
-        address token = _launch(0, creatorWallet, "", false, 0);
-        _step(pad.SNIPE_BLOCKS());
+        // Snipers dump inside the window (sells pay no surcharge): the price falls under half the graduation price.
         vm.prank(bob);
-        pad.buy(token, 1_000_000e6, 0, bob, MAX);
+        router.sell(token, 150_000_000e18, 0, bob, MAX);
+        (, int24 crashed,,) = _slot0(_key(token));
+        (int24 gradLower, int24 gradUpper) = _expectedBid(u0, l.graduationTick);
+        assertTrue(u0 ? crashed >= gradLower : crashed < gradUpper, "under half the graduation price");
+
+        // The next window buy's surcharge still becomes a bid at once, from half the crashed price: under the market.
+        vm.recordLogs();
         vm.prank(carol);
         router.buy(token, 3_000e6, 0, carol, MAX);
-        uint256 held = hook.lockHeld(token);
-        assertGt(held, 0);
-
-        // A dump takes the price under half the graduation price: the bid's range would not be USDC only.
-        uint256 dumped = 150_000_000e18;
-        vm.prank(bob);
-        uint256 got = router.sell(token, dumped, 0, bob, MAX);
-        assertEq(hook.lock(token), 0, "nothing locked");
-        assertEq(hook.lockHeld(token), held, "the claims wait");
-        assertEq(hook.bidCount(token), 0);
-
-        // Back above it (after the window, so the buy-back pays no surcharge), the bid goes in.
-        _step(hook.SNIPE_BLOCKS());
-        vm.prank(bob);
-        router.buy(token, got * 2, 0, bob, MAX);
-        assertGt(hook.lock(token), 0, "locked");
-        assertLe(hook.lockHeld(token), 2);
+        (int24 lower, int24 upper) = _expectedBid(u0, crashed);
+        _assertBid(vm.getRecordedLogs(), token, hook.bidCount(token), lower, upper);
+        (, int24 tickNow,,) = _slot0(_key(token));
+        assertTrue(u0 ? tickNow < lower : tickNow >= upper, "wholly under the market");
+        assertLe(hook.lockHeld(token), 2, "nothing waits");
         _assertHookClean(token);
+        _assertSolvent();
     }
 
     // ─── Helpers ──────────────────────────────────────────────────────────────
 
-    /// @dev The hook's bid range for a launch, recomputed from V14-SPEC §5: its top about half the graduation price,
-    ///      BID_SPAN_TICKS deep.
-    function _expectedBid(IArchitexLaunchHook.Launch memory l) internal view returns (int24 lower, int24 upper) {
+    /// @dev A bid's range, recomputed from V14-SPEC §5: its top about half the price at `ref` (the tick before the buy
+    ///      that paid it, or graduation), BID_SPAN_TICKS deep.
+    function _expectedBid(bool usdcIs0, int24 ref) internal view returns (int24 lower, int24 upper) {
         int24 d = hook.BID_DISCOUNT_TICKS();
         int24 span = hook.BID_SPAN_TICKS();
-        if (l.usdcIs0) {
-            int256 t = int256(l.graduationTick) + d + 1;
+        if (usdcIs0) {
+            int256 t = int256(ref) + d + 1;
             int256 c = t / 200;
             if (t > 0 && t % 200 != 0) c++;
             lower = int24(c * 200);
             upper = lower + span;
         } else {
-            int256 t = int256(l.graduationTick) - d;
+            int256 t = int256(ref) - d;
             int256 c = t / 200;
             if (t < 0 && t % 200 != 0) c--;
             upper = int24(c * 200);
@@ -472,17 +475,25 @@ abstract contract LaunchpadV14Test is V14Base {
         }
     }
 
-    function _assertBid(Vm.Log[] memory logs, address token, uint256 salt, int24 lower, int24 upper) internal view {
+    /// @dev The one BidLocked for `token` in `logs`: its range, and the bid count (salt) it left. Returns its USDC.
+    function _assertBid(Vm.Log[] memory logs, address token, uint256 salt, int24 lower, int24 upper)
+        internal
+        view
+        returns (uint256 used)
+    {
         bytes32 sig = keccak256("BidLocked(address,uint256,uint128,int24,int24)");
         bool found;
         for (uint256 i; i < logs.length; ++i) {
             if (logs[i].topics[0] != sig || address(uint160(uint256(logs[i].topics[1]))) != token) continue;
-            (,, int24 lo, int24 hi) = abi.decode(logs[i].data, (uint256, uint128, int24, int24));
+            assertFalse(found, "one bid");
+            int24 lo;
+            int24 hi;
+            (used,, lo, hi) = abi.decode(logs[i].data, (uint256, uint128, int24, int24));
             assertEq(lo, lower, "bid lower tick");
             assertEq(hi, upper, "bid upper tick");
             found = true;
         }
-        assertTrue(found, "a bid was locked");
+        assertTrue(found, "a bid was placed");
         assertEq(hook.bidCount(token), salt, "fresh salt");
     }
 

@@ -5,8 +5,21 @@ Independent adversarial pass (a separate Claude session, read-only, Foundry PoCs
 design, release and sync, donations refused, fresh anchored bids. Verdict: no High; one new Medium, introduced by the
 L2 fix (the anchored bid can be placed above a crashed market and harvested).
 
-**What was done about it:** pending the owner's choice of fix for M1 (see the end of this file once decided). The
-spec corrections that do not depend on it are made.
+**What was done about it** (owner's choice, 2026-09-25: "option A"):
+- **M1 (the anchored bid harvested after a crash): fixed by removing the pot.** There is no `lock()` any more. Each
+  snipe fee becomes a bid inside the buy that pays it (`afterSwap`), from half the price just before that buy (kept in
+  transient storage by `beforeSwap`); the curve's become the first bid at graduation, from half the graduation price.
+  A buy only moves the price up, so every bid is wholly under the market when placed, and nothing waits to be placed.
+  The reviewer's own fix (price `lock()` from the block's opening price) was considered: it stops the one-transaction
+  harvest but still leaves claims waiting for someone to lock them, open to a push held across a block boundary.
+- The review's PoCs are kept as regression tests in `contracts-v14/test/review8`, turned to assert the fix: the exact
+  harvest scenarios now lose (quarter of graduation -107 USDC, a tenth -149, 10% creator fee -3,356, USDC-only
+  attacker -149), and a pump inside the window with the attacker's own buys returns 4,726 of 50,000 USDC. `BidMath`
+  checks the new range from any reference tick against every tick a buy can leave the pool at. The invariant runs now
+  also check that every bid lands wholly under the market and that at most a unit or two per token is ever held.
+- I1 (the `ok` boundary) is gone with `lock()`. I2 and I3 and the spec errors are corrected (§10, §11, the
+  collectCreatorFees NatSpec).
+- Not taken: the reviewer's two prototype hooks (`FixedLaunchHook*.sol`), kept only in the review worktree.
 
 ---
 
