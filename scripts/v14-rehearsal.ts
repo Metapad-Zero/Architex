@@ -14,10 +14,12 @@
  * bits and CREATE2 salt, every contract byte for byte against the local build); deploys the test RawSwapper; launches
  * five tokens covering closed and open pools, creator fees of 0, 1% and 10%, a plain wallet, Split, Distribute to
  * holders and Combo, with and without the creator's first buy; buys on each curve inside its snipe window and after it;
- * graduates all five into Uniswap v4; trades each pool through the Architex router inside and after the pool's snipe
- * window; swaps exact-out through the RawSwapper; proves donations and outside liquidity in a closed pool are refused and
- * outside liquidity in an open pool is accepted; places bids with `lock`, including the case where the price sits under
- * the bid's top; and syncs, collects and pays out every fee.
+ * graduates all five into Uniswap v4 (the curve's surcharge becoming the first bid, from half the graduation price);
+ * trades each pool through the Architex router inside and after the pool's snipe window, where every buy places its own
+ * surcharge as a bid from half the price just before it, including a buy after the price was dumped under half the
+ * graduation price, whose bid follows the price down; swaps exact-out through the RawSwapper; proves donations and outside
+ * liquidity in a closed pool are refused and outside liquidity in an open pool is accepted; and syncs, collects and pays
+ * out every fee.
  *
  * Run B (a deployment on Arc's own USDC, 0x36…00): the curve half with 1 USDC trades, one inside the snipe window. A
  * graduation would need about 25,000 USDC. Arc's USDC is a precompile that a local fork cannot execute, so Run B only
@@ -32,8 +34,8 @@
  *     the model says, and nothing else may move;
  *   - the invariants: launchpad USDC == pendingFees + Σ pendingCreatorFees + Σ pendingSnipe + Σ (virtualUsdc -
  *     VIRTUAL_USDC_0) over live curves; the hook holds no USDC and no launch token; the hook's ERC-6909 claims ==
- *     Σ (pendingPlatform + pendingCreator + lockHeld); no token's supply grows, and every token's supply is held by the
- *     addresses tracked;
+ *     Σ (pendingPlatform + pendingCreator + lockHeld); snipe fees never wait (lockHeld ≤ 2 units per token); no token's
+ *     supply grows, and every token's supply is held by the addresses tracked;
  *   - the actor's native balance moved by the gas alone (rUSDC), or by the USDC traded plus the gas (Arc's USDC).
  * The snipe windows are checked against the block each transaction actually landed in. The run stops at the first step
  * with a failed check.
@@ -591,29 +593,34 @@ const floorTick = (t: number) => {
   if (t < 0 && t % TICK_SPACING !== 0) c--
   return c * TICK_SPACING
 }
-/** V14-SPEC §5: a bid's range, anchored to the graduation tick: its top about half the graduation price (6,932 ticks),
- *  running 92,200 ticks lower; placeable only while the whole range is on the USDC side of the current tick. */
-function bidRange(usdcIs0: boolean, graduationTick: number, tick: number) {
+/** V14-SPEC §5: a bid's range from the price it is placed from (`refTick`: the price just before the buy that paid it, or
+ *  the graduation price): its top about half that price (6,932 ticks past it, rounded away from the price onto the
+ *  200-tick spacing), running 92,200 ticks lower, clamped to the usable ticks. */
+function bidRange(usdcIs0: boolean, refTick: number): { lower: number; upper: number } {
   if (usdcIs0) {
-    const lower = ceilTick(graduationTick + BID_DISCOUNT_TICKS + 1)
-    const upper = Math.min(lower + BID_SPAN_TICKS, MAX_T)
-    return { lower, upper, ok: tick < lower && lower < upper }
+    const lower = ceilTick(refTick + BID_DISCOUNT_TICKS + 1)
+    return { lower, upper: Math.min(lower + BID_SPAN_TICKS, MAX_T) }
   }
-  const upper = floorTick(graduationTick - BID_DISCOUNT_TICKS)
-  const lower = Math.max(upper - BID_SPAN_TICKS, MIN_T)
-  return { lower, upper, ok: tick >= upper && lower < upper }
+  const upper = floorTick(refTick - BID_DISCOUNT_TICKS)
+  return { lower: Math.max(upper - BID_SPAN_TICKS, MIN_T), upper }
 }
+/** Whether a range is wholly on the USDC side of `tick`, in v4's own terms: a position takes currency0 alone while
+ *  tick < lower, currency1 alone while tick >= upper. */
+const usdcSide = (usdcIs0: boolean, r: { lower: number; upper: number }, tick: number) => (usdcIs0 ? tick < r.lower : tick >= r.upper)
+/** Whether `tick` is under half the price at `refTick`, that is past the top of a bid placed from it. */
+const pastBidTop = (usdcIs0: boolean, refTick: number, tick: number) => !usdcSide(usdcIs0, bidRange(usdcIs0, refTick), tick)
 interface BidModel {
   lower: number
   upper: number
   liquidity: bigint
   used: bigint
 }
-/** A bid of `amount` USDC into `pool` (updated): a USDC-only position at the anchored range, or none while the price is
- *  under its top or the amount buys no liquidity. */
-function modelBid(pool: V4.PoolModel, usdcIs0: boolean, graduationTick: number, amount: bigint): BidModel | undefined {
-  const { lower, upper, ok } = bidRange(usdcIs0, graduationTick, pool.tick)
-  if (!ok || amount === 0n) return undefined
+/** The bid the hook places with all it holds, `amount`, from `refTick`, into `pool` (updated, at its current price): a
+ *  USDC-only position of its own, or none if the range is empty or the amount buys no liquidity. Throws if the range is
+ *  not wholly on the USDC side of the current price (the hook would revert BidNotOneSided). */
+function modelBid(pool: V4.PoolModel, usdcIs0: boolean, refTick: number, amount: bigint): BidModel | undefined {
+  const { lower, upper } = bidRange(usdcIs0, refTick)
+  if (lower >= upper || amount === 0n) return undefined
   const a = V4.sqrtAtTick(lower)
   const b = V4.sqrtAtTick(upper)
   const liquidity = usdcIs0 ? V4.liquidityForAmount0(a, b, amount) : V4.liquidityForAmount1(a, b, amount)
@@ -635,7 +642,7 @@ interface GraduationModel {
   pool: V4.PoolModel
 }
 /** V14-SPEC §4: open the pool at the price where one full-range position takes both amounts, add that position, burn the
- *  tokens it leaves, and bid the snipe fees plus the USDC it leaves. */
+ *  tokens it leaves, and bid the snipe fees plus the USDC it leaves, from half the graduation price down. */
 function modelGraduation(usdcIs0: boolean, usdcSeeded: bigint, lockAmount: bigint): GraduationModel {
   const [amount0, amount1] = usdcIs0 ? [usdcSeeded, POOL_SUPPLY] : [POOL_SUPPLY, usdcSeeded]
   const sqrtPrice = V4.isqrt(V4.mulDiv(amount1, 1n << 192n, amount0))
@@ -912,8 +919,8 @@ async function sendRaw(step: string, what: string, to: Address | undefined, data
       save()
     }
     if (from === me) nextNonce = nonce + 1
-    // Arc's public RPC refuses bursts: poll it every 500 ms (v1.3's pace); a local anvil every 250 ms.
-    const receipt = await retry(() => pub.waitForTransactionReceipt({ hash, pollingInterval: SIGNER === 'anvil' ? 250 : 500, timeout: 180_000 }))
+    // Every 250 ms: window buys must land within 20 blocks (about 10 s), and Arc's RPC answers in about 35 ms.
+    const receipt = await retry(() => pub.waitForTransactionReceipt({ hash, pollingInterval: 250, timeout: 180_000 }))
     recordTx(step, what, receipt)
     progress.pending = undefined
     save()
@@ -1171,6 +1178,7 @@ function invariants(what: string, s: Snap, s0?: Snap) {
   check(`${what}: the hook holds no ${U}`, get('usdc:hook'), 0n)
   const hookOwes = syms.reduce((sum, x) => sum + get(`hook.platform:${x}`) + get(`hook.creator:${x}`) + get(`hook.lockHeld:${x}`), 0n)
   check(`${what}: hook claims == Σ (pendingPlatform + pendingCreator + lockHeld)`, get('hook.claims'), hookOwes)
+  check(`${what}: snipe fees never wait: lockHeld ≤ 2 units for every token`, syms.filter((x) => get(`hook.lockHeld:${x}`) > 2n).map((x) => `${x} ${get(`hook.lockHeld:${x}`)}`), [])
   check(`${what}: the hook holds no launch token`, syms.filter((x) => get(`tok.hook:${x}`) !== 0n), [])
   if (s0) {
     const grew = syms.filter((x) => s0.has(`tok.supply:${x}`) && get(`tok.supply:${x}`) > (s0.get(`tok.supply:${x}`) ?? 0n))
@@ -1330,8 +1338,19 @@ function modelPoolTrade(pool: V4.PoolModel, usdcIs0: boolean, creatorBps: bigint
   return { isBuy, gross: amount + fees.total, fees, tokenAmount: -tokOf(swap), paid: -tokOf(swap), received: amount, swap, snipeBps: 0n }
 }
 
-/** Checks one pool trade (router or RawSwapper) at its block against the model: events, pool state, books. */
-async function checkPoolTrade(what: string, k: Kind, sent: Sent, side: Side, exact: 'in' | 'out', amount: bigint, trader: 'burner' | 'raw'): Promise<PoolTradeModel> {
+interface CheckedTrade extends PoolTradeModel {
+  /** the pool's tick just before the trade, which a bid placed inside it is placed from */
+  tickBefore: number
+  /** the bid the trade placed: a buy inside the pool's window turns its surcharge into one (V14-SPEC §5) */
+  bid?: BidModel
+  /** lockHeld after the trade: a unit or two of rounding at most */
+  heldAfter: bigint
+}
+/** Checks one pool trade (router or RawSwapper) at its block against the model: events, pool state, books. A buy inside
+ *  the window must place its surcharge (with the unit or two of rounding any earlier bid left) as a bid of its own: a
+ *  fresh position at salt bidCount + 1, from half the pool's price just before the buy, wholly on the USDC side of the
+ *  price the buy leaves, paid by burning the claims, nothing but rounding left waiting. Any other trade places nothing. */
+async function checkPoolTrade(what: string, k: Kind, sent: Sent, side: Side, exact: 'in' | 'out', amount: bigint, trader: 'burner' | 'raw'): Promise<CheckedTrade> {
   const { receipt } = sent
   const B = receipt.blockNumber
   const B0 = B - 1n
@@ -1347,13 +1366,34 @@ async function checkPoolTrade(what: string, k: Kind, sent: Sent, side: Side, exa
   if (side === 'buy') {
     check(`${what}: the surcharge is the window's at the block it landed in (${blocks(B - BigInt(rec.openBlock))} after graduation)`, await rd<bigint>(HOOK, ABI.hook, 'snipeBpsOf', [token], B), bps)
   }
+  // The bid, placed after the swap (in afterSwap) with everything the hook holds for the token.
+  const held0 = await rd<bigint>(HOOK, ABI.hook, 'lockHeld', [token], B0)
+  const bids0 = await rd<bigint>(HOOK, ABI.hook, 'bidCount', [token], B0)
+  const bid = m.fees.snipe > 0n ? modelBid(pool, rec.usdcIs0, before.tick, held0 + m.fees.snipe) : undefined
+  const heldAfter = held0 + m.fees.snipe - (bid?.used ?? 0n)
+  const hookModifies = eventsOf<ModifyEvent>(receipt, POOL_MANAGER, ABI.pm, 'ModifyLiquidity').filter((e) => getAddress(e.sender) === HOOK)
+  if (bid) {
+    const salt = pad(toHex(bids0 + 1n), { size: 32 })
+    const range = bidRange(rec.usdcIs0, before.tick)
+    check(`${what}: BidLocked == model, its range from half the price just before the buy (tick ${before.tick})`, eventsOf(receipt, HOOK, ABI.hook, 'BidLocked'), [{
+      token, usdc: bid.used, liquidity: bid.liquidity, tickLower: range.lower, tickUpper: range.upper,
+    }])
+    checkThat(`${what}: the bid is wholly on the USDC side of the price the buy left`, usdcSide(rec.usdcIs0, bid, m.swap.tick), `tick ${m.swap.tick} after, bid [${bid.lower}, ${bid.upper}]`)
+    check(`${what}: Uniswap ModifyLiquidity: a fresh position, salt ${bids0 + 1n}`, hookModifies, [{ id: rec.poolId, sender: HOOK, tickLower: bid.lower, tickUpper: bid.upper, liquidityDelta: bid.liquidity, salt }])
+    check(`${what}: the bid's position (owner the hook, salt ${bids0 + 1n})`, await rd(STATE_VIEW, ABI.stateView, 'getPositionInfo', [rec.poolId, HOOK, bid.lower, bid.upper, salt], B), [bid.liquidity, 0n, 0n])
+    check(`${what}: the fees became claims, then the bid burned what it took`, claimMoves(receipt), [m.fees.total, -bid.used])
+    checkThat(`${what}: nothing waits: lockHeld after the buy ≤ 2 units`, heldAfter <= 2n, `${held0} + ${m.fees.snipe} surcharge - ${bid.used} placed = ${heldAfter}`)
+    recordChange(k, { id: `${receipt.transactionHash}:bid`, owner: HOOK, lower: bid.lower, upper: bid.upper, salt, block: B.toString(), delta: bid.liquidity.toString() })
+  } else {
+    check(`${what}: no surcharge, no bid, no position`, [eventsOf(receipt, HOOK, ABI.hook, 'BidLocked'), hookModifies], [[], []])
+    check(`${what}: the fees became the hook's claims (ERC-6909 mint)`, claimMoves(receipt), [m.fees.total])
+  }
   check(`${what}: PoolTrade == model`, eventsOf<PoolTradeEvent>(receipt, HOOK, ABI.hook, 'PoolTrade'), [{
     token, sender, isBuy: side === 'buy', usdcAmount: m.gross, tokenAmount: m.tokenAmount, platformFee: m.fees.platform, creatorFee: m.fees.creator, snipeFee: m.fees.snipe,
   }])
   check(`${what}: Uniswap Swap event == pool model (deltas, price, liquidity, tick, fee 0)`, eventsOf<SwapEvent>(receipt, POOL_MANAGER, ABI.pm, 'Swap'), [{
     id: rec.poolId, sender, amount0: m.swap.amount0, amount1: m.swap.amount1, sqrtPriceX96: m.swap.sqrtPrice, liquidity: m.swap.liquidity, tick: m.swap.tick, fee: 0,
   }])
-  check(`${what}: the fees became the hook's claims (ERC-6909 mint)`, claimMoves(receipt), [m.fees.total])
   if (m.swap.crossed.length) note(`${what}: crossed ticks ${m.swap.crossed.join(', ')} in ${m.swap.steps} steps`)
   const holder = trader === 'raw' ? 'raw' : 'burner'
   const usdcKey = `usdc:${holder}`
@@ -1365,14 +1405,19 @@ async function checkPoolTrade(what: string, k: Kind, sent: Sent, side: Side, exa
     [`tok.poolManager:${s}`]: side === 'buy' ? -m.received : m.paid,
     [`hook.platform:${s}`]: m.fees.platform,
     [`hook.creator:${s}`]: m.fees.creator,
-    [`hook.lockHeld:${s}`]: m.fees.snipe,
-    'hook.claims': m.fees.total,
+    [`hook.lockHeld:${s}`]: heldAfter - held0,
+    [`hook.bids:${s}`]: bid ? 1n : 0n,
+    'hook.claims': m.fees.total - (bid?.used ?? 0n),
+    // A bid sits wholly on the USDC side of the price, so the price and the active liquidity are the swap's alone.
     [`pool.sqrtP:${s}`]: m.swap.sqrtPrice - before.sqrtPrice,
     [`pool.tick:${s}`]: BigInt(m.swap.tick - before.tick),
     [`pool.liquidity:${s}`]: m.swap.liquidity - before.liquidity,
   }
-  await books(what, receipt, expected)
-  return m
+  const { s0, s1 } = await books(what, receipt, expected)
+  if (bid) {
+    check(`${what}: the PoolManager's ${U} grew by the whole buy (the bid only turned claims into liquidity)`, (s1.get('usdc:poolManager') ?? 0n) - (s0.get('usdc:poolManager') ?? 0n), m.paid)
+  }
+  return { ...m, tickBefore: before.tick, bid, heldAfter }
 }
 
 // ── Steps ─────────────────────────────────────────────────────────────────────
@@ -1707,7 +1752,7 @@ async function launchRefusals(token: Address, B: bigint) {
   await expectRevert('anyone initializing the token\'s pool first', POOL_MANAGER, ABI.pm, 'initialize', [key, V4.sqrtAtTick(0)], 'WrappedError(hook: PoolCreationRestricted)', B)
   await expectRevert('a transfer of the token into the PoolManager before graduation', token, ABI.token, 'transfer', [POOL_MANAGER, 0n], 'PoolLockedUntilGraduation', B, LP)
   await expectRevert('router.quoteBuy before graduation', ROUTER, ABI.router, 'quoteBuy', [token, usd(1)], 'NotGraduated', B)
-  await expectRevert('hook.lock before graduation', HOOK, ABI.hook, 'lock', [token], 'UnknownLaunch', B)
+  await expectRevert('hook.snipeBpsOf before graduation (no pool, no window)', HOOK, ABI.hook, 'snipeBpsOf', [token], 'UnknownLaunch', B)
   check('syncPoolFees for a live curve books nothing', await simulate(LP, ABI.pad, 'syncPoolFees', [token], B), [0n, 0n])
   await expectRevert('a curve buy past its deadline', LP, ABI.pad, 'buy', [token, usd(1), 0n, me, (await timeOf(B)) - 1n], 'Expired', B)
   await expectRevert('accrueTradeFees (the v1.3 push path, gone)', LP, ABI.pad, 'accrueTradeFees', [token, 1n, 1n], 'Forbidden', B, HOOK)
@@ -1793,16 +1838,22 @@ async function curveTrades(k: Kind, first: boolean) {
   })
 }
 
-/** The sell-out buy (graduation, V14-SPEC §4), and right after it, inside the pool's 20-block window: a router buy (pays
- *  the surcharge, held by the hook), a router sell (pays none); for the scenario tokens an exact-out buy through the
- *  RawSwapper (the surcharge on a net amount), a dump that takes the price under the bid's top, and a `lock` that then
- *  places nothing. Everything is checked afterwards at the blocks the transactions landed in. */
+/** The sell-out buy (graduation, V14-SPEC §4), then right away, inside the pool's 20-block window, sent before any check
+ *  reads the chain so they land in time:
+ *  - the other tokens: a router buy, which places its surcharge as a bid from half the graduation price (the price
+ *    just before it), and a router sell (no surcharge, no bid);
+ *  - the scenario tokens (one per pool orientation): a dump of 150M tokens that takes the price under half the
+ *    graduation price, then a router buy whose bid must follow the price down (from half the crashed price just before
+ *    it, nothing left waiting), then a router sell, then an exact-out buy through the RawSwapper (the surcharge on a net
+ *    amount, placed the same way).
+ *  Everything is then checked in order, at the blocks the transactions landed in. */
 async function graduate(k: Kind, first: boolean) {
   const id = `graduate:${k}`
   await step(id, async () => {
     const s = spec(k)
     const token = tokenOf(k)
     const feature = progress.features.includes(k)
+    const usdcIs0 = progress.planned[k]?.usdcIs0 as boolean
     await waitForBlock(BigInt(progress.tokenBlocks[k] as string) + SNIPE_BLOCKS)
     const sellOut = await tx(id, `buy ${s.symbol} out (graduation)`, LP, ABI.pad, 'buy', async () => {
       const [out, , , , spent, grad] = await simulate<readonly [bigint, bigint, bigint, bigint, bigint, boolean]>(LP, ABI.pad, 'quoteBuy', [token, A.graduateOffer], head)
@@ -1810,52 +1861,60 @@ async function graduate(k: Kind, first: boolean) {
       note(`the sell-out buy will pull ${fmt(spent)} rUSDC`)
       return [token, A.graduateOffer, out, me, await deadline()]
     }, A.graduateOffer)
-    const wBuy = await tx(id, `buy ${s.symbol} in the pool's window (router)`, ROUTER, ABI.router, 'buy', async () => {
-      const out = await simulate<bigint>(ROUTER, ABI.router, 'quoteBuy', [token, A.poolWindowBuy], head)
-      return [token, A.poolWindowBuy, out, me, await deadline()]
-    })
+    // The quote at the latest block is a floor for a buy landing later: the surcharge only falls.
+    const windowBuy = (what: string) => tx(id, what, ROUTER, ABI.router, 'buy', async () => [
+      token, A.poolWindowBuy, await simulate<bigint>(ROUTER, ABI.router, 'quoteBuy', [token, A.poolWindowBuy], head), me, await deadline(),
+    ])
+    let dump: Sent | undefined
+    if (feature) dump = await tx(id, `dump ${fmt18(A.dump)} ${s.symbol} under half the graduation price (router)`, ROUTER, ABI.router, 'sell', async () => [token, A.dump, 0n, me, await deadline()])
+    const wBuy = await windowBuy(feature ? `buy ${s.symbol} in the pool's window after the crash (router)` : `buy ${s.symbol} in the pool's window (router)`)
     const wSell = await tx(id, `sell ${s.symbol} in the pool's window (router)`, ROUTER, ABI.router, 'sell', async () => {
       const out = await simulate<bigint>(ROUTER, ABI.router, 'quoteSell', [token, A.poolWindowSell], head)
       return [token, A.poolWindowSell, out, me, await deadline()]
     })
     let rawOut: Sent | undefined
-    let dump: Sent | undefined
-    let lock0: Sent | undefined
     if (feature) {
-      const usdcIs0 = progress.planned[k]?.usdcIs0 as boolean
       rawOut = await tx(id, `exact-out buy of ${fmt18(A.rawWindowOutBuy)} ${s.symbol} in the window (RawSwapper)`, RAW(), ABI.raw, 'swap', [
         poolKeyOf(token), { zeroForOne: usdcIs0, amountSpecified: A.rawWindowOutBuy, sqrtPriceLimitX96: LIMIT(usdcIs0) },
       ])
-      dump = await tx(id, `dump ${fmt18(A.dump)} ${s.symbol} under the bid's top (router)`, ROUTER, ABI.router, 'sell', async () => [token, A.dump, 0n, me, await deadline()])
-      const lock0What = `lock ${s.symbol} while the price is under the bid's top`
-      // If both window buys landed after the window (a slow node), nothing waits to be locked and lock would revert.
-      if (minedTx(id, lock0What) || (await rd<bigint>(HOOK, ABI.hook, 'lockHeld', [token], head)) > 0n) lock0 = await tx(id, lock0What, HOOK, ABI.hook, 'lock', [token])
-      else note('no surcharge is waiting (the window buys landed after the window): the lock-under-the-top case is skipped for this token')
     }
 
     await checkGraduation(k, sellOut, first)
-    const wb = await checkPoolTrade(`window buy (router)`, k, wBuy, 'buy', 'in', wBuy.args[1] as bigint, 'burner')
-    progress.notes[`${id}:poolWindowBps`] = wb.snipeBps.toString()
-    if (wb.snipeBps === 0n) note("the pool's window buy landed after the window (surcharge 0)")
-    const quoted = await rd<bigint>(ROUTER, ABI.router, 'quoteBuy', [token, wBuy.args[1]], wBuy.receipt.blockNumber - 1n)
     const rec = poolRec(k)
-    const q0 = modelPoolTrade(await poolAt('quote model', k, wBuy.receipt.blockNumber - 1n), rec.usdcIs0, BigInt(rec.creatorBps), snipeBpsAt(BigInt(rec.openBlock), wBuy.receipt.blockNumber - 1n, BigInt(rec.creatorBps)), 'buy', 'in', wBuy.args[1] as bigint)
+    const gradBid = bidRange(rec.usdcIs0, rec.graduationTick)
+    const gradTop = rec.usdcIs0 ? gradBid.lower : gradBid.upper
+    if (dump) {
+      const d = await checkPoolTrade('crash: dump (router)', k, dump, 'sell', 'in', A.dump, 'burner')
+      checkThat('crash: the dump took the price under half the graduation price (past the graduation bid\'s top)', pastBidTop(rec.usdcIs0, rec.graduationTick, d.swap.tick), `tick ${rec.graduationTick} at graduation, ${d.swap.tick} after the dump, graduation bid's top at ${gradTop}`)
+    }
+    const what = feature ? 'crash: window buy after the dump (router)' : 'window buy (router)'
+    const wb = await checkPoolTrade(what, k, wBuy, 'buy', 'in', wBuy.args[1] as bigint, 'burner')
+    progress.notes[`${id}:poolWindowBps`] = wb.snipeBps.toString()
+    if (!wb.bid) note("the pool's window buy landed after the window: no surcharge, no bid")
+    else if (feature) {
+      checkThat('crash: the buy started from under half the graduation price', pastBidTop(rec.usdcIs0, rec.graduationTick, wb.tickBefore), `tick ${wb.tickBefore} before the buy`)
+      const top = rec.usdcIs0 ? wb.bid.lower : wb.bid.upper
+      checkThat("crash: its bid followed the price down: from half the crashed price, past the graduation bid's top", rec.usdcIs0 ? wb.bid.lower > gradBid.lower : wb.bid.upper < gradBid.upper,
+        `bid [${wb.bid.lower}, ${wb.bid.upper}] from tick ${wb.tickBefore}; graduation bid [${gradBid.lower}, ${gradBid.upper}]; tops ${top} vs ${gradTop}`)
+      check('crash: nothing waits after the buy (lockHeld ≤ 2 units)', wb.heldAfter <= 2n, true)
+      progress.notes[`${id}:crashBid`] = `${wb.bid.lower},${wb.bid.upper},${wb.tickBefore}`
+    } else {
+      check('window buy: its bid is placed from half the graduation price (the first trade after graduation)', [wb.tickBefore, wb.bid.lower, wb.bid.upper], [rec.graduationTick, gradBid.lower, gradBid.upper])
+    }
+    const B0 = wBuy.receipt.blockNumber - 1n
+    const quoted = await rd<bigint>(ROUTER, ABI.router, 'quoteBuy', [token, wBuy.args[1]], B0)
+    const q0 = modelPoolTrade(await poolAt('quote model', k, B0), rec.usdcIs0, BigInt(rec.creatorBps), snipeBpsAt(BigInt(rec.openBlock), B0, BigInt(rec.creatorBps)), 'buy', 'in', wBuy.args[1] as bigint)
     check("window buy: router.quoteBuy at the block before == model with that block's surcharge", quoted, q0.received)
-    const sellModel = await checkPoolTrade('window sell (router): pays no surcharge', k, wSell, 'sell', 'in', wSell.args[1] as bigint, 'burner')
+    const sellModel = await checkPoolTrade('window sell (router): pays no surcharge, places no bid', k, wSell, 'sell', 'in', wSell.args[1] as bigint, 'burner')
     check('window sell: quote at the block before == fill (a sell has no surcharge to change)', await rd<bigint>(ROUTER, ABI.router, 'quoteSell', [token, wSell.args[1]], wSell.receipt.blockNumber - 1n), sellModel.received)
     if (rawOut) await checkPoolTrade('exact-out buy in the window (RawSwapper)', k, rawOut, 'buy', 'out', A.rawWindowOutBuy, 'raw')
-    if (dump) {
-      const d = await checkPoolTrade('dump (router)', k, dump, 'sell', 'in', A.dump, 'burner')
-      const r = bidRange(rec.usdcIs0, rec.graduationTick, d.swap.tick)
-      checkThat("the dump took the price under the bid's top", !r.ok, `tick ${d.swap.tick}, bid top at tick ${rec.usdcIs0 ? r.lower : r.upper}`)
-    }
-    if (lock0) await checkLock('lock under the top', k, lock0)
   })
 }
 
 /** Everything the sell-out buy does (V14-SPEC §4), against the model: the curve's exact fill, the pool opened at the
  *  price where one full-range position takes both amounts, that position, the tokens burned, the graduation bid at the
- *  anchored range, and the books (the launchpad's float leaves, the hook keeps only claims). */
+ *  first bid (the curve's surcharge, from half the graduation price down), and the books (the launchpad's float leaves,
+ *  the hook keeps only claims). */
 async function checkGraduation(k: Kind, sent: Sent, first: boolean) {
   const s = spec(k)
   const x = s.symbol
@@ -1885,7 +1944,7 @@ async function checkGraduation(k: Kind, sent: Sent, first: boolean) {
   const g = modelGraduation(usdcIs0, usdcSeeded, lockAmount)
   const poolId = poolIdOf(token)
   const key = poolKeyOf(token)
-  note(`${x} graduated: ${fmt(usdcSeeded)} rUSDC × 200M tokens at tick ${g.tick}; ${fmt(lockAmount)} rUSDC of curve surcharge to lock; ${fmt18(g.burned)} tokens left over`)
+  note(`${x} graduated: ${fmt(usdcSeeded)} rUSDC × 200M tokens at tick ${g.tick}; ${fmt(lockAmount)} rUSDC of curve surcharge to bid; ${fmt18(g.burned)} tokens left over`)
   check('Graduated == model', eventsOf(receipt, LP, ABI.pad, 'Graduated'), [{ token, poolId, usdcSeeded, tokensSeeded: POOL_SUPPLY, liquidityLocked: g.liquidity, snipeLocked: lockAmount }])
   check('PoolOpened == model', eventsOf(receipt, HOOK, ABI.hook, 'PoolOpened'), [{ token, poolId, sqrtPriceX96: g.sqrtPrice, tokensAdded: g.tokensUsed, usdcAdded: g.usdcUsed, liquidity: g.liquidity, open: s.open }])
   check('Uniswap Initialize == model (sorted currencies, fee 0, spacing 200, the hook, the price, its tick)', eventsOf(receipt, POOL_MANAGER, ABI.pm, 'Initialize'), [{
@@ -1910,16 +1969,16 @@ async function checkGraduation(k: Kind, sent: Sent, first: boolean) {
   check("the hook's full-range position (owner the hook, salt 0): liquidity, no fees", fullRange, [g.liquidity, 0n, 0n])
   check('the leftover tokens were burned (Transfer to 0 from the hook)', eventsOf<{ from: Address; to: Address; value: bigint }>(receipt, token, ABI.token, 'Transfer').filter((t) => getAddress(t.to) === zeroAddress), g.burned > 0n ? [{ from: HOOK, to: zeroAddress, value: g.burned }] : [])
   if (g.bid) {
-    check('BidLocked == model: the anchored range from the graduation tick', eventsOf(receipt, HOOK, ABI.hook, 'BidLocked'), [{ token, usdc: g.bid.used, liquidity: g.bid.liquidity, tickLower: g.bid.lower, tickUpper: g.bid.upper }])
+    check('BidLocked == model: the first bid, from half the graduation price (the graduation tick)', eventsOf(receipt, HOOK, ABI.hook, 'BidLocked'), [{ token, usdc: g.bid.used, liquidity: g.bid.liquidity, tickLower: g.bid.lower, tickUpper: g.bid.upper }])
     const bidPos = await rd<readonly [bigint, bigint, bigint]>(STATE_VIEW, ABI.stateView, 'getPositionInfo', [poolId, HOOK, g.bid.lower, g.bid.upper, pad(toHex(1), { size: 32 })], B)
     check('the graduation bid position (owner the hook, salt 1)', bidPos, [g.bid.liquidity, 0n, 0n])
     const topPrice = Math.pow(1.0001, usdcIs0 ? -g.bid.lower : g.bid.upper)
     const gradPrice = Math.pow(1.0001, usdcIs0 ? -g.tick : g.tick)
     checkThat("the bid's top is half the graduation price (V14-SPEC §5)", Math.abs(topPrice / gradPrice - 0.5) < 0.02, `${(topPrice / gradPrice).toFixed(4)} of it, ${BID_SPAN_TICKS} ticks deep`)
   } else {
-    check('no graduation bid: nothing to lock bought any liquidity', eventsOf(receipt, HOOK, ABI.hook, 'BidLocked'), [])
+    check('no graduation bid: nothing to place bought any liquidity', eventsOf(receipt, HOOK, ABI.hook, 'BidLocked'), [])
   }
-  check("the hook's claims: minted the USDC to lock, burned what the bid took", claimMoves(receipt), [...(g.toLock > 0n ? [g.toLock] : []), ...(g.bid ? [-g.bid.used] : [])])
+  check("the hook's claims: minted the USDC to bid, burned what the bid took", claimMoves(receipt), [...(g.toLock > 0n ? [g.toLock] : []), ...(g.bid ? [-g.bid.used] : [])])
   const launch = await rd<readonly [Hex, Record<string, unknown>]>(HOOK, ABI.hook, 'launchOf', [token], B)
   check('hook.launchOf(token)', [launch[0], launch[1]], [poolId, { token, usdcIs0, open: s.open, creatorFeeBps: Number(s.feeBps), openBlock: B, graduationTick: g.tick }])
   check("hook.snipeBpsOf in the graduation block: the pool's window opens at 90% (capped)", await rd<bigint>(HOOK, ABI.hook, 'snipeBpsOf', [token], B), snipeBpsAt(B, B, s.feeBps))
@@ -1945,77 +2004,6 @@ async function checkGraduation(k: Kind, sent: Sent, first: boolean) {
     await expectRevert('initializing the pool again', POOL_MANAGER, ABI.pm, 'initialize', [key, g.sqrtPrice], 'WrappedError(hook: PoolCreationRestricted)', B)
     await expectRevert('a router buy past its deadline', ROUTER, ABI.router, 'buy', [token, usd(1), 0n, me, (await timeOf(B)) - 1n], 'Expired', B)
   }
-}
-
-/** `lock` at its block: a fresh position (salt = the new bidCount) at the anchored range, paid by burning claims, the
- *  price untouched; or, while the price is under the bid's top, nothing at all and the claims wait (V14-SPEC §5). */
-async function checkLock(what: string, k: Kind, sent: Sent) {
-  const { receipt } = sent
-  const B = receipt.blockNumber
-  const B0 = B - 1n
-  const rec = poolRec(k)
-  const x = sym(k)
-  const token = tokenOf(k)
-  const held = await rd<bigint>(HOOK, ABI.hook, 'lockHeld', [token], B0)
-  const count = await rd<bigint>(HOOK, ABI.hook, 'bidCount', [token], B0)
-  checkThat(`${what}: surcharge was waiting to be locked`, held > 0n, `${fmt(held)} rUSDC`)
-  const pool = await poolAt(what, k, B0)
-  const bid = modelBid(pool, rec.usdcIs0, rec.graduationTick, held)
-  check(`${what}: lock() at the block before returns the model's liquidity`, await simulate<bigint>(HOOK, ABI.hook, 'lock', [token], B0), bid?.liquidity ?? 0n)
-  if (!bid) {
-    check(`${what}: no bid, no position, nothing burned`, [eventsOf(receipt, HOOK, ABI.hook, 'BidLocked'), eventsOf(receipt, POOL_MANAGER, ABI.pm, 'ModifyLiquidity'), claimMoves(receipt)], [[], [], []])
-    await books(what, receipt, {})
-    return
-  }
-  const salt = pad(toHex(count + 1n), { size: 32 })
-  check(`${what}: BidLocked == model (the anchored range)`, eventsOf(receipt, HOOK, ABI.hook, 'BidLocked'), [{ token, usdc: bid.used, liquidity: bid.liquidity, tickLower: bid.lower, tickUpper: bid.upper }])
-  check(`${what}: Uniswap ModifyLiquidity: a fresh position, salt ${count + 1n}`, eventsOf(receipt, POOL_MANAGER, ABI.pm, 'ModifyLiquidity'), [{ id: rec.poolId, sender: HOOK, tickLower: bid.lower, tickUpper: bid.upper, liquidityDelta: bid.liquidity, salt }])
-  check(`${what}: paid by burning the hook's claims`, claimMoves(receipt), [-bid.used])
-  check(`${what}: the new position (owner the hook, salt ${count + 1n})`, await rd(STATE_VIEW, ABI.stateView, 'getPositionInfo', [rec.poolId, HOOK, bid.lower, bid.upper, salt], B), [bid.liquidity, 0n, 0n])
-  recordChange(k, { id: `${receipt.transactionHash}:bid`, owner: HOOK, lower: bid.lower, upper: bid.upper, salt, block: B.toString(), delta: bid.liquidity.toString() })
-  // A bid sits wholly on the USDC side of the price, so the pool's active liquidity and price do not move.
-  await books(what, receipt, { 'hook.claims': -bid.used, [`hook.lockHeld:${x}`]: -bid.used, [`hook.bids:${x}`]: 1n })
-}
-
-async function lockStep(k: Kind) {
-  const id = `lock:${k}`
-  await step(id, async () => {
-    const token = tokenOf(k)
-    const held = await rd<bigint>(HOOK, ABI.hook, 'lockHeld', [token], head)
-    if (held === 0n && !minedTx(id, `lock ${sym(k)}`)) {
-      await expectRevert(`lock ${sym(k)} with nothing held`, HOOK, ABI.hook, 'lock', [token], 'NothingToLock', head)
-      return
-    }
-    await checkLock(`lock ${sym(k)}`, k, await tx(id, `lock ${sym(k)}`, HOOK, ABI.hook, 'lock', [token]))
-  })
-}
-
-/** After the dump: a buy (after the pool's window) back above the bid's top, then `lock` places the waiting surcharge. */
-async function buyback(k: Kind) {
-  const id = `buyback:${k}`
-  await step(id, async () => {
-    const s = spec(k)
-    const token = tokenOf(k)
-    const rec = poolRec(k)
-    await waitForBlock(BigInt(rec.openBlock) + SNIPE_BLOCKS)
-    const back = await tx(id, `buy ${s.symbol} back above the bid's top (router)`, ROUTER, ABI.router, 'buy', async () => {
-      // Twice what the dump paid out, as the forge test does: enough to lift the price back over the top.
-      const dumped = progress.txs.find((t) => t.step === `graduate:${k}` && t.what.startsWith('dump'))
-      const r = dumped ? await retry(() => pub.getTransactionReceipt({ hash: dumped.hash })) : undefined
-      const out = r ? eventsOf<PoolTradeEvent>(r, HOOK, ABI.hook, 'PoolTrade')[0]?.usdcAmount ?? usd(20_000) : usd(20_000)
-      return [token, out * 2n, 0n, me, await deadline()]
-    })
-    const m = await checkPoolTrade('buy back (router, after the window: no surcharge)', k, back, 'buy', 'in', back.args[1] as bigint, 'burner')
-    check('buy back: no surcharge', m.fees.snipe, 0n)
-    const r = bidRange(rec.usdcIs0, rec.graduationTick, m.swap.tick)
-    checkThat("the price is back above the bid's top", r.ok, `tick ${m.swap.tick}, top at tick ${rec.usdcIs0 ? r.lower : r.upper}`)
-    const what = `lock ${s.symbol} above the top`
-    if (!minedTx(id, what) && (await rd<bigint>(HOOK, ABI.hook, 'lockHeld', [token], head)) === 0n) {
-      await expectRevert(`${what} with nothing held`, HOOK, ABI.hook, 'lock', [token], 'NothingToLock', head)
-      return
-    }
-    await checkLock('lock above the top', k, await tx(id, what, HOOK, ABI.hook, 'lock', [token]))
-  })
 }
 
 /** After the pool's window: a router buy and sell, quote == fill both ways. */
@@ -2480,7 +2468,10 @@ async function finalState() {
     checkThat('the curve surcharge was exercised: window buys landed inside the window', windowPaid > 0, `${windowPaid} of ${windowBuys} window buys paid it`)
     if (!REAL) {
       const bps = made.map((k) => BigInt(progress.notes[`graduate:${k}:poolWindowBps`] ?? '0'))
-      checkThat("the pool's surcharge was exercised: window buys paid it", bps.some((b) => b > 0n), `window buys paid ${bps.join(', ')} bps`)
+      checkThat("the pool's surcharge was exercised: window buys paid it and placed it as bids", bps.some((b) => b > 0n), `window buys paid ${bps.join(', ')} bps`)
+      const crashed = progress.features.filter((k) => progress.notes[`graduate:${k}:crashBid`])
+      checkThat('the crash case was exercised: a window buy after a dump under half the graduation price placed its bid from the crashed price',
+        crashed.length > 0, `${crashed.map(sym).join(', ') || 'none'} of ${progress.features.map(sym).join(', ')}`)
     }
   }, true)
 }
@@ -2603,10 +2594,6 @@ try {
   } else {
     for (const [i, k] of KINDS.entries()) await graduate(k, i === 0)
     await fundRaw()
-    for (const k of KINDS) {
-      if (progress.features.includes(k)) await buyback(k)
-      else await lockStep(k)
-    }
     for (const k of KINDS) await poolTrades(k)
     for (const k of progress.features) await rawSwaps(k)
     await outsideLiquidity()
