@@ -399,28 +399,31 @@ abstract contract LaunchpadV14Test is V14Base {
         raw.donate(key, usdcIs0 ? 1e6 : 0, usdcIs0 ? 0 : 1e6);
     }
 
-    function test_eachWindowBuyPlacesItsOwnBidFromThePriceBeforeIt() public {
+    function test_eachWindowBuyPlacesItsOwnBidNeverAboveHalfTheGraduationPrice() public {
         address token = _launch(0, creatorWallet, "", false, 0);
         _step(pad.SNIPE_BLOCKS());
         vm.prank(bob);
         pad.buy(token, 1_000_000e6, 0, bob, MAX);
         uint256 bids0 = hook.bidCount(token);
-        bool u0 = _usdcIs0(token);
+        (, IArchitexLaunchHook.Launch memory l) = hook.launchOf(token);
+        bool u0 = l.usdcIs0;
+        (int24 lower, int24 upper) = _expectedBid(u0, l.graduationTick);
 
         (, int24 t1,,) = _slot0(_key(token));
+        assertEq(t1, l.graduationTick, "nothing has traded yet");
         vm.recordLogs();
         vm.prank(carol);
         router.buy(token, 2_000e6, 0, carol, MAX); // opening block: 90%
-        (int24 lower, int24 upper) = _expectedBid(u0, t1);
         _assertBid(vm.getRecordedLogs(), token, bids0 + 1, lower, upper);
 
+        // The price is now above graduation: the next window buy's bid still starts from half the graduation price, a
+        // position of its own (Claude review #9, L1: a buyer lifting the price in steps cannot stack bids above it).
         _step(5);
         (, int24 t2,,) = _slot0(_key(token));
         assertTrue(u0 ? t2 < t1 : t2 > t1, "the first buy moved the price up");
         vm.recordLogs();
         vm.prank(carol);
         router.buy(token, 2_000e6, 0, carol, MAX); // still in the window
-        (lower, upper) = _expectedBid(u0, t2);
         _assertBid(vm.getRecordedLogs(), token, bids0 + 2, lower, upper);
         _assertHookClean(token);
     }

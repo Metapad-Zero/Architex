@@ -49,9 +49,10 @@ interface IBurnable {
 ///
 /// Bids: snipe fees become USDC-only liquidity below the price the moment they are collected, bids nobody can ever
 /// withdraw. The curve's, at graduation, from half the graduation price down; a pool buy's, inside that buy, from half
-/// the price just before it down. A buy only moves the price up, so a bid is always wholly below the market when it is
-/// placed, and moving where one lands means trading inside the snipe window, where every buy pays the surcharge.
-/// Nothing is held for later but a unit or two of rounding, which joins the next bid.
+/// the cheaper of the price just before it and the graduation price, down. A buy only moves the price up, so a bid is
+/// always wholly below the market when it is placed, and no bid ever starts above half the graduation price: a buyer
+/// who lifts the price in many small buys cannot stack his own bids above where his dump will end. Nothing is held for
+/// later but a unit or two of rounding, which joins the next bid.
 ///
 /// Positions: the graduation position is full range (salt 0); every bid gets a fresh salt, so a later bid never
 /// touches an older position. Nobody may donate (a donation accrues fees to in-range positions, and a position that
@@ -80,10 +81,9 @@ contract ArchitexLaunchHook is BaseHook, IUnlockCallback, IArchitexLaunchHook {
     uint256 public constant SNIPE_START_BPS = 9000;
     /// @inheritdoc IArchitexLaunchHook
     uint256 public constant MAX_TOTAL_FEE_BPS = 9900;
-    /// @dev A bid starts this many ticks below the price it is placed from (the price just before the buy that paid it,
-    ///      or the graduation price), about half of it: a sniper who dumps the moment the window closes is not paid back
-    ///      out of his own surcharge (Argus's F-1), and planting a bid above the market would take doubling the price
-    ///      first, inside the window, where every buy pays the surcharge.
+    /// @dev A bid starts this many ticks below the price it is placed from (the cheaper of the price just before the buy
+    ///      that paid it and the graduation price), about half of it: a sniper who dumps the moment the window closes is
+    ///      not paid back out of his own surcharge (Argus's F-1), and no bid can be planted above the market.
     int24 public constant BID_DISCOUNT_TICKS = 6932;
     /// @dev A bid runs from its top down about 10,000 times (a multiple of the tick spacing), not to the extreme tick:
     ///      the extreme tick is shared with the full-range position, and an outside LP in an open pool could fill its
@@ -241,9 +241,9 @@ contract ArchitexLaunchHook is BaseHook, IUnlockCallback, IArchitexLaunchHook {
 
     /// @dev Adds all the USDC claims held for `l.token` as a fresh position (its own salt) holding only USDC, from half the
     ///      price at `refTick` down BID_SPAN_TICKS, paid by burning claims. Called with the graduation price (at
-    ///      graduation) and with the price just before a buy (inside that buy, which has since moved the price up), so the
-    ///      range is always wholly on the USDC side of the current price. What the position cannot take (a unit or two of
-    ///      rounding) stays held and joins the next bid.
+    ///      graduation) and with the cheaper of the price just before a buy and the graduation price (inside that buy,
+    ///      which has since moved the price up), so the range is always wholly on the USDC side of the current price.
+    ///      What the position cannot take (a unit or two of rounding) stays held and joins the next bid.
     function _placeBid(Launch memory l, PoolKey memory key, int24 refTick) private {
         address token = l.token;
         uint256 amount = lockHeld[token];
@@ -270,6 +270,12 @@ contract ArchitexLaunchHook is BaseHook, IUnlockCallback, IArchitexLaunchHook {
         poolManager.burn(address(this), _usdcId(), used);
         lockHeld[token] = amount - used;
         emit BidLocked(token, used, liquidity, lower, upper);
+    }
+
+    /// @dev The cheaper token price of two ticks: with USDC as currency0 a higher tick is a cheaper token.
+    function _cheaperOf(bool usdcIs0, int24 a, int24 b) private pure returns (int24) {
+        if (usdcIs0) return a > b ? a : b;
+        return a < b ? a : b;
     }
 
     /// @dev A bid's range: its top about half the price at `refTick` (BID_DISCOUNT_TICKS past it, rounded away from the
@@ -379,8 +385,10 @@ contract ArchitexLaunchHook is BaseHook, IUnlockCallback, IArchitexLaunchHook {
         }
 
         _collect(l.token, f);
-        // Only a buy inside the window pays a snipe fee, and its beforeSwap kept the price before it.
-        if (f.snipe != 0) _placeBid(l, key, _tickBeforeBuy);
+        // Only a buy inside the window pays a snipe fee, and its beforeSwap kept the price before it. The bid starts from
+        // the cheaper of that and the graduation price, so buys that lift the price above graduation cannot stack bids
+        // above where their dump will end (Claude review #9, L1); after a crash it still follows the price down.
+        if (f.snipe != 0) _placeBid(l, key, _cheaperOf(l.usdcIs0, _tickBeforeBuy, l.graduationTick));
         emit PoolTrade(
             l.token,
             sender,
