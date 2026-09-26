@@ -15,18 +15,23 @@ function landingAtRoot(): Plugin {
   return {
     name: 'architex:landing-at-root',
     apply: 'build',
+    enforce: 'post',
     configResolved(config) {
       outDir = path.resolve(config.root, config.build.outDir)
     },
-    closeBundle() {
-      const home = path.join(outDir, 'home')
-      const landing = path.join(home, 'index.html')
-      const app = path.join(outDir, 'index.html')
-      if (!fs.existsSync(landing) || !fs.existsSync(app)) return
-      fs.mkdirSync(path.join(outDir, 'app'), { recursive: true })
-      fs.renameSync(app, path.join(outDir, 'app', 'index.html'))
-      fs.renameSync(landing, app)
-      if (fs.readdirSync(home).length === 0) fs.rmdirSync(home)
+    writeBundle: {
+      order: 'post',
+      handler() {
+        const home = path.join(outDir, 'home')
+        const landing = path.join(home, 'index.html')
+        const app = path.join(outDir, 'index.html')
+        // A build that ships the old layout would send every landing link to a missing /app/: stop it instead.
+        if (!fs.existsSync(landing) || !fs.existsSync(app)) throw new Error(`landing-at-root: ${app} or ${landing} is missing`)
+        fs.mkdirSync(path.join(outDir, 'app'), { recursive: true })
+        fs.renameSync(app, path.join(outDir, 'app', 'index.html'))
+        fs.renameSync(landing, app)
+        if (fs.readdirSync(home).length === 0) fs.rmdirSync(home)
+      },
     },
   }
 }
