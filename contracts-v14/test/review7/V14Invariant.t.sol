@@ -16,9 +16,10 @@ import {RawSwapper} from "../V14Base.sol";
 import {MockUSDC} from "../utils/MockUSDC.sol";
 import {ReviewBase, Flash} from "./ReviewBase.sol";
 
-/// @dev Claude review #7's invariant run, on the claims design. Random curve trades, graduations, every kind of pool
-///      swap (raw and through the router), block rolls, lock(), donation attempts, outside liquidity in the open pool
-///      (and attempts on the closed one), syncs and fee collections, with no USDC in the PoolManager beyond the pools'.
+/// @dev Claude review #7's invariant run, on the claims design with bids placed inside window buys. Random curve
+///      trades, graduations, every kind of pool swap (raw and through the router), block rolls, donation attempts,
+///      outside liquidity in the open pool (and attempts on the closed one), syncs and fee collections, with no USDC in
+///      the PoolManager beyond the pools'.
 contract Review7Handler is Test {
     using PoolIdLibrary for PoolKey;
 
@@ -33,7 +34,6 @@ contract Review7Handler is Test {
     address[3] internal actors;
     uint128[2] public fullRangeL;
     uint256 public closedAddSucceeded;
-    uint256 public lockReverts;
     uint256 public donations;
     uint256 public swaps;
     uint256 public swapFails;
@@ -157,15 +157,6 @@ contract Review7Handler is Test {
         }
     }
 
-    function lockBid(uint256 ti) external {
-        address t = tokens[ti % 2];
-        if (!pad.isGraduated(t) || hook.lockHeld(t) == 0) return;
-        try hook.lock(t) {}
-        catch {
-            ++lockReverts;
-        }
-    }
-
     function donate(uint256 ti, uint256 amt, bool usdcSide) external {
         address t = tokens[ti % 2];
         if (!pad.isGraduated(t)) return;
@@ -238,18 +229,16 @@ abstract contract V14InvariantTest is ReviewBase {
 
     uint256 internal graduatedRuns;
     uint256 internal swapTotal;
-    uint256 internal lockRevertTotal;
 
-    /// @dev Coverage: how many runs graduated at least one token, and how many swaps and lock() reverts happened.
+    /// @dev Coverage: how many runs graduated at least one token, and how many swaps happened.
     function afterInvariant() public {
         if (pad.isGraduated(toks[0]) || pad.isGraduated(toks[1])) ++graduatedRuns;
         swapTotal += handler.swaps();
-        lockRevertTotal += handler.lockReverts();
         emit log_named_uint(
             "run: graduated tokens", (pad.isGraduated(toks[0]) ? 1 : 0) + (pad.isGraduated(toks[1]) ? 1 : 0)
         );
         emit log_named_uint("run: successful pool swaps", handler.swaps());
-        emit log_named_uint("run: lock() reverts", handler.lockReverts());
+        emit log_named_uint("run: bids", hook.bidCount(toks[0]) + hook.bidCount(toks[1]));
         emit log_named_uint("run: raw swap failures", handler.swapFails());
         emit log_named_bytes("run: last raw swap failure", handler.lastFail());
     }
@@ -263,9 +252,10 @@ abstract contract V14InvariantTest is ReviewBase {
         assertEq(IERC20(toks[1]).balanceOf(address(hook)), 0);
     }
 
-    /// @dev The review's Medium, as an invariant: lock() never reverts (it waits instead), and no donation lands.
-    function invariant_lockNeverRevertsAndNobodyDonates() public view {
-        assertEq(handler.lockReverts(), 0, "lock reverted");
+    /// @dev The review's Medium, as an invariant: snipe fees never wait to be locked, and no donation lands.
+    function invariant_nothingWaitsAndNobodyDonates() public view {
+        assertLe(hook.lockHeld(toks[0]), 2, "snipe fees waiting");
+        assertLe(hook.lockHeld(toks[1]), 2, "snipe fees waiting");
         assertEq(handler.donations(), 0, "a donation landed");
     }
 

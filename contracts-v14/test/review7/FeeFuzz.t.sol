@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import {Vm} from "forge-std/Vm.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
@@ -8,9 +9,11 @@ import {ReviewBase} from "./ReviewBase.sol";
 
 /// @notice Claude review #7 (holds), on the claims design: every kind of swap, both sort orders, any creator fee, any
 ///         block of the window, with no USDC in the PoolManager beyond the pool's own. For each swap: only the trader's
-///         USDC moves (in on a buy, out on a sell), the fees become exactly that much of the hook's claims, the platform,
-///         creator and snipe fees are each at least their rate of the trader's gross USDC (to a unit), sells never pay
-///         the surcharge, and after a sync the launchpad's USDC equals its books and the hook's claims what it owes.
+///         USDC moves (in on a buy, out on a sell), the platform and creator fees become exactly that much of the hook's
+///         claims and a buy's snipe fee becomes a bid inside the same swap (nothing left waiting but a unit or two), the
+///         platform, creator and snipe fees are each at least their rate of the trader's gross USDC (to a unit), sells
+///         never pay the surcharge, and after a sync the launchpad's USDC equals its books and the hook's claims what it
+///         owes.
 abstract contract FeeFuzzTest is ReviewBase {
     struct Snap {
         uint256 traderUsdc;
@@ -68,16 +71,19 @@ abstract contract FeeFuzzTest is ReviewBase {
         }
 
         Snap memory a = _snap(token);
+        vm.recordLogs();
         raw.swap(_key(token), p);
+        (uint256 sf, uint256 bid) = _snipeAndBid(token, vm.getRecordedLogs());
         Snap memory b = _snap(token);
 
         uint256 pf = b.pf - a.pf;
         uint256 cf = b.cf - a.cf;
-        uint256 sf = b.held - a.held;
+        assertLe(b.held, 2, "nothing waits");
         if (isBuy) {
             uint256 paid = a.traderUsdc - b.traderUsdc;
             assertEq(b.pmUsdc - a.pmUsdc, paid, "all the trader paid is in the PoolManager");
-            assertEq(b.claims - a.claims, pf + cf + sf, "the fees are the hook's claims");
+            assertEq(bid, sf + a.held - b.held, "the snipe fee (and any rounding left before) is the bid");
+            assertEq(b.claims + bid, a.claims + pf + cf + sf, "platform and creator fees are the hook's claims");
             assertGt(b.traderTokens, a.traderTokens, "tokens received");
             assertGe(pf * 1e4, paid * 50, "platform fee >= 0.5% of gross");
             assertGe((cf + 1) * 1e4, paid * cfee, "creator fee >= its rate of gross (to a unit)");
@@ -92,6 +98,7 @@ abstract contract FeeFuzzTest is ReviewBase {
             assertEq(b.claims - a.claims, pf + cf, "the fees are the hook's claims");
             uint256 gross = got + pf + cf; // what the pool paid out
             assertEq(sf, 0, "sells pay no surcharge");
+            assertEq(bid, 0, "sells place no bid");
             assertGe(pf * 1e4, gross * 50, "platform fee >= 0.5% of gross");
             assertGe((cf + 1) * 1e4, gross * cfee, "creator fee >= its rate of gross (to a unit)");
             if (kind == 3) assertEq(got, amount, "exact out");
@@ -101,6 +108,20 @@ abstract contract FeeFuzzTest is ReviewBase {
         _sync(token);
         _assertSolvent();
         _assertHookClean(token);
+    }
+
+    /// @dev The snipe fee the swap's PoolTrade reports, and the USDC its BidLocked put in the pool (0 when none).
+    function _snipeAndBid(address token, Vm.Log[] memory logs) internal pure returns (uint256 sf, uint256 bid) {
+        bytes32 trade = keccak256("PoolTrade(address,address,bool,uint256,uint256,uint256,uint256,uint256)");
+        bytes32 locked = keccak256("BidLocked(address,uint256,uint128,int24,int24)");
+        for (uint256 i; i < logs.length; ++i) {
+            if (logs[i].topics.length < 2 || address(uint160(uint256(logs[i].topics[1]))) != token) continue;
+            if (logs[i].topics[0] == trade) {
+                (,,,,, sf) = abi.decode(logs[i].data, (bool, uint256, uint256, uint256, uint256, uint256));
+            } else if (logs[i].topics[0] == locked) {
+                (bid,,,) = abi.decode(logs[i].data, (uint256, uint128, int24, int24));
+            }
+        }
     }
 
     /// @dev After the window, no sequence of buys and sells returns more USDC than it paid (fees on both legs).
