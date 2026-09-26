@@ -17,7 +17,7 @@ import { CURVE, INITIAL_CURVE, quoteBuy, quotePoolBuy, quotePoolSell, quoteSell,
 import { FIXTURE_SUITE, FIXTURE_SUITE_V14, isV14Available, suiteFor, type LaunchVersion } from './deployment'
 import type { LaunchRecord, LaunchTrade } from './launch'
 import { setLaunchFixtureApi, type FixtureCreateArgs } from './launchFixtureApi'
-import { canLockBid, launchPoolKey, poolFeesOnGross, poolIdOf, snipeBps, usdcIsCurrency0, type PoolTradeFees } from './launchV14'
+import { launchPoolKey, poolFeesOnGross, poolIdOf, snipeBps, usdcIsCurrency0, type PoolTradeFees } from './launchV14'
 // The builder's own encoders, so a fixture launch carries exactly what the builder would send.
 import { encodeBurnShareData as encodeBurnShare, encodeComboData as encodeCombo, encodeSplitData as encodeSplit } from './plugins/plan'
 import { DEEPEN_DEFAULT_BURN_BPS, type CreatorFeeState } from './plugins/state'
@@ -63,26 +63,18 @@ interface FixtureLaunch extends LaunchRecord {
 
 /**
  * A graduated v1.4 token's Uniswap pool, simulated as its full-range position: a constant product on the USDC and the
- * tokens it holds, with no LP fee and the hook's fees on the USDC side. The locked bids sit from about half the
- * graduation price down, and are counted, not traded against.
+ * tokens it holds, with no LP fee and the hook's fees on the USDC side. Its bids (the curve's snipe fees at graduation,
+ * then each window buy's own, placed inside that buy) sit below the market, and are counted, not traded against.
  */
 interface PoolBook {
   usdc: bigint
   tokens: bigint
   usdcIs0: boolean
   openBlock: number
-  /** The pool's tick when it opened: its bids are placed from it. */
-  graduationTick: number
   poolId: Hex
-  /** Snipe fees the hook holds (as claims) until anyone locks them; and what has been locked as bids. */
-  lockHeld: bigint
+  /** The bids placed (hook.bidCount), and the USDC in them. */
+  bids: number
   locked: bigint
-}
-
-/** The pool's tick at a book's reserves: log base 1.0001 of currency1 per currency0, rounded down (close enough here). */
-function tickOf(book: Pick<PoolBook, 'usdc' | 'tokens' | 'usdcIs0'>): number {
-  const [amount0, amount1] = book.usdcIs0 ? [book.usdc, book.tokens] : [book.tokens, book.usdc]
-  return Math.floor(Math.log(Number(amount1) / Number(amount0)) / Math.log(1.0001))
 }
 
 interface SplitBook {
@@ -431,18 +423,19 @@ function snipeAt(launch: FixtureLaunch, time: number): number {
   return opened === undefined ? 0 : snipeBps(BigInt(opened), BigInt(blockAt(time)), launch.creatorFeeBps)
 }
 
-/** Graduation into Uniswap: the pool opens at the curve's last price with its USDC and the 200M, and the curve's snipe fees lock in. */
+/** Graduation into Uniswap: the pool opens at the curve's last price with its USDC and the 200M, and the curve's snipe fees become its first bid. */
 function openPool(launch: FixtureLaunch, next: CurveState, time: number): void {
   const id = launch.token.toLowerCase()
-  const opening = { usdc: realUsdc(next), tokens: CURVE.POOL_SUPPLY, usdcIs0: usdcIsCurrency0(usdcAddress(), launch.token) }
+  const snipe = store.snipe.get(id) ?? 0n
   store.pools.set(id, {
-    ...opening,
+    usdc: realUsdc(next),
+    tokens: CURVE.POOL_SUPPLY,
+    usdcIs0: usdcIsCurrency0(usdcAddress(), launch.token),
     openBlock: blockAt(time),
-    graduationTick: tickOf(opening),
     poolId: poolIdOf(launchPoolKey(launch.token, usdcAddress(), FIXTURE_SUITE_V14.hook)),
-    lockHeld: 0n,
-    // The curve's snipe fees become the pool's first bid, placed at the graduation price.
-    locked: store.snipe.get(id) ?? 0n,
+    // The curve's snipe fees become the pool's first bid, from half the graduation price down.
+    bids: snipe > 0n ? 1 : 0,
+    locked: snipe,
   })
   store.snipe.set(id, 0n)
 }
@@ -488,7 +481,11 @@ function buyInternal(trader: Address, token: Address, usdcIn: bigint, time: numb
     setBalance(trader, token, fixtureBalance(trader, token) + trade.out)
     book.usdc = trade.next.usdc
     book.tokens = trade.next.tokens
-    book.lockHeld += trade.fees.snipeFee
+    // A buy inside the window places its own snipe fee as a bid, in the same transaction.
+    if (trade.fees.snipeFee > 0n) {
+      book.bids += 1
+      book.locked += trade.fees.snipeFee
+    }
     accrue(token, trade.fees.creatorFee)
     record(token, {
       trader: FIXTURE_SUITE_V14.router,
@@ -894,12 +891,10 @@ function seedMarket(): void {
   if (harborHolders) harborHolders.others = 500_000_000n * E18
   collect(harbor)
 
-  // Graduated into an open pool on the other side of USDC (its currency1), then dumped under half its opening price:
-  // the snipe fees its window collected wait with the hook, since a lock would place nothing there.
+  // Graduated into an open pool on the other side of USDC (its currency1); one buy in its window placed a bid.
   const lowTide = launchWithV14('split', { name: 'Low Tide', symbol: 'LOWT', metadataURI: '', creatorFeeBps: 50, openPool: true }, NOW - 40_000, false, splitV14)
   buyInternal(WHALE, lowTide, 1_000_000n * USDC, NOW - 30_000)
   buyInternal(alice, lowTide, 700n * USDC, NOW - 29_994)
-  sellInternal(WHALE, lowTide, 300_000_000n * E18, NOW - 20_000)
   sellInternal(alice, lowTide, fixtureBalance(alice, lowTide) / 2n, NOW - 3_000)
   collect(lowTide)
 
@@ -934,12 +929,10 @@ function poolState(book: PoolBook): NonNullable<LaunchRecord['v4']> {
   return {
     poolId: book.poolId,
     sqrtPriceX96: sqrt((amount1 << 192n) / amount0),
-    tick: tickOf(book),
-    graduationTick: book.graduationTick,
     usdcIs0: book.usdcIs0,
     openBlock: BigInt(book.openBlock),
     liquidity: sqrt(book.usdc * book.tokens),
-    lockHeld: book.lockHeld,
+    bidCount: BigInt(book.bids),
   }
 }
 
@@ -1082,19 +1075,8 @@ function install(): void {
     },
     snipeHeld: (token) => {
       const launch = store.launches.find((item) => item.token.toLowerCase() === token.toLowerCase())
-      if (launch?.version !== 'v14') return undefined
-      return launch.graduated ? poolOf(token).lockHeld : (store.snipe.get(token.toLowerCase()) ?? 0n)
-    },
-    lock: (token) => {
-      const book = poolOf(token)
-      if (book.lockHeld === 0n) throw new Error('NothingToLock')
-      // As the hook: nothing is placed while the price is under the bid's top; the USDC waits.
-      if (canLockBid(tickOf(book), book.graduationTick, book.usdcIs0)) {
-        book.locked += book.lockHeld
-        book.lockHeld = 0n
-      }
-      emit()
-      return nextHash('lock')
+      if (launch?.version !== 'v14' || launch.graduated) return undefined
+      return store.snipe.get(token.toLowerCase()) ?? 0n
     },
     claim: (token, owner) => {
       // The token's claim: accrue, then pay the owner everything it has earned so far.

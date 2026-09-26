@@ -136,8 +136,8 @@ export function DocsFees() {
       </p>
       <p>
         v1.4's anti-sniping fee is not a creator fee and goes to no one: it becomes liquidity in
-        the token's own pool that nobody can withdraw. See{' '}
-        <span className="font-semibold">Graduation</span>.
+        the token's own pool, below the market, that nobody can withdraw, with nothing for anyone
+        to collect or press. See <span className="font-semibold">Graduation</span>.
       </p>
     </div>
   )

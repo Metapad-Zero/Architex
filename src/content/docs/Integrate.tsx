@@ -275,7 +275,10 @@ v4Router.sell(token, tokensIn, minUsdcOut, to, deadline)
 // pool fees wait as the hook's claims until a sync (anyone)
 hook.pendingPlatform(token), hook.pendingCreator(token)
 launchpad.syncPoolFees(token), launchpad.syncPoolFeesBatch(tokens)
-launchpad.pendingCreatorFees(token)   counts them once synced`
+launchpad.pendingCreatorFees(token)   counts them once synced
+
+// snipe fees never wait: each becomes a bid when it is paid
+hook.bidCount(token)                  bids placed so far (BidLocked each)`
 
 const ENDPOINTS: ReadonlyArray<readonly [string, string, string]> = [
   ['GET /api/v1/pairs', 'Every market: ticker_id, base, target, pool_id', '5 min'],
@@ -401,9 +404,9 @@ export function DocsIntegrate() {
         v1.4 keeps v1.3&rsquo;s curves and fees, and graduates each token into its own Uniswap v4 pool behind the
         Architex launch hook instead of a launch pair. The hook takes the 0.5% platform fee and the creator fee in USDC
         on every swap in the pool, whichever router makes it, and the pool charges no LP fee. For 20 blocks after a
-        launch and after a pool opens, buys also pay a snipe fee (90% falling to 0), which the launchpad and the hook
-        lock into the pool as USDC-only liquidity. Index the launchpad and the hook: their events cover every curve and
-        pool trade, fees included.
+        launch and after a pool opens, buys also pay a snipe fee (90% falling to 0), which becomes USDC-only liquidity
+        in the pool: the curve&rsquo;s at graduation, a pool buy&rsquo;s inside that buy. Index the launchpad and the
+        hook: their events cover every curve and pool trade, fees included.
       </p>
       <Pre label="Events, with topic0">{V14_EVENTS}</Pre>
       <p>
@@ -416,11 +419,14 @@ export function DocsIntegrate() {
       <Pre label="Pools, prices and quotes">{V14_POOLS}</Pre>
       <p>
         Arc&rsquo;s USDC sorts below most token addresses, so it is currency0 in most v1.4 pools and currency1 in
-        the rest: read which from the key. The pools refuse donations. Each <C>lock</C> places a bid of its own, a
-        USDC-only range anchored to the graduation tick, its top about half the graduation price and 92,200 ticks deep;
-        while the price is under that top it places nothing and the USDC waits. Uniswap&rsquo;s app and routing only
-        reach a pool with a hook like this one once Uniswap has approved the hook, which has not happened. The public
-        endpoints below do not list v1.4 markets yet.
+        the rest: read which from the key. The pools refuse donations. Snipe fees become bids with no separate step:
+        each a position of its own, a USDC-only range whose top is 6,932 ticks (about half the price) past a reference
+        tick and which runs 92,200 ticks further. A buy in a pool&rsquo;s window places its fee inside the same swap,
+        from the tick just before that buy, and emits <C>BidLocked</C> before its <C>PoolTrade</C>; graduation places
+        the curve&rsquo;s fees from the graduation tick. <C>hook.bidCount(token)</C> counts the bids, and{' '}
+        <C>lockHeld(token)</C> is only the unit or two of rounding a bid could not take. Such a buy costs about 80,000
+        more gas. Uniswap&rsquo;s app and routing only reach a pool with a hook like this one once Uniswap has approved
+        the hook, which has not happened. The public endpoints below do not list v1.4 markets yet.
       </p>
 
       <H3>Token details</H3>

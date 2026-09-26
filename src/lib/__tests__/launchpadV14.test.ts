@@ -5,7 +5,7 @@ import { launchHookAbi, launchpadAbi, launchpadV14Abi, launchpadV14WithPluginErr
 import { UNISWAP_V4_ARC, pluginSuiteOf, type LaunchSuiteV14 } from '../deployment'
 import { feeDestination } from '../plugins/destination'
 import { encodeComboData, encodeSplitData, planFeePlugin, type PlanContext } from '../plugins/plan'
-import { describeLaunchHookCall, describeLaunchpadCall, describeLaunchpadV14Call, describeV4RouterCall } from '../signingIntent'
+import { describeLaunchpadCall, describeLaunchpadV14Call, describeV4RouterCall } from '../signingIntent'
 import type { Token } from '../tokens'
 
 const account = getAddress('0x00000000000000000000000000000000000000a1')
@@ -133,12 +133,11 @@ describe('v1.4 signing intents', () => {
     expect(describeV4RouterCall(encodeFunctionData({ abi: v4RouterAbi, functionName: 'quoteBuy', args: [token, 1n] }), account, tokens)).toBe(undefined)
   })
 
-  test('the hook’s lock', () => {
-    const lock = describeLaunchHookCall(encodeFunctionData({ abi: launchHookAbi, functionName: 'lock', args: [token] }), tokens)
-    expect(lock?.title).toBe('Lock DOGE anti-sniping fees')
-    expect(lock?.lines).toEqual([{ label: 'Token', value: 'DOGE' }])
-    expect(lock?.note).toContain('nobody can withdraw')
-    expect(describeLaunchHookCall(encodeFunctionData({ abi: launchHookAbi, functionName: 'lockHeld', args: [token] }), tokens)).toBe(undefined)
+  test('the hook has nothing for anyone to sign: no lock, and graduate and release are the launchpad’s', () => {
+    const functions = launchHookAbi.filter((item) => item.type === 'function').map((item) => item.name)
+    expect(functions.includes('lock' as never)).toBe(false)
+    const writes = launchHookAbi.filter((item) => item.type === 'function' && item.stateMutability === 'nonpayable')
+    expect(writes.map((item) => (item.type === 'function' ? item.name : '')).sort()).toEqual(['graduate', 'release'])
   })
 })
 

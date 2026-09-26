@@ -65,7 +65,8 @@ export function DocsLaunching() {
       </p>
       <p>
         For 20 blocks after launch (about 10 seconds), other people's buys pay an anti-sniping fee
-        that starts at 90% and falls to nothing; it goes into the token's own pool, never to you.
+        that starts at 90% and falls to nothing. It never goes to you: it becomes liquidity in the
+        token's own pool, below the market, when the token graduates.
         Your own first buy happens inside the launch transaction, before anyone else can buy, so it
         pays no anti-sniping fee, only the two fees every buy pays.
       </p>

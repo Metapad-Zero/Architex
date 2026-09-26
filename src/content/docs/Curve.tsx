@@ -49,8 +49,9 @@ export function DocsCurve() {
       </p>
       <p>
         On launchpad v1.4 the curve is the same curve, with one addition: buys in its first 20
-        blocks also pay an anti-sniping fee, which never goes into the curve either. It's held for
-        the token's pool; see <span className="font-semibold">Trading a launch token</span>.
+        blocks also pay an anti-sniping fee, which never goes into the curve either. It's held until
+        the token graduates, then placed in its pool as liquidity below the market; see{' '}
+        <span className="font-semibold">Trading a launch token</span>.
       </p>
 
       <h3 className="mt-6 text-base font-semibold text-ink">What ends it</h3>

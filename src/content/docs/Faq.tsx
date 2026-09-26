@@ -46,9 +46,10 @@ export function DocsFaq() {
         <h3 className="text-base font-semibold text-ink">What is the anti-sniping fee?</h3>
         <p>
           On launchpad v1.4, a buy in the 20 blocks after a token launches, or after its pool opens,
-          pays an extra fee that starts at 90% and falls to nothing, about 10 seconds in all. It goes
-          into the token's own pool as liquidity nobody can withdraw, never to the creator or
-          Architex. Sells and the creator's first buy never pay it. See{' '}
+          pays an extra fee that starts at 90% and falls to nothing, about 10 seconds in all. It
+          becomes liquidity in the token's own pool, below the market, that nobody can withdraw, never
+          the creator's or Architex's; in the pool, in the same transaction as the buy. Sells and the
+          creator's first buy never pay it. See{' '}
           <span className="font-semibold">Trading a launch token</span>.
         </p>
       </div>
@@ -149,7 +150,8 @@ export function DocsFaq() {
             <dt className="font-semibold text-ink">Anti-sniping fee</dt>
             <dd className="text-g700">
               v1.4's extra fee on buys in a token's first 20 blocks, and its pool's, from 90% down to
-              nothing, locked into the token's pool.
+              nothing. It becomes a bid in the token's pool: liquidity below the market that nobody can
+              withdraw.
             </dd>
           </div>
           <div>

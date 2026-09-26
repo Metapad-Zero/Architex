@@ -78,7 +78,7 @@ export function DocsGraduation() {
       <p>
         The creator decides at launch who may add liquidity to the pool, and nobody can change it
         later. A closed pool, the builder's default, holds only the locked launch liquidity and
-        what the hook itself locks into it. An open pool also lets anyone add liquidity of their
+        the bids the hook adds to it. An open pool also lets anyone add liquidity of their
         own and take it back out whenever they like. Either way, the launch liquidity stays locked
         for good. The pool charges no liquidity fee, so liquidity added to an open pool earns
         nothing from trades; in practice it comes from someone paid to provide it.
@@ -88,15 +88,15 @@ export function DocsGraduation() {
       <p>
         For 20 blocks after a v1.4 token launches, and again for 20 blocks after its pool opens,
         buys pay an anti-sniping fee (see <span className="font-semibold">Trading a launch
-        token</span>). None of it goes to the creator or to Architex. What the curve collects waits
-        in the launchpad and goes into the pool at graduation; what the pool collects waits with
-        the hook until anyone presses Lock on the token's page. Each becomes a bid: liquidity that
-        holds only USDC, in a position of its own, from about half the price the pool opened at
-        down to about a ten-thousandth of it. It's a standing offer to buy the token that nobody
-        can ever withdraw, and since it's placed from the opening price alone, nobody can move it
-        by pushing the price first. While the price is under half its opening price, a lock places
-        nothing and the fees keep waiting, for good if the price never comes back. If a curve
-        never sells out, what it collected stays in the launchpad.
+        token</span>). None of it goes to the creator or to Architex: it becomes a bid, liquidity
+        that holds only USDC, in a position of its own, from about half the price down to about a
+        ten-thousandth of it. It's a standing offer to buy the token, below the market, that nobody
+        can ever withdraw. Nobody has to press anything for it. In the pool, the buy that pays the
+        fee places it in the same transaction, from half the price just before that buy; a buy
+        only moves the price up, so every bid starts below the market. What the curve's first
+        blocks collect waits in the launchpad until graduation, which places it as the pool's
+        first bid, from half the price the pool opens at. If a curve never sells out, what it
+        collected stays in the launchpad.
       </p>
 
       <h3 className="mt-6 text-base font-semibold text-ink">Uniswap's own app</h3>

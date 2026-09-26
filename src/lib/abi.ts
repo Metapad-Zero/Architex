@@ -351,7 +351,6 @@ export const launchHookErrors = [
   'error UnknownLaunch()',
   'error AlreadyOpened()',
   'error FeesExceedAmount()',
-  'error NothingToLock()',
   'error PartialFill()',
   'error DonationsRefused()',
   'error BidNotOneSided()',
@@ -479,12 +478,13 @@ export const launchpadV14Abi = parseAbi([
 
 /**
  * IArchitexLaunchHook: one hook for every v1.4 pool. It opens each pool at graduation, takes the platform, creator and
- * snipe fees of every swap in USDC (PoolTrade) and keeps them as its ERC-6909 claims in the PoolManager: the platform
- * and creator fees until the launchpad releases them (FeesReleased), the snipe fee until anyone locks it into the pool
- * as a bid (BidLocked). Each bid is a position of its own, from about half the graduation price down BID_SPAN_TICKS;
- * `lock` places nothing while the price is below that top. Nobody can donate to a pool. PoolTrade's `sender` is
- * whoever called the PoolManager (a router), not necessarily the trader. `graduate` and `release` are the launchpad's
- * alone: the site never calls them.
+ * snipe fees of every swap in USDC (PoolTrade) and keeps the platform and creator fees as its ERC-6909 claims in the
+ * PoolManager until the launchpad releases them (FeesReleased). A snipe fee never waits: the buy that pays it places
+ * it as a bid in the same transaction (BidLocked), a position of its own from about half the price just before that buy
+ * down BID_SPAN_TICKS; the curve's snipe fees become the first bid at graduation, from half the graduation price.
+ * `bidCount` counts the bids, and `lockHeld` is only the rounding a bid could not take (a unit or two). Nobody can
+ * donate to a pool. PoolTrade's `sender` is whoever called the PoolManager (a router), not necessarily the trader.
+ * `graduate` and `release` are the launchpad's alone: the site never calls them.
  */
 export const launchHookAbi = parseAbi([
   'struct PoolKey { address currency0; address currency1; uint24 fee; int24 tickSpacing; address hooks; }',
@@ -508,7 +508,6 @@ export const launchHookAbi = parseAbi([
   'function usdc() view returns (address)',
   'function poolManager() view returns (address)',
   'function graduate(address token, uint256 tokenAmount, uint256 usdcAmount, uint256 lockAmount, bool open, uint16 creatorFeeBps) returns (bytes32 poolId, uint128 liquidity)',
-  'function lock(address token) returns (uint128 liquidity)',
   'function release(address token) returns (uint256 platformFee, uint256 creatorFee)',
   'function lockHeld(address token) view returns (uint256)',
   'function pendingPlatform(address token) view returns (uint256)',

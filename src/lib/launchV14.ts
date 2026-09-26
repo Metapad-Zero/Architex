@@ -20,7 +20,7 @@ export const V14 = {
   /** Every v1.4 pool charges no LP fee (the hook's fees are the whole trading cost) and spaces its ticks by 200. */
   LP_FEE: 0,
   TICK_SPACING: 200,
-  /** A bid's top sits this many ticks below the graduation price: about half of it. */
+  /** A bid's top sits this many ticks below the price it is placed from: about half of it. */
   BID_DISCOUNT_TICKS: 6_932,
   /** How far down a bid runs from its top: about 10,000 times lower. */
   BID_SPAN_TICKS: 92_200,
@@ -110,13 +110,10 @@ export interface V4PoolState {
   usdcIs0: boolean
   /** The block the pool opened in: its own snipe window counts from here. */
   openBlock: bigint
-  /** The pool's current tick (getSlot0) and its tick at graduation (launchOf), which place its bids (bidRange). */
-  tick?: number
-  graduationTick?: number
   /** Liquidity in range at the current price; read for the size hint, absent until then. */
   liquidity?: bigint
-  /** USDC of snipe fees the hook holds for the pool as its claims, waiting for anyone to lock it in (hook.lockHeld). */
-  lockHeld?: bigint
+  /** How many bids the pool has (hook.bidCount): the graduation bid, if the curve collected snipe fees, and one per buy in its snipe window. */
+  bidCount?: bigint
 }
 
 // ─── Bids ────────────────────────────────────────────────────────────────────
@@ -130,28 +127,19 @@ function floorTick(tick: number): number {
 }
 
 /**
- * Where `lock` places a pool's bids (`ArchitexLaunchHook._bidRange`): anchored to the graduation price alone, so nobody
- * can move them by pushing the price first. The top is about half the graduation price and the range runs
- * BID_SPAN_TICKS further down. With USDC as currency0 a higher tick is a cheaper token, so the range lies above the
- * graduation tick; with USDC as currency1, below it.
+ * Where the hook places a bid (`ArchitexLaunchHook._bidRange`): its top about half the price at `refTick`
+ * (BID_DISCOUNT_TICKS past it, rounded away from the price onto the tick spacing), its bottom BID_SPAN_TICKS further,
+ * clamped to the usable ticks. A buy's snipe fee is placed from the price just before that buy (which the buy then moves
+ * up, so the bid is always wholly under the market); the curve's, at graduation, from the graduation price. With USDC as
+ * currency0 a higher tick is a cheaper token, so the range lies above the reference tick; with USDC as currency1, below.
  */
-export function bidRange(graduationTick: number, usdcIs0: boolean): { lower: number; upper: number } {
+export function bidRange(usdcIs0: boolean, refTick: number): { lower: number; upper: number } {
   if (usdcIs0) {
-    const lower = ceilTick(graduationTick + V14.BID_DISCOUNT_TICKS + 1)
+    const lower = ceilTick(refTick + V14.BID_DISCOUNT_TICKS + 1)
     return { lower, upper: Math.min(lower + V14.BID_SPAN_TICKS, V14.MAX_USABLE_TICK) }
   }
-  const upper = floorTick(graduationTick - V14.BID_DISCOUNT_TICKS)
+  const upper = floorTick(refTick - V14.BID_DISCOUNT_TICKS)
   return { lower: Math.max(upper - V14.BID_SPAN_TICKS, V14.MIN_USABLE_TICK), upper }
-}
-
-/**
- * Whether `lock` would place a bid at the pool's current tick: only while the whole range is on the USDC side of the
- * price, that is while the price is at or above the bid's top (about half the graduation price). Below it `lock` places
- * nothing and the USDC waits for the price to come back.
- */
-export function canLockBid(tick: number, graduationTick: number, usdcIs0: boolean): boolean {
-  const { lower, upper } = bidRange(graduationTick, usdcIs0)
-  return lower < upper && (usdcIs0 ? tick < lower : tick >= upper)
 }
 
 type Priced = Pick<V4PoolState, 'sqrtPriceX96' | 'usdcIs0'>

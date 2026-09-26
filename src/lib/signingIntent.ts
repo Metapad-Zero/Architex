@@ -4,7 +4,6 @@ import {
   buybackPluginAbi,
   deepenPluginAbi,
   factoryAbi,
-  launchHookAbi,
   launchRouterAbi,
   launchTokenAbi,
   launchpadAbi,
@@ -308,18 +307,6 @@ export function describeV4RouterCall(data: Hex, from: string | undefined, tokens
   return undefined
 }
 
-/** The launch hook's one public action: locking the anti-sniping fees it holds for a token into the token's pool. */
-export function describeLaunchHookCall(data: Hex, tokens: readonly Token[]): SigningIntent | undefined {
-  const call = decode(launchHookAbi, data)
-  if (call?.functionName !== 'lock') return undefined
-  const [token] = call.args
-  return {
-    title: `Lock ${symbol(token, tokens)} anti-sniping fees`,
-    lines: [{ label: 'Token', value: symbol(token, tokens) }],
-    note: 'Adds the anti-sniping fees the hook holds for this token to its Uniswap pool, as liquidity nobody can withdraw. While the price is under half the price the pool opened at, it adds nothing and the fees wait. Nothing comes to you.',
-  }
-}
-
 /**
  * The reference plugins' public actions: release a Split payee, run a buyback, run Deepen pool. (Distribute to holders
  * has none: it forwards fees to the token, and holders claim on the token itself.)
@@ -472,11 +459,6 @@ function describeTransaction(tx: TxRequest, tokens: readonly Token[]): SigningIn
 
   if (data && known(tx.to, launchSuiteV14.router)) {
     const intent = describeV4RouterCall(data, tx.from, tokens)
-    if (intent) return intent
-  }
-
-  if (data && known(tx.to, launchSuiteV14.hook)) {
-    const intent = describeLaunchHookCall(data, tokens)
     if (intent) return intent
   }
 

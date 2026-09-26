@@ -321,6 +321,9 @@ export function useLaunchTrade({
         const args = [launch.token, quote.offer, quote.minReceived, account, deadline] as const
         // The offer, not the quoted spend: on the curve's sell-out buy the spend can be one unit below the smallest
         // offer that sells out, so offering only the spend could buy a hair less and not graduate.
+        // Gas is the wallet's estimate at send time. A buy inside a v1.4 pool's snipe window also places its fee as a
+        // bid (about 80,000 more gas): an estimate made inside the window includes it, and one made after it needs
+        // none, since a window only closes. The 0.1 USDC gas reserve (lib/gasReserve.ts) covers it many times over.
         hash = venue === 'curve'
           ? v14
             ? await writeContractAsync({ chainId: activeChain.id, address: launchpadAddress, abi: launchpadV14Abi, functionName: side, args })

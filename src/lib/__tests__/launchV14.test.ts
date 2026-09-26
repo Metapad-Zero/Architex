@@ -13,7 +13,6 @@ import { decodeTradeLog, feedVenue, tradeFeeds, TRADE_EVENTS } from '../launchTr
 import {
   V14,
   bidRange,
-  canLockBid,
   grossOfSell,
   launchPoolKey,
   maxV4Trade,
@@ -48,6 +47,12 @@ function logsOf(step: string, emitter: 'launchpad' | 'hook') {
   return all
     .filter((v) => v.k === 'log' && v.step === step && v.emitter === emitter)
     .map((v) => ({ topics: v.topics as Hex[], data: v.data as Hex }))
+}
+
+/** A step's hook logs of one event: PoolTrade or BidLocked, which a buy in a pool's snipe window emits together. */
+function hookEvents(step: string, name: 'PoolTrade' | 'BidLocked' | 'PoolOpened') {
+  const topic = toEventSelector(getAbiItem({ abi: launchHookAbi, name }))
+  return logsOf(step, 'hook').filter((log) => log.topics[0] === topic)
 }
 
 function v14Launch(patch: Partial<LaunchRecord> = {}): LaunchRecord {
@@ -168,8 +173,10 @@ describe('the Uniswap v4 pool a token graduates into', () => {
       expect(Number(poolPrice > curvePrice ? poolPrice - curvePrice : curvePrice - poolPrice) / Number(curvePrice)).toBeLessThan(1e-9)
       const cap = v4MarketCap(pool)
       expect(Number(cap > marketCap(curve) ? cap - marketCap(curve) : marketCap(curve) - cap) / Number(marketCap(curve))).toBeLessThan(1e-9)
-      expect(cap / 1_000_000n).toBe(99_999n)
-      expect(v4Value(CURVE.POOL_SUPPLY, pool) / 1_000_000n).toBe(24_999n)
+      // $100,000 and 25,000 USDC for the pool's 200M tokens, to within a few units of rounding along the curve.
+      expect(cap > 99_999_000_000n && cap < 100_001_000_000n).toBe(true)
+      const pooled = v4Value(CURVE.POOL_SUPPLY, pool)
+      expect(pooled > 24_999_000_000n && pooled < 25_001_000_000n).toBe(true)
     }
   })
 
@@ -207,8 +214,10 @@ describe('pool trades through the router match the hook’s fees', () => {
     for (const v of quotes) {
       const step = steps[index++]
       expect(step.startsWith(`pool ${v.side as string}`)).toBe(true)
-      const hookLog = logsOf(step, 'hook')
+      const hookLog = hookEvents(step, 'PoolTrade')
       expect(hookLog.length).toBe(1)
+      // A buy in the window also places its fee as a bid, inside the same swap; nothing else does.
+      expect(hookEvents(step, 'BidLocked').length).toBe(v.side === 'buy' && (v.s as number) > 0 ? 1 : 0)
       // A swap never reaches the launchpad: its fees wait as the hook's claims, and PoolFeesAccrued marks a sync.
       expect(logsOf(step, 'launchpad')).toEqual([])
       const trade = decode(hookLog[0])
@@ -268,8 +277,10 @@ describe('pool trades through the router match the hook’s fees', () => {
     const pending = all.filter((v) => v.k === 'pending')
     expect(pending.length).toBe(2)
     pending.forEach((v, s) => {
+      const poolTradeTopic = toEventSelector(getAbiItem({ abi: launchHookAbi, name: 'PoolTrade' }))
       const trades = all
         .filter((row) => row.k === 'log' && row.emitter === 'hook' && String(row.step).startsWith('pool ') && String(row.step).includes(` ${s}-`))
+        .filter((row) => (row.topics as Hex[])[0] === poolTradeTopic)
         .map((row) => decodeTradeLog('poolV14', row.data as Hex, row.topics as Hex[]))
       expect(trades.length).toBe(14)
       const platform = trades.reduce((sum, trade) => sum + trade.platformFee, 0n)
@@ -287,39 +298,66 @@ describe('pool trades through the router match the hook’s fees', () => {
     })
   })
 
-  test('a bid is anchored to the graduation tick, and lock places nothing while the price is under its top', () => {
-    const locks = all.filter((v) => v.k === 'lock')
-    expect(locks.length).toBe(4)
-    expect(locks.map((v) => v.usdcIs0).sort()).toEqual([false, false, true, true])
-    locks.forEach((v, index) => {
-      const s = Math.floor(index / 2)
-      const step = index % 2
-      const placed = big(v.bidsAfter) > big(v.bidsBefore)
-      expect(canLockBid(v.tick as number, v.graduationTick as number, v.usdcIs0 as boolean)).toBe(placed)
-      // The dump first (under half the graduation price: nothing placed, the USDC waits), then the buy back.
-      expect(placed).toBe(step === 1)
-      expect(big(v.heldAfter)).toBe(placed ? 0n : big(v.held))
-      const bids = logsOf(`lock ${s}-${step}`, 'hook')
-      expect(bids.length).toBe(placed ? 1 : 0)
-      if (placed) {
-        const event = decodeEventLog({ abi: launchHookAbi, data: bids[0].data, topics: bids[0].topics as [Hex, ...Hex[]] })
-        if (event.eventName !== 'BidLocked') throw new Error(event.eventName)
-        const range = bidRange(v.graduationTick as number, v.usdcIs0 as boolean)
-        expect([event.args.tickLower, event.args.tickUpper]).toEqual([range.lower, range.upper])
-        expect(event.args.usdc).toBe(big(v.held))
-        expect(range.upper - range.lower).toBe(V14.BID_SPAN_TICKS)
+  test('each buy in a pool’s snipe window places its fee as a bid in the same swap, from half the price before it', () => {
+    const steps = [0, 1].flatMap((s) => [0, 1].flatMap((w) => [0, 1, 2, 3].map((b) => `pool buy ${s}-${w}-${b}`)))
+    const buys = quotes.filter((v) => v.side === 'buy')
+    expect(buys.length).toBe(steps.length)
+    buys.forEach((v, index) => {
+      const step = steps[index]
+      const [trade] = hookEvents(step, 'PoolTrade').map(decode)
+      const bids = hookEvents(step, 'BidLocked')
+      if ((v.s as number) === 0) {
+        // After the window: no fee, no bid.
+        expect([bids.length, trade.snipeFee, big(v.bidsAfter) - big(v.bidsBefore)]).toEqual([0, 0n, 0n])
+        return
       }
+      expect(bids.length).toBe(1)
+      const event = decodeEventLog({ abi: launchHookAbi, data: bids[0].data, topics: bids[0].topics as [Hex, ...Hex[]] })
+      if (event.eventName !== 'BidLocked') throw new Error(event.eventName)
+      const ref = v.tickBefore as number
+      const range = bidRange(v.usdcIs0 as boolean, ref)
+      expect([event.args.tickLower, event.args.tickUpper]).toEqual([range.lower, range.upper])
+      expect(range.upper - range.lower).toBe(V14.BID_SPAN_TICKS)
+      // Wholly on the USDC side of the price before the buy (and so of the price after it, which a buy only moves up).
+      expect(v.usdcIs0 ? range.lower > ref : range.upper < ref).toBe(true)
+      // All of the fee, with the rounding held from before, less the unit or two the position could not take.
+      expect(event.args.usdc + big(v.heldAfter)).toBe(big(v.heldBefore) + (trade.snipeFee ?? 0n))
+      expect(big(v.heldAfter) < 3n).toBe(true)
+      expect(big(v.bidsAfter)).toBe(big(v.bidsBefore) + 1n)
     })
-    // Half the graduation price is 6,932 ticks away, in whichever direction makes the token cheaper.
-    expect(bidRange(366_200, true)).toEqual({ lower: 373_200, upper: 465_400 })
-    expect(bidRange(-366_201, false)).toEqual({ lower: -465_400, upper: -373_200 })
-    expect(canLockBid(373_199, 366_200, true)).toBe(true)
-    expect(canLockBid(373_200, 366_200, true)).toBe(false)
-    expect(canLockBid(-373_200, -366_201, false)).toBe(true)
-    expect(canLockBid(-373_201, -366_201, false)).toBe(false)
+  })
+
+  test('graduation places the curve’s snipe fees as the pool’s first bid, from half the graduation price', () => {
+    const grads = all.filter((v) => v.k === 'grad')
+    expect(grads.length).toBe(3)
+    expect(grads.map((v) => v.usdcIs0).sort()).toEqual([false, true, true])
+    for (const v of grads) {
+      const step = v.step as string
+      expect(v.tick).toBe(v.graduationTick)
+      const [bid] = hookEvents(step, 'BidLocked')
+      const event = decodeEventLog({ abi: launchHookAbi, data: bid.data, topics: bid.topics as [Hex, ...Hex[]] })
+      if (event.eventName !== 'BidLocked') throw new Error(event.eventName)
+      const range = bidRange(v.usdcIs0 as boolean, v.graduationTick as number)
+      expect([event.args.tickLower, event.args.tickUpper]).toEqual([range.lower, range.upper])
+      // The bid takes the curve's snipe fees and the USDC the full-range position left, less a unit or two.
+      const [opened] = hookEvents(step, 'PoolOpened')
+      const openedEvent = decodeEventLog({ abi: launchHookAbi, data: opened.data, topics: opened.topics as [Hex, ...Hex[]] })
+      if (openedEvent.eventName !== 'PoolOpened') throw new Error(openedEvent.eventName)
+      const graduated = logsOf(step, 'launchpad')
+        .map((log) => decodeEventLog({ abi: launchpadV14Abi, data: log.data, topics: log.topics as [Hex, ...Hex[]] }))
+        .find((log) => log.eventName === 'Graduated')
+      if (graduated?.eventName !== 'Graduated') throw new Error('no Graduated')
+      expect(graduated.args.snipeLocked).toBe(big(v.snipeHeld))
+      const given = big(v.snipeHeld) + graduated.args.usdcSeeded - openedEvent.args.usdcAdded
+      expect(event.args.usdc + big(v.held)).toBe(given)
+      expect([big(v.bids), big(v.held) < 3n]).toEqual([1n, true])
+    }
+    // Half the price is 6,932 ticks away, in whichever direction makes the token cheaper.
+    expect(bidRange(true, 366_200)).toEqual({ lower: 373_200, upper: 465_400 })
+    expect(bidRange(false, -366_201)).toEqual({ lower: -465_400, upper: -373_200 })
     // A range that would run past Uniswap's usable ticks stops at the edge.
-    expect(bidRange(850_000, true).upper).toBe(V14.MAX_USABLE_TICK)
-    expect(bidRange(-850_000, false).lower).toBe(V14.MIN_USABLE_TICK)
+    expect(bidRange(true, 850_000).upper).toBe(V14.MAX_USABLE_TICK)
+    expect(bidRange(false, -850_000).lower).toBe(V14.MIN_USABLE_TICK)
   })
 
   test('the hook refuses fees that take everything, and so does the site', () => {
@@ -355,8 +393,13 @@ describe('the v1.4 events decode', () => {
     expect(toEventSelector(getAbiItem({ abi: launchHookAbi, name: 'PoolOpened' }))).toBe(topic('graduation', 'hook', 0))
     expect(toEventSelector(getAbiItem({ abi: launchHookAbi, name: 'BidLocked' }))).toBe(topic('graduation', 'hook', 1))
     expect(toEventSelector(getAbiItem({ abi: launchpadV14Abi, name: 'Graduated' }))).toBe(topic('graduation', 'launchpad', 1))
-    expect(toEventSelector(TRADE_EVENTS.poolV14)).toBe(topic('pool buy 0-0-0', 'hook'))
-    expect(toEventSelector(getAbiItem({ abi: launchHookAbi, name: 'BidLocked' }))).toBe(topic('lock 0-1', 'hook'))
+    expect(toEventSelector(TRADE_EVENTS.poolV14)).toBe(topic('pool buy 0-1-0', 'hook'))
+    // A buy inside the window places its bid before the hook records the trade, in the same swap.
+    expect([topic('pool buy 0-0-0', 'hook', 0), topic('pool buy 0-0-0', 'hook', 1)]).toEqual([
+      toEventSelector(getAbiItem({ abi: launchHookAbi, name: 'BidLocked' })),
+      toEventSelector(TRADE_EVENTS.poolV14),
+    ])
+    expect(toEventSelector(getAbiItem({ abi: launchHookAbi, name: 'BidLocked' }))).toBe(topic('graduate 0', 'hook', 1))
     expect(toEventSelector(getAbiItem({ abi: launchHookAbi, name: 'FeesReleased' }))).toBe(topic('sync 0', 'hook'))
     expect(toEventSelector(getAbiItem({ abi: launchpadV14Abi, name: 'PoolFeesAccrued' }))).toBe(topic('sync 0', 'launchpad'))
     // v1.4's Trade and PoolTrade carry one more field than v1.3's, so their topics differ from them.
@@ -538,7 +581,7 @@ describe('deployment', () => {
 describe('v1.4 refusals in a sentence', () => {
   test('the hook’s own, and one the PoolManager wraps', () => {
     expect(explainRevert('FeesExceedAmount')).toBe('The fees would take the whole amount. Enter a larger amount.')
-    expect(explainRevert('NothingToLock')).toBe('No anti-sniping fees are waiting to be locked for this token.')
+    expect(explainRevert('BidNotOneSided')).toBe('The pool could not place this buy’s anti-sniping fee as a bid, so the buy was undone. Try again.')
     expect(explainRevert('PoolLockedUntilGraduation')).toBe('Transfers to the pool are locked until the curve graduates.')
     const inner = encodeErrorResult({ abi: launchHookAbi, errorName: 'PartialFill' })
     expect(wrappedErrorName(inner)).toBe('PartialFill')

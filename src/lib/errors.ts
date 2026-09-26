@@ -54,9 +54,8 @@ const REVERTS: Record<string, string> = {
   PoolNotInitialized: 'This token’s Uniswap pool is not open yet. It still trades on its curve.',
   AlreadyOpened: 'This token’s pool is already open.',
   PoolCreationRestricted: 'Only the launchpad can open this pool.',
-  NothingToLock: 'No anti-sniping fees are waiting to be locked for this token.',
   DonationsRefused: 'These pools take no donations.',
-  BidNotOneSided: 'The bid could not be placed at the price now. The fees wait; try again later.',
+  BidNotOneSided: 'The pool could not place this buy’s anti-sniping fee as a bid, so the buy was undone. Try again.',
   WrappedError: 'The pool refused the trade. Check the amount, then try again.',
   // Creator-fee plugins (contracts/interfaces/plugins).
   NotConfigured: 'That plugin does not serve this token.',

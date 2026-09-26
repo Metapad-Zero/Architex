@@ -232,7 +232,7 @@ export function LaunchDetail({ token, onBack, side }: LaunchDetailProps) {
 
       <CreatorFeesPanel launch={launch} onChanged={refresh} />
 
-      {launchVersion(launch) === 'v14' && <AntiSnipePanel launch={launch} block={block} held={snipeHeld} onChanged={refresh} />}
+      {launchVersion(launch) === 'v14' && <AntiSnipePanel launch={launch} block={block} held={snipeHeld} />}
 
       <section className="ledger" aria-label="Trades">
         <div className="section-heading-row"><h2>Trades</h2>{!tradesLoading && !tradesError && <span>{trades.length}</span>}</div>

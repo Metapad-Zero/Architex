@@ -150,11 +150,11 @@ export function useLaunch(token: Address | undefined) {
     contracts: [
       { address: launchSuiteV14.stateView, abi: stateViewAbi, functionName: 'getSlot0', args: [poolId!] },
       { address: launchSuiteV14.stateView, abi: stateViewAbi, functionName: 'getLiquidity', args: [poolId!] },
-      { address: launchSuiteV14.hook, abi: launchHookAbi, functionName: 'lockHeld', args: [token!] },
+      { address: launchSuiteV14.hook, abi: launchHookAbi, functionName: 'bidCount', args: [token!] },
     ],
     query: { enabled: graduatedV14 && Boolean(poolId), refetchInterval: 4_000 },
   })
-  // Before graduation the launchpad holds the curve's snipe fees for the pool.
+  // Before graduation the launchpad holds the curve's snipe fees; at graduation they become the pool's first bid.
   const pendingSnipeQuery = useReadContract({
     address: launchSuiteV14.launchpad,
     abi: launchpadV14Abi,
@@ -184,12 +184,10 @@ export function useLaunch(token: Address | undefined) {
           ? {
               poolId: launchOf[0],
               sqrtPriceX96: pool[0][0],
-              tick: pool[0][1],
-              graduationTick: launchOf[1].graduationTick,
               usdcIs0: launchOf[1].usdcIs0,
               openBlock: launchOf[1].openBlock,
               liquidity: pool[1],
-              lockHeld: pool[2],
+              bidCount: pool[2],
             }
           : undefined,
     }
@@ -228,13 +226,14 @@ export function useLaunch(token: Address | undefined) {
         router: api?.allowance(owner, usdc.address, mine.router) ?? 0n,
       }
     : { launchpad: allowancesQuery.data?.[at * 2]?.[0] ?? 0n, router: allowancesQuery.data?.[at * 2 + 1]?.[0] ?? 0n }
-  /** USDC of anti-sniping fees held for the token's pool: by the launchpad on the curve, by the hook once it graduates. */
+  /**
+   * USDC of anti-sniping fees the launchpad holds for a v1.4 token still on its curve, which become its pool's first bid
+   * at graduation. Undefined after graduation: a pool buy's fee becomes a bid inside that buy, so nothing is held.
+   */
   const snipeHeld = fixtureOn
     ? (token ? api?.snipeHeld(token) : undefined)
-    : launch?.version === 'v14'
-      ? launch.graduated
-        ? launch.v4?.lockHeld
-        : pendingSnipeQuery.data
+    : launch?.version === 'v14' && !launch.graduated
+      ? pendingSnipeQuery.data
       : undefined
 
   // A manual refetch runs even a disabled query, so only the reads that apply to this token and network are asked for.

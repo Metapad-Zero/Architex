@@ -70,8 +70,10 @@ export function DocsTrading() {
         pool opens, pays one more fee on top of the other two: 90% in the first block, falling
         evenly to nothing by the 20th. On Arc that's about 10 seconds. It means a bot that buys the
         instant a token appears pays most of its money for being first. None of it goes to the
-        creator or to Architex: it goes into the token's own pool as liquidity nobody can withdraw
-        (see <span className="font-semibold">Graduation</span>). Sells never pay it, and neither
+        creator or to Architex: it becomes liquidity in the token's own pool, below the market,
+        that nobody can withdraw. In the pool that happens in the same transaction as the buy that
+        paid it; what the curve collects follows at graduation (see{' '}
+        <span className="font-semibold">Graduation</span>). Sells never pay it, and neither
         does the creator's first buy, which happens inside the launch transaction itself. The
         platform, creator and anti-sniping fees together never take more than 99% of a buy.
       </p>
@@ -79,7 +81,8 @@ export function DocsTrading() {
         While it applies, the trade sheet shows it as its own line with the block it reaches zero
         at, and quotes it at the block the chain is at now. A buy lands a block or more later, when
         the fee is lower, so the fee alone never leaves you with less than the sheet showed.
-        Waiting a few seconds avoids it altogether.
+        Waiting a few seconds avoids it altogether. A buy in a pool's window also costs a little
+        more gas, since it adds the bid too: a fraction of a cent on Arc.
       </p>
 
       <h3 className="mt-6 text-base font-semibold text-ink">After graduation on v1.4: Uniswap v4</h3>

@@ -46,10 +46,8 @@ export interface LaunchFixtureApi {
   blockNumber: () => bigint
   /** What the v4 router would quote for a trade in a graduated v1.4 token's pool; throws the refusal's name. */
   quoteV4: (token: Address, side: 'buy' | 'sell', amountIn: bigint) => bigint
-  /** v1.4: anti-sniping fees held for the token's pool (the launchpad's pendingSnipe, then the hook's lockHeld). */
+  /** v1.4, on the curve: anti-sniping fees the launchpad holds for the pool's first bid (pendingSnipe). */
   snipeHeld: (token: Address) => bigint | undefined
-  /** v1.4: anyone locks the fees the hook holds into the pool. */
-  lock: (token: Address) => Hash
 }
 
 let api: LaunchFixtureApi | undefined
