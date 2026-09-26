@@ -143,8 +143,9 @@ the BUSL `Position.sol`, so the hook reads the pool's price with its own copy of
     good (the default the owner did not change). The curve's parameters stay identical for every token; like the other
     fees, the snipe fee comes off a buy before the rest moves the curve, so a buy inside the window moves the price
     less than the same gross buy after it.
-  - Cost: a buy inside the pool's window also adds a position, about 80,000 more gas than the same buy after the
-    window (measured; the pool's first adds a little more for new ticks), a fraction of a cent on Arc.
+  - Cost: a buy inside the pool's window also adds a position: about 56,000 more gas than the same buy after the
+    window when its bid lands on ticks an earlier bid already opened, about 117,000 when it opens new ones (measured on
+    the rehearsal's fork run), a fraction of a cent on Arc either way.
 
 ## 6. Open or closed pools [decided: D3]
 
