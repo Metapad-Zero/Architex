@@ -53,6 +53,42 @@
         ],
         "createdAt": "2026-09-26T08:32:07.732Z",
         "reason": "The landing page is the separate marketing design the owner asked for (nuvex.family style, 2026-09-25), already exempt from the app's DESIGN.md for gradient-text, dark-glow, icon-tile-stack and radial-spotlight-glow; its contract addresses use JetBrains Mono by that build"
+      },
+      {
+        "rule": "radial-halo",
+        "value": "*",
+        "files": [
+          "public/home/index.html"
+        ],
+        "createdAt": "2026-09-26T08:47:34.252Z",
+        "reason": "Background washes and glows copied from nuvex.family at the owner's request, like this file's radial-spotlight-glow and dark-glow exceptions; recorded as owner-approved as the main page 2026-09-25"
+      },
+      {
+        "rule": "pulsing-dot",
+        "value": "*",
+        "files": [
+          "public/home/index.html"
+        ],
+        "createdAt": "2026-09-26T08:47:34.273Z",
+        "reason": "The hero's 'Live on Arc mainnet' pill from the nuvex.family-style landing the owner asked for, recorded as owner-approved 2026-09-25; the claim is true and the pulse stops under prefers-reduced-motion"
+      },
+      {
+        "rule": "marquee",
+        "value": "*",
+        "files": [
+          "public/home/index.html"
+        ],
+        "createdAt": "2026-09-26T08:47:34.295Z",
+        "reason": "Decorative aria-hidden word marquee from the nuvex.family-style landing the owner asked for, recorded as owner-approved 2026-09-25; it stops under prefers-reduced-motion"
+      },
+      {
+        "rule": "flat-type-hierarchy",
+        "value": "*",
+        "files": [
+          "public/home/index.html"
+        ],
+        "createdAt": "2026-09-26T08:47:34.316Z",
+        "reason": "Misread for this page: h1 runs to 92px and h2 to 56px over a 16px body; the 14px uppercase h3s are the card labels of the nuvex.family-style landing recorded as owner-approved 2026-09-25"
       }
     ]
   }
