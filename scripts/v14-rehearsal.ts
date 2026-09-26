@@ -1600,7 +1600,7 @@ async function approvals() {
 }
 
 /** Predicts every launch token's address (CREATE from the launchpad) before any exists, so the run knows which pools
- *  will have USDC as currency0 and which as currency1, and runs the exact-out, dump and bid scenarios on one of each. */
+ *  will have USDC as currency0 and which as currency1, and runs the exact-out and crash scenarios on one of each. */
 async function plan() {
   await step('plan', async () => {
     const nonce = BigInt(await nonceOf(LP, head))
@@ -1619,7 +1619,7 @@ async function plan() {
     progress.openLp = KINDS.find((k) => spec(k).open)
     progress.closedLp = KINDS.find((k) => !spec(k).open)
     if (!REAL) {
-      note(`exact-out, dump-and-bid scenarios on ${progress.features.map(sym).join(' and ')}; outside liquidity accepted by ${sym(progress.openLp as Kind)}, refused by ${sym(progress.closedLp as Kind)}`)
+      note(`exact-out and crash scenarios on ${progress.features.map(sym).join(' and ')}; outside liquidity accepted by ${sym(progress.openLp as Kind)}, refused by ${sym(progress.closedLp as Kind)}`)
       if (!hi || !lo) note(`every token sorts ${hi ? 'above' : 'below'} ${U}: only one pool orientation is covered (see --preview to pick a deploy nonce that covers both)`)
     }
     save()
