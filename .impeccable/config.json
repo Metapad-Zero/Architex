@@ -1,0 +1,50 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "gradient-text",
+        "value": "*",
+        "files": [
+          "public/home/index.html"
+        ],
+        "createdAt": "2026-09-25T19:05:45.792Z",
+        "reason": "Marketing landing modeled on nuvex.family per owner request; owner approved the page as the main page 2026-09-25"
+      },
+      {
+        "rule": "dark-glow",
+        "value": "*",
+        "files": [
+          "public/home/index.html"
+        ],
+        "createdAt": "2026-09-25T19:05:45.817Z",
+        "reason": "Marketing landing modeled on nuvex.family per owner request; approved by owner 2026-09-25"
+      },
+      {
+        "rule": "design-system-font",
+        "value": "public sans",
+        "createdAt": "2026-09-25T19:05:45.841Z",
+        "reason": "Same family as DESIGN.md's 'Public Sans Variable'"
+      },
+      {
+        "rule": "icon-tile-stack",
+        "value": "*",
+        "files": [
+          "public/home/index.html"
+        ],
+        "createdAt": "2026-09-25T19:11:06.925Z",
+        "reason": "Card layout copied from nuvex.family at the owner's request; owner approved the page as the main page 2026-09-25"
+      },
+      {
+        "rule": "radial-spotlight-glow",
+        "value": "*",
+        "files": [
+          "public/home/index.html"
+        ],
+        "createdAt": "2026-09-25T19:11:06.949Z",
+        "reason": "Soft background washes copied from nuvex.family at the owner's request; owner approved the page 2026-09-25"
+      }
+    ]
+  }
+}
