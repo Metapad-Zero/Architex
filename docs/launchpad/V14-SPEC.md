@@ -1,7 +1,7 @@
 # Launchpad v1.4: graduate into Uniswap v4 (draft)
 
-Status: **built on branch `v14` and reviewed twice (Grok #7, Claude #7: no High; every finding fixed or accepted in
-§10), not deployed**, 2026-09-25. Contracts in `contracts-v14/src`, tests in `contracts-v14/test` (run with
+Status: **built on branch `v14`, reviewed by Claude three times and Grok twice (no High open; every finding fixed
+or accepted in §10, see §11), not deployed**, 2026-09-25. Contracts in `contracts-v14/src`, tests in `contracts-v14/test` (run with
 `FOUNDRY_PROFILE=v14 forge test`; CI runs them too). Sections marked **[decided]** are the owner's
 calls; **[proposed]** are defaults to confirm; **[research]** waits on facts still being gathered about Uniswap v4 on
 Arc. v1.3 (V13-SPEC.md) stays live for the tokens it launched; this spec only covers new launches.
@@ -122,15 +122,25 @@ the BUSL `Position.sol`, so the hook reads the pool's price with its own copy of
 - **Where it goes [decided]: locked into the pool, the moment it is paid [owner's choice, 2026-09-25].**
   - In the pool: the buy that pays the surcharge also places it, inside the same swap (`afterSwap`), as locked
     liquidity: a USDC-only position of its own (a fresh salt for every bid, never re-added to) whose top is **half the
-    price just before that buy** and which runs about 10,000 times lower (`BID_SPAN_TICKS`, 92,200 ticks), a bid nobody
-    can ever withdraw. Nothing waits and there is no separate lock step. A buy only moves the price up, so the bid is
-    always wholly under the market when it is placed. Adding it needs no swap, so there is nothing to sandwich (the
-    Deepen pool review's lesson), and it never reaches the extreme tick the full-range position uses, so no outside LP
-    can fill that tick to block it (which would now block the buy itself).
-  - Moving where a bid lands means trading inside the window. Pushing the price down before someone's buy has to be
-    undone with a buy that pays the surcharge (review #8's scenario: about 86,000 USDC to undo, against 8,300 after the
-    window). Planting one above the market means pumping with surcharged buys first (50,000 USDC put in that way came
-    back as 4,726). After the window no bid can be added or moved at all.
+    cheaper of the price just before that buy and the graduation price** and which runs about 10,000 times lower
+    (`BID_SPAN_TICKS`, 92,200 ticks), a bid nobody can ever withdraw. Nothing waits and there is no separate lock step.
+    A buy only moves the price up, so the bid is always wholly under the market when it is placed; after a crash
+    inside the window the next buy's bid follows the price down, and no bid ever starts above half the graduation
+    price. It never reaches the extreme tick the full-range position uses, so no outside LP can fill that tick to block
+    it (which would now block the buy itself).
+  - Nobody can plant a bid above the market, or profit from moving one (Claude review #9, all measured in tests):
+    - a pump-and-dump with the attacker's own window buys always loses: 50,000 USDC put in comes back as 4,726 in
+      the opening block, 27,358 at block 10 and 47,347 at block 19;
+    - the buy that places a bid can be sandwiched like any buy, but a front-run cannot lift its bid above half the
+      graduation price, so the back-run takes nothing from the bid (the site never sends a buy without a minimum out);
+    - splitting a big window buy into many small ones cannot stack bids above the buyer's own dump. Before the
+      graduation-price cap, 1,000,000 USDC split into 50 buys at block 19 got 76% of its surcharge back (review #9's
+      L1); with it, the same as one buy.
+  - Pushing the price down before someone's buy (a sell) only makes that buyer's bid land lower, and gives him a
+    cheaper buy. Undoing the push inside the window costs the surcharge, which deters it early in the window only:
+    undoing a 100M-token push around a 5,000 USDC buy cost 85,840 USDC in the opening block, about 8,600 at block 19,
+    and 7,835 if the griefer waits one block past the window, against 8,307 with no window at all (review #9's I2).
+    It never pays. After the window no bid can be added or moved at all.
   - Why not a separate `lock`: v1.4 first had one, anchored to the graduation price so a push could not move the bid
     (Claude review #7, L2). After a crash the claims then waited, and anyone could push the price over the bid's top,
     lock, and sell into a bid above the market: up to 30% of the waiting fees in one transaction (Claude review #8).
@@ -143,8 +153,12 @@ the BUSL `Position.sol`, so the hook reads the pool's price with its own copy of
     good (the default the owner did not change). The curve's parameters stay identical for every token; like the other
     fees, the snipe fee comes off a buy before the rest moves the curve, so a buy inside the window moves the price
     less than the same gross buy after it.
-  - Cost: a buy inside the pool's window also adds a position, about 80,000 more gas than the same buy after the
-    window (measured; the pool's first adds a little more for new ticks), a fraction of a cent on Arc.
+  - Cost: a buy inside the pool's window also adds a position, measured at about 56,000 to 93,000 more gas than the
+    same buy after the window when its bid lands on ticks an earlier bid already opened, and about 117,000 to 176,000
+    when it opens new ones (the range is warm versus cold storage), a fraction of a cent on Arc. The V4Quoter's gas
+    estimate for a whole window buy is about 301,000.
+  - A pool can end up with many bids (one per window buy). Nothing iterates over them; Deepen pool v1.4's cap must be
+    a running total of the USDC in the hook's locked positions, never a loop over bids.
 
 ## 6. Open or closed pools [decided: D3]
 
@@ -193,6 +207,10 @@ the BUSL `Position.sol`, so the hook reads the pool's price with its own copy of
   `collectFees` does not, so the platform syncs its tokens (`syncPoolFeesBatch`) before collecting.
 - **Rounding dust.** A bid takes all but a unit or two of what it is given; the rest joins the next bid, and after
   the window's last buy it stays with the hook for good.
+- **Bid ticks cost later swaps gas.** Window buys at many different prices open many bid ticks, and a later swap that
+  crosses them pays about 10,600 gas per tick: after 40 dust bids at distinct prices, a 300M-token dump cost 578,627
+  gas instead of 155,573 (Claude review #9, I3). Whoever does it pays the surcharge and about 108,000 gas per bid;
+  bids from buys above graduation all share the graduation bid's ticks.
 - **Nothing that unlocks runs inside someone else's unlock.** A graduating buy (a `createToken` whose first buy
   graduates included), `syncPoolFees` and `syncPoolFeesBatch` revert `AlreadyUnlocked` when called from inside a v4
   unlock; `collectCreatorFees` then skips the sync and pays what the launchpad already holds.
@@ -217,14 +235,16 @@ deploys to mainnet; then the Uniswap routing allowlist submission with a live po
 §6: the hook never lets a swap skip the fees; the locked positions can never shrink; only the launchpad can create a
 pool with the hook; a closed pool's liquidity only ever grows; the hook holds no USDC and its claims are at least what
 it owes (pool fees not yet synced, a bid's rounding; anyone can add claims to the hook, which then stay there); snipe
-fees never wait (at most a unit or two per token is ever held); every bid is placed wholly under the market; no
-donation ever lands.
+fees never wait (at most a unit or two per token is ever held); every bid is placed wholly under the market, and none
+starts above half the graduation price; no donation ever lands.
 
 Reviews so far: Grok #7 (`GROK-REVIEW-7.md`: no High; the router fix, the spec corrections), Claude #7
 (`CLAUDE-REVIEW-7.md`: no High; one Medium and two Lows, all fixed), Grok #8 (`GROK-REVIEW-8.md`: no findings) and
-Claude #8 (`CLAUDE-REVIEW-8.md`: no High; one Medium, fixed by placing snipe fees inside the buy that pays them). The
-reviews' PoCs are kept as regression tests in `contracts-v14/test/review7` and `contracts-v14/test/review8`. The Arc
-Testnet rehearsal is `V14-REHEARSAL.md`.
+Claude #8 (`CLAUDE-REVIEW-8.md`: no High; one Medium, fixed by placing snipe fees inside the buy that pays them) and
+Claude #9 (`CLAUDE-REVIEW-9.md`: no High or Medium; one Low, fixed by capping a window buy's bid at half the
+graduation price). Grok #9 did not run (the Grok Build balance was exhausted). The reviews' PoCs are kept as
+regression tests in `contracts-v14/test/review7`, `review8` and `review9`. The Arc Testnet rehearsal is
+`V14-REHEARSAL.md` (on branch `v14-rehearsal` until it merges).
 
 ## 12. Still open
 
