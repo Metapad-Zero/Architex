@@ -47,12 +47,18 @@ export function DocsCurve() {
         broken or blocklisted destination can never freeze trading, launching, or graduation,
         because a fee doesn't need anywhere to land for a trade to finish.
       </p>
+      <p>
+        On launchpad v1.4 the curve is the same curve, with one addition: buys in its first 20
+        blocks also pay an anti-sniping fee, which never goes into the curve either. It's held until
+        the token graduates, then placed in its pool as liquidity below the market; see{' '}
+        <span className="font-semibold">Trading a launch token</span>.
+      </p>
 
       <h3 className="mt-6 text-base font-semibold text-ink">What ends it</h3>
       <p>
         A curve sells a fixed pool of tokens: 800 million of the token's 1 billion total supply.
         Once all 800 million are sold, the curve is done and the token graduates into its own
-        launch pool; see <span className="font-semibold">Graduation</span>. Nothing else stops a curve
+        pool; see <span className="font-semibold">Graduation</span>. Nothing else stops a curve
         early. If buying just stops, the curve stops too, sitting wherever it was. There's no
         deadline and no penalty for that; it just doesn't graduate.
       </p>

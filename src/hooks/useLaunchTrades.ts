@@ -1,12 +1,13 @@
 import { useQuery } from '@tanstack/react-query'
 import { useSyncExternalStore } from 'react'
-import { decodeEventLog, pad, parseAbiItem, toEventSelector, type Address, type Hex, type PublicClient } from 'viem'
+import { pad, toEventSelector, type Address, type Hex, type Log, type PublicClient } from 'viem'
 import { usePublicClient } from 'wagmi'
 import { activeChain } from '../chain'
-import { deployment, isLaunchpadDeployed } from '../lib/deployment'
+import { deployment, isLaunchpadDeployed, isLaunchpadV14Deployed, launchSuiteV14, type LaunchVersion } from '../lib/deployment'
 import { fetchLogHistory } from '../lib/explorerLogs'
-import type { LaunchTrade, TradeVenue } from '../lib/launch'
+import type { LaunchTrade } from '../lib/launch'
 import { launchFixtureApi } from '../lib/launchFixtureApi'
+import { decodeTradeLog, tradeFeeds, TRADE_EVENTS, type TradeFeed } from '../lib/launchTradeLogs'
 import { fetchIndexedHead, fillTimes, fromRpcLog, withRpcTail } from '../lib/logTail'
 import { blockTime, blockTimes, readLogWindows } from '../lib/rpcLogs'
 
@@ -21,17 +22,9 @@ function zero(): number {
   return 0
 }
 
-/** A curve trade: the launchpad's event carries the curve's reserves after the trade, which price the token then. */
-const CURVE_TRADE = parseAbiItem(
-  'event Trade(address indexed token, address indexed trader, bool isBuy, uint256 usdcAmount, uint256 tokenAmount, uint256 platformFee, uint256 creatorFee, uint256 virtualUsdc, uint256 virtualTokens)',
-)
-/** A launch-pool trade, emitted by the launch router. */
-const POOL_TRADE = parseAbiItem(
-  'event PoolTrade(address indexed token, address indexed trader, bool isBuy, uint256 usdcAmount, uint256 tokenAmount, uint256 platformFee, uint256 creatorFee)',
-)
 const MAX_TRADES = 50
-// Every token's trades come from one launchpad (and one router) address and the explorer filters by one topic,
-// so a token's trades are picked out of the whole feed: 6 pages is the newest 300 trades.
+// Every token's trades come from one launchpad (and one router or hook) address and the explorer filters by one
+// topic, so a token's trades are picked out of the whole feed: 6 pages is the newest 300 trades.
 const EXPLORER_PAGES = 6
 const RPC_WINDOWS = 3
 
@@ -46,19 +39,22 @@ function byNewest(a: LaunchTrade, b: LaunchTrade): number {
   return b.block - a.block || (b.logIndex ?? 0) - (a.logIndex ?? 0)
 }
 
-interface Feed {
-  venue: TradeVenue
-  address: Address
-}
+/** What is read of an RPC log: where it is, and its raw topics and data. */
+type RawLog = Pick<Log, 'blockNumber' | 'logIndex' | 'transactionHash' | 'data'> & { topics: readonly Hex[] }
 
-function decodeTrade(venue: TradeVenue, data: Hex, topics: Hex[]): Omit<LaunchTrade, 'time' | 'txHash' | 'block' | 'logIndex'> {
-  const typedTopics = topics as [Hex, ...Hex[]]
-  if (venue === 'curve') {
-    const { args } = decodeEventLog({ abi: [CURVE_TRADE], data, topics: typedTopics })
-    return { ...args, venue }
+/** One feed's logs for `token` over a block range, from the RPC (the token is each event's first indexed topic). */
+async function readFeedLogs(client: PublicClient, feed: TradeFeed, token: Address, fromBlock: bigint, toBlock: bigint): Promise<RawLog[]> {
+  const filter = { address: feed.address, args: { token }, fromBlock, toBlock }
+  switch (feed.kind) {
+    case 'curve':
+      return client.getLogs({ ...filter, event: TRADE_EVENTS.curve })
+    case 'pool':
+      return client.getLogs({ ...filter, event: TRADE_EVENTS.pool })
+    case 'curveV14':
+      return client.getLogs({ ...filter, event: TRADE_EVENTS.curveV14 })
+    case 'poolV14':
+      return client.getLogs({ ...filter, event: TRADE_EVENTS.poolV14 })
   }
-  const { args } = decodeEventLog({ abi: [POOL_TRADE], data, topics: typedTopics })
-  return { ...args, venue }
 }
 
 /**
@@ -70,10 +66,9 @@ function beforeCreation(client: PublicClient, createdAt: number | undefined) {
 }
 
 /** The explorer's history of one feed, with the blocks it has not indexed yet read from the RPC (lib/logTail.ts). */
-async function fromExplorer(client: PublicClient, feed: Feed, token: Address, createdAt: number | undefined, signal: AbortSignal | undefined) {
+async function fromExplorer(client: PublicClient, feed: TradeFeed, token: Address, createdAt: number | undefined, signal: AbortSignal | undefined) {
   const tokenTopic = pad(token, { size: 32 }).toLowerCase()
-  const event = feed.venue === 'curve' ? CURVE_TRADE : POOL_TRADE
-  const topic0 = toEventSelector(event)
+  const topic0 = toEventSelector(TRADE_EVENTS[feed.kind])
   const [history, indexedHead, head] = await Promise.all([
     fetchLogHistory({
       explorerBase: activeChain.explorerBase,
@@ -94,8 +89,7 @@ async function fromExplorer(client: PublicClient, feed: Feed, token: Address, cr
     history,
     indexedHead,
     head,
-    read: async (fromBlock, toBlock) =>
-      (await client.getLogs({ address: feed.address, event, args: { token }, fromBlock, toBlock })).flatMap((log) => fromRpcLog(log) ?? []),
+    read: async (fromBlock, toBlock) => (await readFeedLogs(client, feed, token, fromBlock, toBlock)).flatMap((log) => fromRpcLog(log) ?? []),
     reachedStart: beforeCreation(client, createdAt),
     limit: MAX_TRADES,
   })
@@ -103,7 +97,7 @@ async function fromExplorer(client: PublicClient, feed: Feed, token: Address, cr
   const trades: LaunchTrade[] = []
   for (const log of logs) {
     try {
-      trades.push({ ...decodeTrade(feed.venue, log.data, log.topics), time: log.time, txHash: log.txHash, block: log.block, logIndex: log.logIndex })
+      trades.push({ ...decodeTradeLog(feed.kind, log.data, log.topics), time: log.time, txHash: log.txHash, block: log.block, logIndex: log.logIndex })
     } catch {
       // skip undecodable explorer rows
     }
@@ -111,19 +105,18 @@ async function fromExplorer(client: PublicClient, feed: Feed, token: Address, cr
   return { trades, complete: merged.complete }
 }
 
-async function fromRpc(client: PublicClient, feed: Feed, token: Address, createdAt: number | undefined) {
+async function fromRpc(client: PublicClient, feed: TradeFeed, token: Address, createdAt: number | undefined) {
   const { logs, complete } = await readLogWindows({
     head: await client.getBlockNumber(),
     windows: RPC_WINDOWS,
-    read: (fromBlock, toBlock) =>
-      client.getLogs({ address: feed.address, event: feed.venue === 'curve' ? CURVE_TRADE : POOL_TRADE, args: { token }, fromBlock, toBlock }),
+    read: (fromBlock, toBlock) => readFeedLogs(client, feed, token, fromBlock, toBlock),
     reachedStart: beforeCreation(client, createdAt),
   })
   const trades: LaunchTrade[] = []
   for (const log of logs) {
-    if (log.blockNumber === null) continue
+    if (log.blockNumber === null || log.transactionHash === null) continue
     try {
-      trades.push({ ...decodeTrade(feed.venue, log.data, log.topics as Hex[]), time: 0, txHash: log.transactionHash, block: Number(log.blockNumber), logIndex: log.logIndex ?? 0 })
+      trades.push({ ...decodeTradeLog(feed.kind, log.data, log.topics), time: 0, txHash: log.transactionHash, block: Number(log.blockNumber), logIndex: log.logIndex ?? 0 })
     } catch {
       // skip a log that does not decode
     }
@@ -132,27 +125,30 @@ async function fromRpc(client: PublicClient, feed: Feed, token: Address, created
 }
 
 /**
- * A launch token's trades, newest first: on its curve (the launchpad's Trade events) and, once it has graduated,
- * in its launch pool (the launch router's PoolTrade events). `createdAt` (unix seconds, from the curve) bounds the
- * search: no trade can be older than its token. `traded` is the curve's own word that trades exist (tokens sold, or
- * graduated): an empty history is then never complete, whatever the sources said.
+ * A launch token's trades, newest first: on its curve (its launchpad's Trade events) and, once it has graduated, in its
+ * pool (v1.3: the launch router's PoolTrade events; v1.4: the hook's, whichever router made the swap). `createdAt`
+ * (unix seconds, from the curve) bounds the search: no trade can be older than its token. `traded` is the curve's own
+ * word that trades exist (tokens sold, or graduated): an empty history is then never complete, whatever the sources
+ * said.
  */
-export function useLaunchTrades(token: Address | undefined, createdAt: number | undefined, graduated = false, traded = false) {
+export function useLaunchTrades(token: Address | undefined, createdAt: number | undefined, graduated = false, traded = false, version: LaunchVersion = 'v13') {
   const publicClient = usePublicClient()
   const api = launchFixtureApi()
   const fixtureVersion = useSyncExternalStore(api ? api.subscribe : noopSubscribe, api ? api.version : zero, zero)
 
   const query = useQuery<TradeHistory, Error>({
-    queryKey: ['launchTrades', activeChain.id, token, createdAt, graduated],
-    enabled: !fixtureOn && isLaunchpadDeployed && Boolean(token) && createdAt !== undefined,
+    queryKey: ['launchTrades', activeChain.id, version, token, createdAt, graduated],
+    enabled: !fixtureOn && (version === 'v14' ? isLaunchpadV14Deployed : isLaunchpadDeployed) && Boolean(token) && createdAt !== undefined,
     staleTime: 8_000,
     // The RPC fallback costs several calls a poll, so it polls less often than the explorer.
     refetchInterval: (current) => (current.state.data?.source === 'rpc' ? 30_000 : 12_000),
     placeholderData: (previous) => previous,
     queryFn: async ({ signal }): Promise<TradeHistory> => {
       if (!token) return { trades: [], complete: true, source: 'explorer' }
-      const feeds: Feed[] = [{ venue: 'curve', address: deployment.launchpad }]
-      if (graduated) feeds.push({ venue: 'pool', address: deployment.launchRouter })
+      const feeds = tradeFeeds(version, graduated, {
+        v13: { launchpad: deployment.launchpad, launchRouter: deployment.launchRouter },
+        v14: { launchpad: launchSuiteV14.launchpad, hook: launchSuiteV14.hook },
+      })
       const combine = (parts: { trades: LaunchTrade[]; complete: boolean }[]) => {
         const trades = parts.flatMap((part) => part.trades).sort(byNewest)
         return { trades: trades.slice(0, MAX_TRADES), complete: parts.every((part) => part.complete) || trades.length >= MAX_TRADES }

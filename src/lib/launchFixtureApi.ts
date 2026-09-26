@@ -1,4 +1,5 @@
 import type { Address, Hash, Hex } from 'viem'
+import type { LaunchVersion } from './deployment'
 import type { LaunchRecord, LaunchTrade } from './launch'
 import type { CreatorFeeState } from './plugins/state'
 
@@ -11,9 +12,15 @@ export interface FixtureCreateArgs {
   pluginData: Hex
   initialBuyUsdc: bigint
   maxLaunchFee: bigint
+  /** The launchpad the builder creates on; v1.4 takes the pool choice too. */
+  version: LaunchVersion
+  openPool: boolean
 }
 
-/** The dev fixture's stand-in for the v1.3 suite (launchpad, launch router, reference plugins). */
+/**
+ * The dev fixture's stand-in for the v1.3 suite (launchpad, launch router, reference plugins) and v1.4's (launchpad,
+ * hook, v4 router and its Uniswap pools, its plugins).
+ */
 export interface LaunchFixtureApi {
   subscribe: (onStoreChange: () => void) => () => void
   version: () => number
@@ -35,6 +42,12 @@ export interface LaunchFixtureApi {
   runDeepen: (token: Address) => Hash
   /** The owner claims its dividends on the token. */
   claim: (token: Address, owner: Address) => Hash
+  /** The simulated chain's latest block. */
+  blockNumber: () => bigint
+  /** What the v4 router would quote for a trade in a graduated v1.4 token's pool; throws the refusal's name. */
+  quoteV4: (token: Address, side: 'buy' | 'sell', amountIn: bigint) => bigint
+  /** v1.4, on the curve: anti-sniping fees the launchpad holds for the pool's first bid (pendingSnipe). */
+  snipeHeld: (token: Address) => bigint | undefined
 }
 
 let api: LaunchFixtureApi | undefined

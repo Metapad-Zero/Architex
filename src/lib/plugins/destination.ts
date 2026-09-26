@@ -1,6 +1,6 @@
 import type { Address } from 'viem'
 import { listedPluginAt, type ListedPlugin } from '../../content/plugins/registry'
-import { launchSuite, type LaunchSuite } from '../deployment'
+import { suiteFor, type LaunchSuite, type LaunchVersion } from '../deployment'
 import { shortAddress } from '../format'
 
 /**
@@ -17,8 +17,13 @@ export type FeeDestination =
  * stored at launch (`pluginHooks`), never from a plugin's `isConfigured` or its Configured events: a token's
  * registered plugin can mark the token configured on any listed plugin later without changing where its fees go
  * (V13-SPEC §9). A listed plugin's address counts as that plugin only when the launchpad pays it through its hooks.
+ * The plugins are the ones deployed for the token's own launchpad (v1.4 has its own Split, Distribute to holders and
+ * Combo).
  */
-export function feeDestination(launch: { plugin: Address; creator: Address; pluginHooks: boolean }, suite: LaunchSuite = launchSuite): FeeDestination {
+export function feeDestination(
+  launch: { plugin: Address; creator: Address; pluginHooks: boolean; version?: LaunchVersion },
+  suite: LaunchSuite = suiteFor(launch.version),
+): FeeDestination {
   const listed = launch.pluginHooks ? listedPluginAt(launch.plugin, suite) : undefined
   if (listed) return { kind: 'listed', plugin: listed, address: launch.plugin }
   if (launch.plugin.toLowerCase() === launch.creator.toLowerCase()) return { kind: 'creator', address: launch.plugin }

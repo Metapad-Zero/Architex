@@ -28,6 +28,11 @@ export interface ListedPlugin {
    * still run it.
    */
   paused?: string
+  /**
+   * Set when the plugin has no deployment for launchpad v1.4 (a plugin binds to one launchpad when it is deployed,
+   * V14-SPEC §7): one short line, shown where the builder would offer it for a v1.4 launch.
+   */
+  notOnV14?: string
 }
 
 export const LISTED_PLUGINS: readonly ListedPlugin[] = [
@@ -51,6 +56,7 @@ export const LISTED_PLUGINS: readonly ListedPlugin[] = [
     suiteKey: 'buybackPlugin',
     contractPath: 'contracts/plugins/launch/BuybackBurnPlugin.sol',
     paused: 'Paused for new launches. Deepen pool at a 100% burn share does the same job.',
+    notOnV14: 'Not offered for v1.4 launches.',
   },
   {
     kind: 'deepen',
@@ -61,6 +67,7 @@ export const LISTED_PLUGINS: readonly ListedPlugin[] = [
     config: 'burnShare',
     suiteKey: 'deepenPlugin',
     contractPath: 'contracts/plugins/launch/DeepenPoolPlugin.sol',
+    notOnV14: 'Not available for v1.4 launches yet.',
   },
   {
     kind: 'holders',

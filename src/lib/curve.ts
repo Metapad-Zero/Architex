@@ -5,6 +5,10 @@
  * in bigint: a quote here equals `quoteBuy` / `quoteSell` on-chain to the last unit. The reference vectors in
  * `__tests__/fixtures/v13-vectors.json` come from the Solidity itself.
  *
+ * Launchpad v1.4's curves are the same curves, with one more fee on a buy in a token's first blocks: the snipe fee
+ * (lib/launchV14.ts), which `quoteBuy` takes as a third rate, 0 for v1.3 and after the window. With it at 0 the maths
+ * is v1.3's exactly; `__tests__/fixtures/v14-vectors.json` holds the v1.4 launchpad's own quotes with it.
+ *
  * Two fees on every trade, both in USDC and both rounded up (never in the trader's favour): the 0.5% platform
  * fee and the token's creator fee (0–10%, locked at launch). A buy pays them out of the USDC in; a sell out of
  * the USDC out.
@@ -39,7 +43,9 @@ export interface BuyQuote {
   tokensOut: bigint
   platformFee: bigint
   creatorFee: bigint
-  /** Gross USDC pulled, both fees included; less than the offer only on the buy that sells out the curve. */
+  /** v1.4's anti-sniping fee, held for the token's pool; 0 outside its window and on v1.3. */
+  snipeFee: bigint
+  /** Gross USDC pulled, every fee included; less than the offer only on the buy that sells out the curve. */
   usdcSpent: bigint
   graduates: boolean
   next: CurveState
@@ -109,18 +115,23 @@ export function splitSellOutFee(totalFee: bigint, creatorFeeBps: number | bigint
   return { platformFee, creatorFee: totalFee - platformFee }
 }
 
-/** `ArchitexLaunchpad.quoteBuy` / `_calcBuy`. Throws the contract's error name where the contract reverts. */
-export function quoteBuy(state: CurveState, usdcIn: bigint, creatorFeeBps: number | bigint): BuyQuote {
+/**
+ * `ArchitexLaunchpad.quoteBuy` / `_calcBuy`, v1.3's and v1.4's: `snipeFeeBps` is v1.4's anti-sniping rate for the block
+ * the buy is quoted in (lib/launchV14.ts snipeBps), 0 otherwise. Throws the contract's error name where it reverts.
+ */
+export function quoteBuy(state: CurveState, usdcIn: bigint, creatorFeeBps: number | bigint, snipeFeeBps: number | bigint = 0): BuyQuote {
   const bps = feeBps(creatorFeeBps)
+  const snipeBps = BigInt(snipeFeeBps)
   const remaining = CURVE.CURVE_SUPPLY - state.tokensSold
   if (remaining <= 0n) fail('CurveGraduated')
   if (usdcIn <= 0n) fail('ZeroAmount')
   const k = state.virtualUsdc * state.virtualTokens
 
   let { platformFee, creatorFee } = tradeFees(usdcIn, bps)
+  let snipeFee = ceilDiv(usdcIn * snipeBps, BPS)
   // Fees that eat the whole input buy nothing.
-  if (platformFee + creatorFee >= usdcIn) fail('ZeroAmount')
-  let net = usdcIn - platformFee - creatorFee
+  if (platformFee + creatorFee + snipeFee >= usdcIn) fail('ZeroAmount')
+  let net = usdcIn - platformFee - creatorFee - snipeFee
   let tokensOut = state.virtualTokens - ceilDiv(k, state.virtualUsdc + net)
   if (tokensOut === 0n) fail('ZeroAmount')
 
@@ -129,11 +140,22 @@ export function quoteBuy(state: CurveState, usdcIn: bigint, creatorFeeBps: numbe
   if (tokensOut >= remaining) {
     // The buy that sells out the curve fills exactly the remainder and pays only for it, never more than
     // offered; the fees are whatever it pulls beyond the remainder's price.
-    const allFees = CURVE.FEE_BPS + bps
+    const allFees = CURVE.FEE_BPS + bps + snipeBps
     net = ceilDiv(k, state.virtualTokens - remaining) - state.virtualUsdc
     const gross = net + ceilDiv(net * allFees, BPS - allFees)
     usdcSpent = gross < usdcIn ? gross : usdcIn
-    ;({ platformFee, creatorFee } = splitSellOutFee(usdcSpent - net, bps))
+    const totalFee = usdcSpent - net
+    if (snipeBps === 0n) {
+      ;({ platformFee, creatorFee } = splitSellOutFee(totalFee, bps))
+      snipeFee = 0n
+    } else {
+      // v1.4's split of three: the platform's share rounded up, then the creator's (capped at what is left), then
+      // the snipe fee takes the rest. With no snipe fee it is splitSellOutFee's, unit for unit.
+      platformFee = ceilDiv(totalFee * CURVE.FEE_BPS, allFees)
+      const creatorShare = ceilDiv(totalFee * bps, allFees)
+      creatorFee = creatorShare < totalFee - platformFee ? creatorShare : totalFee - platformFee
+      snipeFee = totalFee - platformFee - creatorFee
+    }
     tokensOut = remaining
     graduates = true
   }
@@ -142,10 +164,11 @@ export function quoteBuy(state: CurveState, usdcIn: bigint, creatorFeeBps: numbe
     tokensOut,
     platformFee,
     creatorFee,
+    snipeFee,
     usdcSpent,
     graduates,
     next: {
-      virtualUsdc: state.virtualUsdc + (usdcSpent - platformFee - creatorFee),
+      virtualUsdc: state.virtualUsdc + (usdcSpent - platformFee - creatorFee - snipeFee),
       virtualTokens: state.virtualTokens - tokensOut,
       tokensSold: state.tokensSold + tokensOut,
     },

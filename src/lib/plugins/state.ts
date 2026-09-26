@@ -82,7 +82,10 @@ export interface ComboEntryState {
 
 /** Everything the token page shows about where a token's creator fees are and what can be done with them. */
 export interface CreatorFeeState {
-  /** Accrued in the launchpad, waiting for anyone to collect them to the plugin. */
+  /**
+   * Waiting for anyone to collect them to the plugin: accrued in the launchpad, and for a graduated v1.4 token also
+   * held by its hook until the collection syncs them.
+   */
   pending: bigint
   split?: SplitState
   buyback?: BuybackState

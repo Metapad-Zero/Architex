@@ -14,7 +14,8 @@ export function DocsFaq() {
         <p>
           No. The curve holds real USDC and reserved tokens in the contract itself; nobody,
           including the creator, has a withdrawal path before graduation, and graduation sends
-          the funds straight into a burned-LP pool rather than to any wallet.
+          the funds straight into a pool where they're locked for good (burned LP tokens on v1.3,
+          a position the hook can never remove on v1.4) rather than to any wallet.
         </p>
       </div>
       <div className="space-y-2">
@@ -39,6 +40,25 @@ export function DocsFaq() {
           it, in proportion to what you hold, and it all waits on the token until you claim it.
           Buying just before a payout earns nothing extra: you only earn from the moment you
           hold. Tokens on the curve, in the launch pool or burned earn nothing.
+        </p>
+      </div>
+      <div className="space-y-2">
+        <h3 className="text-base font-semibold text-ink">What is the anti-sniping fee?</h3>
+        <p>
+          On launchpad v1.4, a buy in the 20 blocks after a token launches, or after its pool opens,
+          pays an extra fee that starts at 90% and falls to nothing, about 10 seconds in all. It
+          becomes liquidity in the token's own pool, below the market, that nobody can withdraw, never
+          the creator's or Architex's; in the pool, in the same transaction as the buy. Sells and the
+          creator's first buy never pay it. See{' '}
+          <span className="font-semibold">Trading a launch token</span>.
+        </p>
+      </div>
+      <div className="space-y-2">
+        <h3 className="text-base font-semibold text-ink">Why isn't my v1.4 token on the Uniswap app?</h3>
+        <p>
+          Its pool is a Uniswap v4 pool, but Uniswap's app only routes trades to a pool with a hook
+          like Architex's once Uniswap has approved the hook, and that hasn't happened yet. The token's
+          page here trades it.
         </p>
       </div>
       <div className="space-y-2">
@@ -109,6 +129,29 @@ export function DocsFaq() {
             <dd className="text-g700">
               A graduated token's own USDC pool, separate from Architex's regular pools. It has no
               liquidity fee and trades only through the launch router, which charges both fees.
+            </dd>
+          </div>
+          <div>
+            <dt className="font-semibold text-ink">Uniswap v4 pool and hook</dt>
+            <dd className="text-g700">
+              Where a token graduates on launchpad v1.4: its own pool in Uniswap v4, behind the
+              Architex hook, a contract that takes the platform and creator fees on every swap and
+              holds the launch liquidity for good.
+            </dd>
+          </div>
+          <div>
+            <dt className="font-semibold text-ink">Open and closed pools</dt>
+            <dd className="text-g700">
+              A v1.4 creator's choice at launch: an open pool lets anyone add liquidity of their own,
+              a closed pool holds only the locked launch liquidity.
+            </dd>
+          </div>
+          <div>
+            <dt className="font-semibold text-ink">Anti-sniping fee</dt>
+            <dd className="text-g700">
+              v1.4's extra fee on buys in a token's first 20 blocks, and its pool's, from 90% down to
+              nothing. It becomes a bid in the token's pool: liquidity below the market that nobody can
+              withdraw.
             </dd>
           </div>
           <div>

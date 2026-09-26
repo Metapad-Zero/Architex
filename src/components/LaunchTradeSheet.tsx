@@ -5,7 +5,8 @@ import { useLaunchTrade, type LaunchSide } from '../hooks/useLaunchTrade'
 import { useSettings } from '../hooks/useSettings'
 import { GHOST, formatAmount, formatPct, parseAmount } from '../lib/format'
 import { impactSizeHint, isHighImpact, maxLaunchTrade } from '../lib/impactGuard'
-import type { LaunchRecord } from '../lib/launch'
+import { formatSpotUsd, launchVersion, type LaunchRecord } from '../lib/launch'
+import { secondsUntil, snipeWindowEnd, v4SpotPrice } from '../lib/launchV14'
 import { destinationLabel, feeDestination } from '../lib/plugins/destination'
 import type { Token } from '../lib/tokens'
 import { AmountField } from './AmountField'
@@ -23,6 +24,8 @@ interface LaunchTradeSheetProps {
   tokenBalance: bigint
   usdcBalance: bigint
   usdcAllowance: LaunchAllowances
+  /** The chain's latest block (hooks/useChainBlock.ts), for v1.4's anti-sniping fee; undefined until read. */
+  block?: bigint
   initialSide?: LaunchSide
   onConfirmed: () => void | Promise<void>
 }
@@ -34,6 +37,7 @@ export function LaunchTradeSheet({
   tokenBalance,
   usdcBalance,
   usdcAllowance,
+  block,
   initialSide = 'buy',
   onConfirmed,
 }: LaunchTradeSheetProps) {
@@ -78,6 +82,7 @@ export function LaunchTradeSheet({
     tokenBalance,
     usdcBalance,
     usdcAllowance,
+    block,
     onConfirmed,
     onClear: () => editAmount(''),
     impactAcknowledgedKey,
@@ -97,11 +102,16 @@ export function LaunchTradeSheet({
 
   const quote = trade.quote
   const pool = trade.venue === 'pool'
+  const v14 = launchVersion(launch) === 'v14'
   const destination = feeDestination(launch)
+  // A trade in a graduated v1.4 token's first pool blocks, or on a v1.4 curve's first blocks, pays the snipe fee.
+  const snipeOpened = pool ? launch.v4?.openBlock : launch.createdBlock
+  const snipeEnd = v14 && snipeOpened !== undefined ? snipeWindowEnd(snipeOpened) : undefined
+  const sniping = side === 'buy' && trade.snipeBps > 0
   const receiveAmount = quote ? formatAmount(quote.amountOut, receiveToken.decimals) : ''
   // From 5% impact: the largest buy or sell that moves the price under 1% where this token trades now.
   const impactHint = quote && isHighImpact(quote.priceImpactBps)
-    ? impactSizeHint(maxLaunchTrade(launch, side), payToken.decimals, payToken.symbol)
+    ? impactSizeHint(maxLaunchTrade(launch, side, undefined, block), payToken.decimals, payToken.symbol)
     : undefined
   const bound = quote ? `${formatAmount(quote.minReceived, receiveToken.decimals)} ${receiveToken.symbol}` : GHOST
   // Always quoted the same way round (tokens per 1 USDC), fees included, so buys and sells compare at a glance.
@@ -128,7 +138,8 @@ export function LaunchTradeSheet({
         />
       </div>
       <p className="trade-venue">
-        {pool ? 'Trading in the launch pool' : 'Trading on the curve'}
+        {pool ? (v14 ? 'Trading on Uniswap v4' : 'Trading in the launch pool') : 'Trading on the curve'}
+        {pool && v14 && launch.v4 && <span> at {formatSpotUsd(v4SpotPrice(launch.v4))}</span>}
         <span aria-hidden="true"> · </span>
         <span className="text-g500">fees to {destinationLabel(destination)}</span>
       </p>
@@ -199,11 +210,23 @@ export function LaunchTradeSheet({
             </span>
           </dd>
         </div>
+        {sniping && (
+          <div>
+            <dt>Anti-sniping fee</dt>
+            <dd>{`${formatPct(trade.snipeBps)}${quote ? ` · ${formatAmount(quote.snipeFee, usdc.decimals)} USDC` : ''}`}</dd>
+          </div>
+        )}
         <div>
           <dt>Minimum received</dt>
           <dd className={quote ? '' : 'text-g500'}>{bound}</dd>
         </div>
       </dl>
+      {sniping && snipeEnd !== undefined && block !== undefined && (
+        <p className="quote-message" role="status">
+          {`${pool ? 'Its pool opened' : `${launch.symbol} launched`} moments ago: for 20 blocks a buy pays an anti-sniping fee that falls to 0 at block ${snipeEnd.toLocaleString('en-US')}, in about ${secondsUntil(snipeEnd, block)} seconds. It goes into the pool as liquidity nobody can withdraw; waiting a few seconds avoids it.`}
+        </p>
+      )}
+      {trade.quoteError && <p className="quote-message" role="status">{trade.quoteError}</p>}
       {sellsOut && quote && (
         <p className="quote-message" role="status">
           This buy sells out the curve and graduates {launch.symbol}. It spends {formatAmount(quote.amountIn, usdc.decimals)} of the {formatAmount(quote.offer, usdc.decimals)} USDC offered.

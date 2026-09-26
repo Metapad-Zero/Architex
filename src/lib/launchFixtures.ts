@@ -1,20 +1,23 @@
 /**
- * Dev-only fake launchpad v1.3 suite: the launchpad, the launch router and the reference plugins, simulated in
- * memory with the same maths the site quotes with (lib/curve.ts). Loaded only via a dynamic import inside
+ * Dev-only fake launchpad suites: v1.3's launchpad, launch router and reference plugins, and v1.4's launchpad, hook
+ * (its Uniswap pools, simulated as their full-range position: a constant product on what each holds) and router,
+ * simulated in memory with the same maths the site quotes with (lib/curve.ts, lib/launchV14.ts). Loaded only via a
+ * dynamic import inside
  * `import.meta.env.DEV && import.meta.env.VITE_LAUNCHPAD_FIXTURE === '1'`, which is a compile-time dead branch in
  * production. The marker string below must not appear in dist/.
  *
  * It is a stand-in for exercising the UI, not a second implementation to trust: amounts follow the contracts'
  * formulas, but blocks are simulated (one every two seconds) and nothing here is checked against a chain.
  */
-import { decodeAbiParameters, getAddress, keccak256, toHex, type Address, type Hash, type Hex } from 'viem'
+import { decodeAbiParameters, getAddress, keccak256, toHex, zeroAddress, type Address, type Hash, type Hex } from 'viem'
 import { activeChain } from '../chain'
 import { listedPlugin, listedPluginAt, pluginAddress } from '../content/plugins/registry'
 import { sqrt } from './amm'
 import { CURVE, INITIAL_CURVE, quoteBuy, quotePoolBuy, quotePoolSell, quoteSell, realUsdc, type CurveState, type PoolReserves } from './curve'
-import { FIXTURE_SUITE } from './deployment'
+import { FIXTURE_SUITE, FIXTURE_SUITE_V14, isV14Available, suiteFor, type LaunchVersion } from './deployment'
 import type { LaunchRecord, LaunchTrade } from './launch'
 import { setLaunchFixtureApi, type FixtureCreateArgs } from './launchFixtureApi'
+import { cheaperOf, launchPoolKey, poolFeesOnGross, poolIdOf, snipeBps, tickAtSqrtPrice, usdcIsCurrency0, type PoolTradeFees } from './launchV14'
 // The builder's own encoders, so a fixture launch carries exactly what the builder would send.
 import { encodeBurnShareData as encodeBurnShare, encodeComboData as encodeCombo, encodeSplitData as encodeSplit } from './plugins/plan'
 import { DEEPEN_DEFAULT_BURN_BPS, type CreatorFeeState } from './plugins/state'
@@ -42,13 +45,45 @@ const usdcAddress = () => activeChain.usdc
 const nowSeconds = () => Math.floor(Date.now() / 1000)
 /** A simulated block every two seconds. */
 const blockNumber = () => Math.floor(Date.now() / 2_000)
+/** The simulated block a unix time falls in. */
+const blockAt = (seconds: number) => Math.floor(seconds / 2)
 
 function addr(n: number): Address {
   return getAddress(`0x${n.toString(16).padStart(40, '0')}`)
 }
 
+/** v1.4 launch tokens: on either side of USDC (0x3600…), so both pool orderings show. */
+function addrV14(n: number, aboveUsdc: boolean): Address {
+  return getAddress(`0x${aboveUsdc ? 'a14' : '014'}${n.toString(16).padStart(37, '0')}`)
+}
+
 interface FixtureLaunch extends LaunchRecord {
   state: CurveState
+}
+
+/**
+ * A graduated v1.4 token's Uniswap pool, simulated as its full-range position: a constant product on the USDC and the
+ * tokens it holds, with no LP fee and the hook's fees on the USDC side. Its bids (the curve's snipe fees at graduation,
+ * then each window buy's own, placed inside that buy) sit below the market, and are counted, not traded against.
+ */
+interface PoolBook {
+  usdc: bigint
+  tokens: bigint
+  usdcIs0: boolean
+  openBlock: number
+  poolId: Hex
+  /** The bids placed (hook.bidCount), and the USDC in them. */
+  bids: number
+  locked: bigint
+  /** The tick the pool opened at, and its bid reference: the lowest tick price any window buy has started from. */
+  graduationTick: number
+  bidRefTick: number
+}
+
+/** √(currency1/currency0) of a pool book in Q64.96, as StateView reports it. */
+function bookSqrtPrice(book: Pick<PoolBook, 'usdc' | 'tokens' | 'usdcIs0'>): bigint {
+  const [amount0, amount1] = book.usdcIs0 ? [book.usdc, book.tokens] : [book.tokens, book.usdc]
+  return sqrt((amount1 << 192n) / amount0)
 }
 
 interface SplitBook {
@@ -108,6 +143,9 @@ interface Store {
   deepens: Map<string, DeepenBook>
   holders: Map<string, HolderBook>
   combos: Map<string, { target: Address; bps: number; isPlugin: boolean }[]>
+  /** v1.4: the curve's snipe fees the launchpad holds for each token's pool, and the pools once they open. */
+  snipe: Map<string, bigint>
+  pools: Map<string, PoolBook>
   version: number
 }
 
@@ -124,6 +162,8 @@ const store: Store = {
   deepens: new Map(),
   holders: new Map(),
   combos: new Map(),
+  snipe: new Map(),
+  pools: new Map(),
   version: 1,
 }
 let hashCounter = 0
@@ -248,8 +288,13 @@ function holderClaimable(book: HolderBook, owner: Address, token: Address, now: 
 
 // ─── Plugins ─────────────────────────────────────────────────────────────────
 
+/** The suite a fixture token's plugins belong to: its own launchpad's. */
+function suiteOfToken(token: Address) {
+  return suiteFor(store.launches.find((item) => item.token.toLowerCase() === token.toLowerCase())?.version)
+}
+
 function configure(token: Address, plugin: Address, data: Hex): void {
-  const listed = listedPluginAt(plugin)
+  const listed = listedPluginAt(plugin, suiteOfToken(token))
   if (!listed) return
   switch (listed.kind) {
     case 'split': {
@@ -293,7 +338,7 @@ function configure(token: Address, plugin: Address, data: Hex): void {
       store.combos.set(
         token.toLowerCase(),
         targets.map((target, index) => {
-          const isPlugin = Boolean(listedPluginAt(target))
+          const isPlugin = Boolean(listedPluginAt(target, suiteOfToken(token)))
           if (isPlugin) configure(token, target, datas[index] ?? '0x')
           return { target, bps: Number(bps[index] ?? 0), isPlugin }
         }),
@@ -305,7 +350,7 @@ function configure(token: Address, plugin: Address, data: Hex): void {
 /** A collection, delivered as the launchpad's collectCreatorFees would (a Combo forwards its slices). */
 function deliver(token: Address, target: Address, amount: bigint): void {
   if (amount === 0n) return
-  const listed = listedPluginAt(target)
+  const listed = listedPluginAt(target, suiteOfToken(token))
   const id = token.toLowerCase()
   switch (listed?.kind) {
     case 'split': {
@@ -357,15 +402,69 @@ function accrue(token: Address, creatorFee: bigint): void {
   store.pending.set(token.toLowerCase(), (store.pending.get(token.toLowerCase()) ?? 0n) + creatorFee)
 }
 
-function buyInternal(trader: Address, token: Address, usdcIn: bigint, time: number, spender?: Address): { tokensOut: bigint; usdcSpent: bigint } {
+// ─── v1.4's pools (the hook and the v4 router) ───────────────────────────────
+
+/** A trade in a v1.4 pool: the router's exact-in buy or sell, the hook's fees on the USDC side. Throws the refusal. */
+function poolTrade(book: PoolBook, side: 'buy' | 'sell', amountIn: bigint, creatorFeeBps: number, snipe: number) {
+  if (amountIn <= 0n) throw new Error('ZeroAmount')
+  if (side === 'buy') {
+    const fees = poolFeesOnGross(amountIn, creatorFeeBps, snipe)
+    const net = amountIn - fees.platformFee - fees.creatorFee - fees.snipeFee
+    const out = (net * book.tokens) / (book.usdc + net)
+    if (out === 0n) throw new Error('ZeroAmount')
+    return { out, gross: amountIn, fees, next: { usdc: book.usdc + net, tokens: book.tokens - out } }
+  }
+  const gross = (amountIn * book.usdc) / (book.tokens + amountIn)
+  const fees: PoolTradeFees = poolFeesOnGross(gross, creatorFeeBps, 0)
+  return { out: gross - fees.platformFee - fees.creatorFee, gross, fees, next: { usdc: book.usdc - gross, tokens: book.tokens + amountIn } }
+}
+
+function poolOf(token: Address): PoolBook {
+  const book = store.pools.get(token.toLowerCase())
+  if (!book) throw new Error('UnknownLaunch')
+  return book
+}
+
+/** The snipe fee a buy of `launch` pays at `time`: on the curve from its creation block, in the pool from its opening. */
+function snipeAt(launch: FixtureLaunch, time: number): number {
+  if (launch.version !== 'v14') return 0
+  const opened = launch.graduated ? store.pools.get(launch.token.toLowerCase())?.openBlock : Number(launch.createdBlock ?? 0n)
+  return opened === undefined ? 0 : snipeBps(BigInt(opened), BigInt(blockAt(time)), launch.creatorFeeBps)
+}
+
+/** Graduation into Uniswap: the pool opens at the curve's last price with its USDC and the 200M, and the curve's snipe fees become its first bid. */
+function openPool(launch: FixtureLaunch, next: CurveState, time: number): void {
+  const id = launch.token.toLowerCase()
+  const snipe = store.snipe.get(id) ?? 0n
+  const usdcIs0 = usdcIsCurrency0(usdcAddress(), launch.token)
+  const graduationTick = tickAtSqrtPrice(bookSqrtPrice({ usdc: realUsdc(next), tokens: CURVE.POOL_SUPPLY, usdcIs0 }))
+  store.pools.set(id, {
+    usdc: realUsdc(next),
+    tokens: CURVE.POOL_SUPPLY,
+    usdcIs0,
+    openBlock: blockAt(time),
+    poolId: poolIdOf(launchPoolKey(launch.token, usdcAddress(), FIXTURE_SUITE_V14.hook)),
+    // The curve's snipe fees become the pool's first bid, from half the graduation price down.
+    bids: snipe > 0n ? 1 : 0,
+    locked: snipe,
+    graduationTick,
+    bidRefTick: graduationTick,
+  })
+  store.snipe.set(id, 0n)
+}
+
+function buyInternal(trader: Address, token: Address, usdcIn: bigint, time: number, spender?: Address, firstBuy = false): { tokensOut: bigint; usdcSpent: bigint } {
   const launch = find(token)
   if (!launch.graduated) {
-    const quote = quoteBuy(launch.state, usdcIn, launch.creatorFeeBps)
+    // v1.4's curve takes its snipe fee in the first blocks, except on the creator's first buy in the launch itself.
+    const snipe = firstBuy ? 0 : snipeAt(launch, time)
+    const quote = quoteBuy(launch.state, usdcIn, launch.creatorFeeBps, snipe)
     if (spender) spendAllowance(trader, spender, quote.usdcSpent)
     setBalance(trader, usdcAddress(), fixtureBalance(trader, usdcAddress()) - quote.usdcSpent)
     setBalance(trader, token, fixtureBalance(trader, token) + quote.tokensOut)
     launch.state = quote.next
     accrue(token, quote.creatorFee)
+    if (quote.snipeFee > 0n) store.snipe.set(token.toLowerCase(), (store.snipe.get(token.toLowerCase()) ?? 0n) + quote.snipeFee)
     record(token, {
       trader,
       isBuy: true,
@@ -373,6 +472,7 @@ function buyInternal(trader: Address, token: Address, usdcIn: bigint, time: numb
       tokenAmount: quote.tokensOut,
       platformFee: quote.platformFee,
       creatorFee: quote.creatorFee,
+      ...(launch.version === 'v14' ? { snipeFee: quote.snipeFee } : {}),
       time,
       txHash: nextHash('buy'),
       virtualUsdc: quote.next.virtualUsdc,
@@ -381,9 +481,40 @@ function buyInternal(trader: Address, token: Address, usdcIn: bigint, time: numb
     })
     if (quote.graduates) {
       launch.graduated = true
-      launch.pool = { reserveToken: CURVE.POOL_SUPPLY, reserveUsdc: realUsdc(quote.next) }
+      if (launch.version === 'v14') openPool(launch, quote.next, time)
+      else launch.pool = { reserveToken: CURVE.POOL_SUPPLY, reserveUsdc: realUsdc(quote.next) }
     }
     return { tokensOut: quote.tokensOut, usdcSpent: quote.usdcSpent }
+  }
+  if (launch.version === 'v14') {
+    const book = poolOf(token)
+    const trade = poolTrade(book, 'buy', usdcIn, launch.creatorFeeBps, snipeAt(launch, time))
+    const tickBefore = tickAtSqrtPrice(bookSqrtPrice(book))
+    if (spender) spendAllowance(trader, spender, usdcIn)
+    setBalance(trader, usdcAddress(), fixtureBalance(trader, usdcAddress()) - usdcIn)
+    setBalance(trader, token, fixtureBalance(trader, token) + trade.out)
+    book.usdc = trade.next.usdc
+    book.tokens = trade.next.tokens
+    // A buy inside the window places its own snipe fee as a bid, in the same transaction, from half the lower of the
+    // price before it and the pool's bid reference, which becomes the reference (it only moves down).
+    if (trade.fees.snipeFee > 0n) {
+      book.bids += 1
+      book.locked += trade.fees.snipeFee
+      book.bidRefTick = cheaperOf(book.usdcIs0, tickBefore, book.bidRefTick)
+    }
+    accrue(token, trade.fees.creatorFee)
+    record(token, {
+      trader: FIXTURE_SUITE_V14.router,
+      viaRouter: true,
+      isBuy: true,
+      usdcAmount: usdcIn,
+      tokenAmount: trade.out,
+      ...trade.fees,
+      time,
+      txHash: nextHash('v4-buy'),
+      venue: 'pool',
+    })
+    return { tokensOut: trade.out, usdcSpent: usdcIn }
   }
   const pool = launch.pool as PoolReserves
   const quote = quotePoolBuy(pool, usdcIn, launch.creatorFeeBps)
@@ -422,6 +553,7 @@ function sellInternal(trader: Address, token: Address, tokensIn: bigint, time: n
       tokenAmount: tokensIn,
       platformFee: quote.platformFee,
       creatorFee: quote.creatorFee,
+      ...(launch.version === 'v14' ? { snipeFee: 0n } : {}),
       time,
       txHash: nextHash('sell'),
       virtualUsdc: quote.next.virtualUsdc,
@@ -429,6 +561,27 @@ function sellInternal(trader: Address, token: Address, tokensIn: bigint, time: n
       venue: 'curve',
     })
     return quote.usdcOut
+  }
+  if (launch.version === 'v14') {
+    const book = poolOf(token)
+    const trade = poolTrade(book, 'sell', tokensIn, launch.creatorFeeBps, 0)
+    setBalance(trader, token, fixtureBalance(trader, token) - tokensIn)
+    setBalance(trader, usdcAddress(), fixtureBalance(trader, usdcAddress()) + trade.out)
+    book.usdc = trade.next.usdc
+    book.tokens = trade.next.tokens
+    accrue(token, trade.fees.creatorFee)
+    record(token, {
+      trader: FIXTURE_SUITE_V14.router,
+      viaRouter: true,
+      isBuy: false,
+      usdcAmount: trade.gross,
+      tokenAmount: tokensIn,
+      ...trade.fees,
+      time,
+      txHash: nextHash('v4-sell'),
+      venue: 'pool',
+    })
+    return trade.out
   }
   const quote = quotePoolSell(launch.pool as PoolReserves, tokensIn, launch.creatorFeeBps)
   setBalance(trader, token, fixtureBalance(trader, token) - tokensIn)
@@ -449,24 +602,26 @@ function sellInternal(trader: Address, token: Address, tokensIn: bigint, time: n
   return quote.usdcOut
 }
 
-function createInternal(owner: Address, args: FixtureCreateArgs, time: number, spender?: Address): Address {
+function createInternal(owner: Address, args: FixtureCreateArgs, time: number, spender?: Address, aboveUsdc = true): Address {
   if (args.maxLaunchFee < FIXTURE_LAUNCH_FEE) throw new Error('LaunchFeeAboveMax')
-  const token = addr(0x1000 + store.launches.length)
+  const v14 = args.version === 'v14'
+  const token = v14 ? addrV14(store.launches.length, aboveUsdc) : addr(0x1000 + store.launches.length)
   const firstBuy = args.initialBuyUsdc > 0n ? quoteBuy(INITIAL_CURVE, args.initialBuyUsdc, args.creatorFeeBps) : undefined
   if (spender) spendAllowance(owner, spender, FIXTURE_LAUNCH_FEE + (firstBuy?.usdcSpent ?? 0n))
   setBalance(owner, usdcAddress(), fixtureBalance(owner, usdcAddress()) - FIXTURE_LAUNCH_FEE)
   rememberToken({ address: token, name: args.name, symbol: args.symbol, decimals: 18, faucet: false, isLaunch: true })
   store.launches.unshift({
+    ...(v14 ? { version: 'v14' as const, createdBlock: BigInt(blockAt(time)), openPool: args.openPool } : {}),
     token,
     creator: owner,
-    pair: addr(0x2000 + store.launches.length),
+    pair: v14 ? zeroAddress : addr(0x2000 + store.launches.length),
     virtualUsdc: INITIAL_CURVE.virtualUsdc,
     virtualTokens: INITIAL_CURVE.virtualTokens,
     tokensSold: 0n,
     createdAt: BigInt(time),
     graduated: false,
     creatorFeeBps: args.creatorFeeBps,
-    pluginHooks: Boolean(listedPluginAt(args.plugin)),
+    pluginHooks: Boolean(listedPluginAt(args.plugin, suiteFor(args.version))),
     plugin: args.plugin,
     metadataURI: args.metadataURI,
     name: args.name,
@@ -474,7 +629,8 @@ function createInternal(owner: Address, args: FixtureCreateArgs, time: number, s
     state: INITIAL_CURVE,
   })
   configure(token, args.plugin, args.pluginData)
-  if (args.initialBuyUsdc > 0n) buyInternal(owner, token, args.initialBuyUsdc, time)
+  // The creator's first buy runs in the launch transaction itself: on v1.4 it pays no snipe fee.
+  if (args.initialBuyUsdc > 0n) buyInternal(owner, token, args.initialBuyUsdc, time, undefined, true)
   return token
 }
 
@@ -618,9 +774,30 @@ function runBuybackInternal(token: Address, time: number): Hash {
 
 // ─── The initial market ──────────────────────────────────────────────────────
 
-function launchWith(kind: 'wallet' | 'custom' | 'split' | 'buyback' | 'deepen' | 'holders' | 'combo', args: Omit<FixtureCreateArgs, 'plugin' | 'pluginData' | 'maxLaunchFee' | 'initialBuyUsdc'>, time: number, data: Hex = '0x'): Address {
+type SeedArgs = Omit<FixtureCreateArgs, 'plugin' | 'pluginData' | 'maxLaunchFee' | 'initialBuyUsdc' | 'version' | 'openPool'>
+
+function launchWith(kind: 'wallet' | 'custom' | 'split' | 'buyback' | 'deepen' | 'holders' | 'combo', args: SeedArgs, time: number, data: Hex = '0x'): Address {
   const plugin = kind === 'wallet' ? CREATOR : kind === 'custom' ? CUSTOM_DESTINATION : pluginAddress(listedPlugin(kind))
-  return createInternal(CREATOR, { ...args, plugin, pluginData: data, initialBuyUsdc: 0n, maxLaunchFee: FIXTURE_LAUNCH_FEE }, time)
+  return createInternal(CREATOR, { ...args, plugin, pluginData: data, initialBuyUsdc: 0n, maxLaunchFee: FIXTURE_LAUNCH_FEE, version: 'v13', openPool: false }, time)
+}
+
+/** A v1.4 launch, its fees to one of v1.4's own plugins or the creator; `aboveUsdc` picks which side of USDC it sorts. */
+function launchWithV14(
+  kind: 'wallet' | 'split' | 'holders' | 'combo',
+  args: SeedArgs & { openPool: boolean; initialBuyUsdc?: bigint },
+  time: number,
+  aboveUsdc: boolean,
+  data: Hex = '0x',
+): Address {
+  const plugin = kind === 'wallet' ? CREATOR : pluginAddress(listedPlugin(kind), suiteFor('v14'))
+  const version: LaunchVersion = 'v14'
+  return createInternal(
+    CREATOR,
+    { ...args, plugin, pluginData: data, initialBuyUsdc: args.initialBuyUsdc ?? 0n, maxLaunchFee: FIXTURE_LAUNCH_FEE, version },
+    time,
+    undefined,
+    aboveUsdc,
+  )
 }
 
 function seedMarket(): void {
@@ -711,6 +888,45 @@ function seedMarket(): void {
     encodeCombo([CREATOR, pluginAddress(listedPlugin('split')), pluginAddress(listedPlugin('buyback'))], [5_000, 3_000, 2_000], ['0x', splitTwo, '0x']),
   )
   buyInternal(bob, mint, 50n * USDC, NOW - 20)
+
+  // ─── Launchpad v1.4 (only while the fixture previews it as live) ──────────
+  if (!isV14Available) return
+  const splitV14 = encodeSplit([CREATOR, alice], [3n, 1n])
+
+  // Graduated into a closed Uniswap pool (USDC is its currency0), with buys that paid the pool's snipe fee in its first
+  // blocks, so the hook holds some for anyone to lock.
+  const harbor = launchWithV14('holders', { name: 'Harbor', symbol: 'HRBR', metadataURI: '', creatorFeeBps: 150, openPool: false }, NOW - 20_000, true)
+  buyInternal(alice, harbor, 900n * USDC, NOW - 19_990)
+  buyInternal(WHALE, harbor, 1_000_000n * USDC, NOW - 12_000)
+  buyInternal(bob, harbor, 400n * USDC, NOW - 11_996)
+  buyInternal(alice, harbor, 250n * USDC, NOW - 11_990)
+  sellInternal(WHALE, harbor, fixtureBalance(WHALE, harbor) / 20n, NOW - 6_000)
+  buyInternal(bob, harbor, 2_000n * USDC, NOW - 1_200)
+  store.seeded.set(harbor.toLowerCase(), 1_500_000n * E18)
+  const harborHolders = store.holders.get(harbor.toLowerCase())
+  if (harborHolders) harborHolders.others = 500_000_000n * E18
+  collect(harbor)
+
+  // Graduated into an open pool on the other side of USDC (its currency1); one buy in its window placed a bid.
+  const lowTide = launchWithV14('split', { name: 'Low Tide', symbol: 'LOWT', metadataURI: '', creatorFeeBps: 50, openPool: true }, NOW - 40_000, false, splitV14)
+  buyInternal(WHALE, lowTide, 1_000_000n * USDC, NOW - 30_000)
+  buyInternal(alice, lowTide, 700n * USDC, NOW - 29_994)
+  sellInternal(alice, lowTide, fixtureBalance(alice, lowTide) / 2n, NOW - 3_000)
+  collect(lowTide)
+
+  // On the curve, open pool when it graduates: its first buys paid the curve's snipe fee, held for the pool.
+  const tide = launchWithV14('split', { name: 'Tidewater', symbol: 'TIDE', metadataURI: '', creatorFeeBps: 200, openPool: true }, NOW - 7_000, false, splitV14)
+  buyInternal(alice, tide, 150n * USDC, NOW - 6_998)
+  buyInternal(bob, tide, 90n * USDC, NOW - 6_990)
+  buyInternal(alice, tide, 3_000n * USDC, NOW - 5_000)
+  sellInternal(bob, tide, fixtureBalance(bob, tide) / 2n, NOW - 2_000)
+
+  // Launched just now with the creator's own first buy (no snipe fee on that one): still in its window.
+  launchWithV14('combo', { name: 'Fresh Catch', symbol: 'CTCH', metadataURI: '', creatorFeeBps: 300, openPool: false, initialBuyUsdc: 25n * USDC }, NOW - 6, true, encodeCombo(
+    [CREATOR, pluginAddress(listedPlugin('holders'), suiteFor('v14'))],
+    [5_000, 5_000],
+    ['0x', '0x'],
+  ))
 }
 
 // ─── The API the hooks call ──────────────────────────────────────────────────
@@ -723,9 +939,29 @@ function collect(token: Address): Hash {
   return nextHash('collect')
 }
 
+/**
+ * The pool as the hook and StateView report it: √(currency1/currency0) in Q64.96 and its tick, the liquidity in range,
+ * and launchOf's graduation tick and bid reference.
+ */
+function poolState(book: PoolBook): NonNullable<LaunchRecord['v4']> {
+  const sqrtPriceX96 = bookSqrtPrice(book)
+  return {
+    poolId: book.poolId,
+    sqrtPriceX96,
+    usdcIs0: book.usdcIs0,
+    openBlock: BigInt(book.openBlock),
+    liquidity: sqrt(book.usdc * book.tokens),
+    bidCount: BigInt(book.bids),
+    tick: tickAtSqrtPrice(sqrtPriceX96),
+    graduationTick: book.graduationTick,
+    bidRefTick: book.bidRefTick,
+  }
+}
+
 function syncRecord(launch: FixtureLaunch): LaunchRecord {
   const { state, ...record } = launch
-  return { ...record, virtualUsdc: state.virtualUsdc, virtualTokens: state.virtualTokens, tokensSold: state.tokensSold }
+  const book = store.pools.get(launch.token.toLowerCase())
+  return { ...record, virtualUsdc: state.virtualUsdc, virtualTokens: state.virtualTokens, tokensSold: state.tokensSold, ...(book ? { v4: poolState(book) } : {}) }
 }
 
 function creatorFees(token: Address, owner: Address | undefined): CreatorFeeState | undefined {
@@ -814,7 +1050,8 @@ function install(): void {
     },
     buy: (owner, token, usdcIn) => {
       const launch = find(token)
-      buyInternal(owner, token, usdcIn, nowSeconds(), launch.graduated ? FIXTURE_SUITE.launchRouter : FIXTURE_SUITE.launchpad)
+      const suite = launch.version === 'v14' ? { launchpad: FIXTURE_SUITE_V14.launchpad, router: FIXTURE_SUITE_V14.router } : { launchpad: FIXTURE_SUITE.launchpad, router: FIXTURE_SUITE.launchRouter }
+      buyInternal(owner, token, usdcIn, nowSeconds(), launch.graduated ? suite.router : suite.launchpad)
       emit()
       return { hash: nextHash('buy') }
     },
@@ -824,7 +1061,7 @@ function install(): void {
       return { hash: nextHash('sell') }
     },
     create: (owner, args) => {
-      const token = createInternal(owner, args, nowSeconds(), FIXTURE_SUITE.launchpad)
+      const token = createInternal(owner, args, nowSeconds(), args.version === 'v14' ? FIXTURE_SUITE_V14.launchpad : FIXTURE_SUITE.launchpad)
       emit()
       return { hash: nextHash('create'), token }
     },
@@ -852,6 +1089,16 @@ function install(): void {
       const hash = runDeepenInternal(token, nowSeconds())
       emit()
       return hash
+    },
+    blockNumber: () => BigInt(blockNumber()),
+    quoteV4: (token, side, amountIn) => {
+      const launch = find(token)
+      return poolTrade(poolOf(token), side, amountIn, launch.creatorFeeBps, side === 'buy' ? snipeAt(launch, nowSeconds()) : 0).out
+    },
+    snipeHeld: (token) => {
+      const launch = store.launches.find((item) => item.token.toLowerCase() === token.toLowerCase())
+      if (launch?.version !== 'v14' || launch.graduated) return undefined
+      return store.snipe.get(token.toLowerCase()) ?? 0n
     },
     claim: (token, owner) => {
       // The token's claim: accrue, then pay the owner everything it has earned so far.

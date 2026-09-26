@@ -2,10 +2,10 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { parseEventLogs, type Address, type Hex } from 'viem'
 import { useAccount, usePublicClient, useReadContract, useWriteContract } from 'wagmi'
 import { activeChain } from '../chain'
-import { erc20Abi, launchpadAbi, launchpadWithPluginErrorsAbi } from '../lib/abi'
+import { erc20Abi, launchpadAbi, launchpadV14Abi, launchpadV14WithPluginErrorsAbi, launchpadWithPluginErrorsAbi } from '../lib/abi'
 import { allowanceLagging, createButtonState, type CreateButtonState } from '../lib/createButton'
 import { INITIAL_CURVE, quoteBuy } from '../lib/curve'
-import { deployment, isLaunchpadDeployed, launchSuite } from '../lib/deployment'
+import { builderVersion, isLaunchpadDeployed, isLaunchpadV14Deployed, launchSuite, launchSuiteV14 } from '../lib/deployment'
 import { isUserRejection, revertReason } from '../lib/errors'
 import { formatAmount } from '../lib/format'
 import { minReceived } from '../lib/amm'
@@ -27,6 +27,8 @@ interface UseCreateTokenArgs {
   creatorFeeBps: number
   /** Where the fees go and the plugin's onLaunch data (lib/plugins/plan.ts), or undefined while the choice has problems. */
   pluginPlan: PluginPlan | undefined
+  /** v1.4: whether anyone may add liquidity to the token's Uniswap pool once it graduates (fixed at launch). */
+  openPool: boolean
   valid: boolean
   initialBuyUsdc: bigint
   slippageBps: number
@@ -43,6 +45,7 @@ export function useCreateToken({
   metadataURI,
   creatorFeeBps,
   pluginPlan,
+  openPool,
   valid,
   initialBuyUsdc,
   slippageBps,
@@ -60,13 +63,16 @@ export function useCreateToken({
   const [approvedThisSession, setApprovedThisSession] = useState(false)
   const [approval, setApproval] = useState<{ owner: Address; amount: bigint }>()
   const approvedAmount = approval?.owner === account ? approval?.amount : undefined
+  // New launches go to v1.4 once it is deployed here, and to v1.3 until then.
+  const v14 = builderVersion === 'v14'
+  const launchpad = v14 ? launchSuiteV14.launchpad : launchSuite.launchpad
 
   const feeQuery = useReadContract({
-    address: deployment.launchpad,
-    abi: launchpadAbi,
+    address: launchpad,
+    abi: v14 ? launchpadV14Abi : launchpadAbi,
     functionName: 'launchFee',
     query: {
-      enabled: !fixtureOn && isLaunchpadDeployed,
+      enabled: !fixtureOn && (v14 ? isLaunchpadV14Deployed : isLaunchpadDeployed),
       staleTime: 30_000,
       refetchInterval: (query) => (query.state.data === undefined ? 4_000 : 30_000),
     },
@@ -77,7 +83,8 @@ export function useCreateToken({
   const firstBuy = useMemo(() => {
     if (initialBuyUsdc <= 0n) return undefined
     try {
-      return quoteBuy(INITIAL_CURVE, initialBuyUsdc, creatorFeeBps)
+      // The first buy runs in the launch transaction itself, so on v1.4 too it pays no anti-sniping fee.
+    return quoteBuy(INITIAL_CURVE, initialBuyUsdc, creatorFeeBps)
     } catch {
       return undefined
     }
@@ -144,7 +151,7 @@ export function useCreateToken({
       if (buttonState === 'needsApproval') {
         setPhase('approving')
         if (fixtureOn) {
-          launchFixtureApi()?.approve(account, activeChain.usdc, launchSuite.launchpad, totalUsdc)
+          launchFixtureApi()?.approve(account, activeChain.usdc, launchpad, totalUsdc)
         } else {
           if (!publicClient) return
           const hash = await writeContractAsync({
@@ -152,7 +159,7 @@ export function useCreateToken({
             address: activeChain.usdc,
             abi: erc20Abi,
             functionName: 'approve',
-            args: [deployment.launchpad, totalUsdc],
+            args: [launchpad, totalUsdc],
           })
           const receipt = await publicClient.waitForTransactionReceipt({ hash })
           if (receipt.status !== 'success') throw new Error('Transaction reverted')
@@ -181,25 +188,37 @@ export function useCreateToken({
           pluginData: pluginPlan.pluginData,
           initialBuyUsdc,
           maxLaunchFee: launchFee,
+          version: builderVersion,
+          openPool: v14 && openPool,
         })
         token = result.token
         hash = result.hash
       } else {
         if (!publicClient) return
-        hash = await writeContractAsync({
-          chainId: activeChain.id,
-          address: deployment.launchpad,
-          // The plugin's onLaunch runs inside createToken: its errors are in this ABI so a refusal decodes.
-          abi: launchpadWithPluginErrorsAbi,
-          functionName: 'createToken',
-          // maxLaunchFee is the fee this form showed [D22]: if it was raised since, the launch reverts, never overpays.
-          args: [name, symbol, uri, creatorFeeBps, pluginPlan.plugin, pluginPlan.pluginData, initialBuyUsdc, minTokensOut, launchFee],
-        })
+        // The plugin's onLaunch runs inside createToken: its errors are in these ABIs so a refusal decodes.
+        // maxLaunchFee is the fee this form showed [D22]: if it was raised since, the launch reverts, never overpays.
+        hash = v14
+          ? await writeContractAsync({
+              chainId: activeChain.id,
+              address: launchpad,
+              abi: launchpadV14WithPluginErrorsAbi,
+              functionName: 'createToken',
+              args: [name, symbol, uri, creatorFeeBps, pluginPlan.plugin, pluginPlan.pluginData, openPool, initialBuyUsdc, minTokensOut, launchFee],
+            })
+          : await writeContractAsync({
+              chainId: activeChain.id,
+              address: launchpad,
+              abi: launchpadWithPluginErrorsAbi,
+              functionName: 'createToken',
+              args: [name, symbol, uri, creatorFeeBps, pluginPlan.plugin, pluginPlan.pluginData, initialBuyUsdc, minTokensOut, launchFee],
+            })
         setTxStatus({ kind: 'pending', hash })
         const receipt = await publicClient.waitForTransactionReceipt({ hash })
         if (receipt.status !== 'success') throw new Error('Transaction reverted')
-        const created = parseEventLogs({ abi: launchpadAbi, logs: receipt.logs, eventName: 'TokenCreated' })
-        const found = created.find((log) => log.address.toLowerCase() === deployment.launchpad.toLowerCase())?.args.token
+        const created = v14
+          ? parseEventLogs({ abi: launchpadV14Abi, logs: receipt.logs, eventName: 'TokenCreated' })
+          : parseEventLogs({ abi: launchpadAbi, logs: receipt.logs, eventName: 'TokenCreated' })
+        const found = created.find((log) => log.address.toLowerCase() === launchpad.toLowerCase())?.args.token
         if (!found) throw new Error('TokenCreated event missing')
         token = found
       }
@@ -224,13 +243,16 @@ export function useCreateToken({
     launchFee,
     metadataURI,
     minTokensOut,
+    launchpad,
     name,
     onApproved,
     onCreated,
+    openPool,
     pluginPlan,
     publicClient,
     symbol,
     totalUsdc,
+    v14,
     writeContractAsync,
   ])
 
@@ -242,6 +264,8 @@ export function useCreateToken({
   }, [approvedThisSession, buttonState])
 
   return {
+    /** The launchpad this launch goes to. */
+    version: builderVersion,
     launchFee,
     feeKnown,
     firstBuy,

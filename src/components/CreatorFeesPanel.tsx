@@ -3,11 +3,12 @@ import type { Address } from 'viem'
 import { useAccount } from 'wagmi'
 import { activeChain, addressExplorerUrl } from '../chain'
 import { listedPlugin, listedPluginAt } from '../content/plugins/registry'
+import { suiteFor, type LaunchSuite } from '../lib/deployment'
 import { useConnectSheet } from '../hooks/useConnectSheet'
 import { useCreatorFees, type CreatorFeeAction } from '../hooks/useCreatorFees'
 import { useSwitchToArc } from '../hooks/useSwitchToArc'
 import { GHOST, formatAmount, formatLp, formatPct, shortAddress } from '../lib/format'
-import type { LaunchRecord } from '../lib/launch'
+import { launchVersion, type LaunchRecord } from '../lib/launch'
 import { destinationLabel, destinationName, feeDestination } from '../lib/plugins/destination'
 import { dividendStatus, roughly } from '../lib/plugins/holders'
 import {
@@ -258,9 +259,11 @@ function perHourText(perHour: bigint): string {
   return perHour === 0n ? 'Under 0.000001 USDC/hour to all holders' : `≈ ${usdc(roughly(perHour))}/hour to all holders`
 }
 
-function HoldersPanel({ holders, symbol, busy, status, run, claim, connected }: {
+function HoldersPanel({ holders, symbol, inUniswap, busy, status, run, claim, connected }: {
   holders: HolderState
   symbol: string
+  /** A v1.4 token: its pool is a Uniswap pool, not a launch pool. */
+  inUniswap: boolean
   busy: CreatorFeeAction | undefined
   status: ActionProps['status']
   run: Run
@@ -307,13 +310,13 @@ function HoldersPanel({ holders, symbol, busy, status, run, claim, connected }: 
       </div>
       <ActionStatus action="claim" status={status} />
       <p className="fee-plugin-note">
-        You earn for every second you hold, in proportion to what you hold, so buying just before a payout earns nothing extra. Each payment to holders streams out over about a day{holders.fromFees ? '; collecting creator fees adds to the stream' : ''}. Tokens on the curve, in the launch pool or burned earn nothing.
+        You earn for every second you hold, in proportion to what you hold, so buying just before a payout earns nothing extra. Each payment to holders streams out over about a day{holders.fromFees ? '; collecting creator fees adds to the stream' : ''}. Tokens on the curve, in {inUniswap ? 'its Uniswap pool' : 'the launch pool'} or burned earn nothing.
       </p>
     </section>
   )
 }
 
-function ComboAllocation({ entries }: { entries: ComboEntryState[] }) {
+function ComboAllocation({ entries, suite }: { entries: ComboEntryState[]; suite: LaunchSuite }) {
   return (
     <section className="fee-plugin" aria-label="Combo allocation">
       <div className="fee-plugin-head">
@@ -323,7 +326,7 @@ function ComboAllocation({ entries }: { entries: ComboEntryState[] }) {
       <dl className="receipt-lines">
         {entries.map((entry) => {
           // From allocationOf alone: its isPlugin flag is the Combo's stored decision to pay through hooks.
-          const listed = entry.isPlugin ? listedPluginAt(entry.target) : undefined
+          const listed = entry.isPlugin ? listedPluginAt(entry.target, suite) : undefined
           return (
             <div key={entry.target}>
               <dt>
@@ -417,7 +420,7 @@ export function CreatorFeesPanel({ launch, onChanged }: CreatorFeesPanelProps) {
         </div>
       </div>
 
-      {state?.combo && <ComboAllocation entries={state.combo} />}
+      {state?.combo && <ComboAllocation entries={state.combo} suite={suiteFor(launchVersion(launch))} />}
       {state?.split && (
         <SplitPanel split={state.split} symbol={launch.symbol} busy={fees.busy} status={fees.status} run={run} release={fees.release} you={address} />
       )}
@@ -449,6 +452,7 @@ export function CreatorFeesPanel({ launch, onChanged }: CreatorFeesPanelProps) {
         <HoldersPanel
           holders={state.holders}
           symbol={launch.symbol}
+          inUniswap={launchVersion(launch) === 'v14'}
           busy={fees.busy}
           status={fees.status}
           run={run}

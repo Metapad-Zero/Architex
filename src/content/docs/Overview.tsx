@@ -16,8 +16,9 @@ export function DocsOverview() {
       <p>
         That's the whole idea. Everything past this page is detail: how the price actually
         moves, what a creator commits to permanently, what changes the moment a token graduates
-        into its own launch pool, and what you're accepting by putting real USDC into
-        something that started an hour ago with no track record.
+        into its own pool (a launch pool on v1.3, a Uniswap v4 pool on v1.4), and what you're
+        accepting by putting real USDC into something that started an hour ago with no track
+        record.
       </p>
       <p>
         Two things worth knowing before any of that: Architex's contracts have not been
