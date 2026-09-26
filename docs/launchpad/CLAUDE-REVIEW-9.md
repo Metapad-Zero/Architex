@@ -6,13 +6,18 @@ each window buy's snipe fee placed as a bid inside that buy. Verdict: no High, n
 a window buy gets part of his surcharge back), three informational notes, eight spec and NatSpec errors.
 
 **What was done about it:**
-- **L1 (chunked refund): fixed** with the reviewer's own change: a window buy's bid starts from the cheaper of the
-  price just before the buy and the graduation price (`_cheaperOf` in `_afterSwap`), so no bid starts above half the
-  graduation price and a buyer lifting the price in steps cannot stack bids above his dump; bids still follow a crash
-  down, and nothing waits. The trade-off: above graduation, window bids stay at half the graduation price instead of
-  following the price up. The invariant run now also checks that no bid starts above half the graduation price.
-- **I1 (sandwiching the buy that places a bid): closed by the same cap** (a front-run cannot lift the bid, so the
-  back-run takes nothing from it); the site never sends a buy without a minimum out.
+- **L1 (chunked refund): fixed in two steps.** First (`82d410d`) with the reviewer's own change: a window buy's bid
+  started from the cheaper of the price just before the buy and the graduation price. Porting the PoCs, the reviewer
+  found that cap partial: after a dump under half the graduation price inside the window, chunks lifting the price
+  back placed bids at up to half the graduation price, above the crashed market (22% to 34% of the surcharge back
+  after a dump to about 6% of graduation; a front-run then took up to 2,669 of a 4,500 USDC bid). Now every window bid
+  starts from the lowest price any window buy has started from (the pool's `bidRefTick`, the graduation price to begin
+  with), which only ever moves down: a chunked sniper gets back no more than one buy does, at graduation and after any
+  crash, and bids still follow a crash down. The trade-off: a hard dump inside the window with a buy after it lowers
+  every later window bid (deeper under the market, never above it). The invariant run checks that every bid starts
+  from the reference, that the reference never rises, and that no bid starts above half the graduation price.
+- **I1 (sandwiching the buy that places a bid): closed by the same rule** (a front-run cannot lift the reference, so
+  the back-run takes nothing from the bid, before or after a crash); the site never sends a buy without a minimum out.
 - **I2 (griefing is cheap late in the window) and I3 (gas, bid ticks): accepted**, written into V14-SPEC §5 and §10
   with the measured numbers; Deepen pool v1.4's cap must be a running total, never a loop over bids.
 - **Spec and NatSpec errors: all corrected** (§5's sandwich, griefing, pump and gas claims, F-1, the status line, §11,

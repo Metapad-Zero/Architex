@@ -35,6 +35,12 @@ contract V14Handler is Test {
     uint256 public bidsAboveMarket;
     /// @dev Bids whose top is above half the graduation price.
     uint256 public bidsAboveHalfGraduation;
+    /// @dev Bids not placed from the pool's reference (bidRefTick) as it stands after the call.
+    uint256 public bidsOffReference;
+    /// @dev Times a pool's reference moved to a pricier tick.
+    uint256 public referenceRose;
+    mapping(address => int24) internal _lastRef;
+    mapping(address => bool) internal _refSeen;
     uint256 public bidsPlaced;
 
     constructor(
@@ -159,6 +165,32 @@ contract V14Handler is Test {
             if (u0 ? tick >= lower : tick < upper) ++bidsAboveMarket;
             (, IArchitexLaunchHook.Launch memory l) = hook.launchOf(t);
             if (u0 ? lower < l.graduationTick + 6932 : upper > l.graduationTick - 6932) ++bidsAboveHalfGraduation;
+            (int24 lo, int24 hi) = _rangeFrom(u0, l.bidRefTick);
+            if (lo != lower || hi != upper) ++bidsOffReference;
+        }
+        if (pad.isGraduated(t)) {
+            (, IArchitexLaunchHook.Launch memory l) = hook.launchOf(t);
+            if (_refSeen[t] && (address(usdc) < t ? l.bidRefTick < _lastRef[t] : l.bidRefTick > _lastRef[t])) {
+                ++referenceRose;
+            }
+            (_lastRef[t], _refSeen[t]) = (l.bidRefTick, true);
+        }
+    }
+
+    /// @dev The hook's bid range from `ref`, recomputed (V14-SPEC §5; no clamping at the prices these runs reach).
+    function _rangeFrom(bool u0, int24 ref) internal pure returns (int24 lower, int24 upper) {
+        if (u0) {
+            int256 t = int256(ref) + 6932 + 1;
+            int256 c = t / 200;
+            if (t > 0 && t % 200 != 0) c++;
+            lower = int24(c * 200);
+            upper = lower + 92_200;
+        } else {
+            int256 t = int256(ref) - 6932;
+            int256 c = t / 200;
+            if (t < 0 && t % 200 != 0) c--;
+            upper = int24(c * 200);
+            lower = upper - 92_200;
         }
     }
 
@@ -242,6 +274,8 @@ contract LaunchpadV14InvariantTest is V14Base {
         }
         assertEq(handler.bidsAboveMarket(), 0, "a bid placed above the market");
         assertEq(handler.bidsAboveHalfGraduation(), 0, "a bid starting above half the graduation price");
+        assertEq(handler.bidsOffReference(), 0, "a bid not placed from the pool's reference");
+        assertEq(handler.referenceRose(), 0, "the reference moved back up");
         assertEq(handler.donations(), 0, "a donation landed");
     }
 

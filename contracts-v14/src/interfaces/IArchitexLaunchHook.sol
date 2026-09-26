@@ -13,8 +13,8 @@ import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 ///         the hook's ERC-6909 claims until the launchpad releases them (`release`, from its `syncPoolFees` or a
 ///         collection). For SNIPE_BLOCKS blocks after a pool opens, buys also pay a surcharge that starts at
 ///         SNIPE_START_BPS and falls to 0 block by block. Inside the same buy it becomes USDC-only liquidity from half the
-///         cheaper of the price before that buy and the graduation price, down (V14-SPEC §5), a bid nobody can ever
-///         withdraw; the curve's snipe fees become one at graduation, from half the graduation price down.
+///         lowest price any window buy has started from (the graduation price to begin with), down (V14-SPEC §5), a bid
+///         nobody can ever withdraw; the curve's snipe fees become one at graduation, from half the graduation price.
 ///
 ///         Only the launchpad opens pools with this hook (at graduation), and only the hook itself adds liquidity to a
 ///         closed pool; an open pool (the creator's choice at launch) takes anyone's liquidity. Nobody may donate to a
@@ -28,8 +28,10 @@ interface IArchitexLaunchHook {
         bool open; // anyone may add liquidity
         uint16 creatorFeeBps;
         uint64 openBlock; // the graduation block; the snipe window counts from here
-        int24 graduationTick; // the pool's tick at graduation: the graduation bid's reference, and the most expensive
-        // price any window buy's bid is placed from
+        int24 graduationTick; // the pool's tick at graduation: the graduation bid's reference
+        // Every window bid starts from half this price: the lowest any window buy has started from, graduation's to begin
+        // with. It only ever moves down.
+        int24 bidRefTick;
     }
 
     /// @notice The pool opened at graduation, with the locked full-range position.
@@ -82,7 +84,7 @@ interface IArchitexLaunchHook {
     /// @notice 9,900: platform, creator and snipe fees together take at most 99% of a trade.
     function MAX_TOTAL_FEE_BPS() external view returns (uint256);
     /// @notice 6,932 ticks, about half the price: a bid's top sits this far below the price it is placed from (the
-    ///         cheaper of the price just before the buy that paid it and the graduation price).
+    ///         graduation price, or for a window buy the lowest price any window buy has started from, `bidRefTick`).
     function BID_DISCOUNT_TICKS() external view returns (int24);
     /// @notice 92,200 ticks, about 10,000 times: how far down a bid runs from its top.
     function BID_SPAN_TICKS() external view returns (int24);
