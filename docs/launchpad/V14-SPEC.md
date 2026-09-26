@@ -122,7 +122,8 @@ the BUSL `Position.sol`, so the hook reads the pool's price with its own copy of
 - **Where it goes [decided]: locked into the pool, the moment it is paid [owner's choice, 2026-09-25].**
   - In the pool: the buy that pays the surcharge also places it, inside the same swap (`afterSwap`), as locked
     liquidity: a USDC-only position of its own (a fresh salt for every bid, never re-added to) whose top is **half the
-    lowest price any window buy has started from** (this one included, the graduation price to begin with: the
+    lowest price any window buy that paid a snipe fee has started from** (this one included, the graduation price to
+    begin with; a dust buy whose snipe fee rounds to 0 neither places a bid nor moves it: the
     pool's `bidRefTick`, which only ever moves down) and which runs about 10,000 times lower (`BID_SPAN_TICKS`, 92,200
     ticks), a bid nobody can ever withdraw. Nothing waits and there is no separate lock step. A buy only moves the
     price up, so the bid is always wholly under the market when it is placed; after a crash inside the window the
@@ -130,7 +131,7 @@ the BUSL `Position.sol`, so the hook reads the pool's price with its own copy of
     it (which would now block the buy itself).
   - Nobody can plant a bid above the market, or profit from moving one (Claude review #9, all measured in tests):
     - a pump-and-dump with the attacker's own window buys always loses: 50,000 USDC put in comes back as 4,726 in
-      the opening block, 27,358 at block 10 and 47,347 at block 19;
+      the opening block, 27,113 at block 10 and 47,262 at block 19;
     - the buy that places a bid can be sandwiched like any buy, but a front-run cannot lift the reference its bid is
       placed from, so the back-run takes nothing from the bid, before or after a crash (the site never sends a buy
       without a minimum out);
@@ -143,9 +144,11 @@ the BUSL `Position.sol`, so the hook reads the pool's price with its own copy of
     cheaper buy. Undoing the push inside the window costs the surcharge, which deters it early in the window only:
     undoing a 100M-token push around a 5,000 USDC buy cost 85,840 USDC in the opening block, about 8,600 at block 19,
     and 7,835 if the griefer waits one block past the window, against 8,307 with no window at all (review #9's I2).
-    It never pays, but since the reference only moves down, a hard dump inside the window with one buy after it
-    lowers every later window bid too: they end deeper under the market, never above it. After the window no bid can
-    be added or moved at all.
+    It never pays. After the window no bid can be added or moved at all.
+  - Since the reference only moves down, one low inside the window sets the level for the rest of it (Claude review
+    #9's follow-up, I2): after a 300M-token dump at block 1, a 3,000 USDC buy at block 2 and a 60,000 USDC recovery, a
+    block-10 sniper's bid started at 5.6% of the market he bought at (graduation was 70.6% of it). That is the price
+    of never letting a bid climb back; see §10 for doing it on purpose.
   - Why not a separate `lock`: v1.4 first had one, anchored to the graduation price so a push could not move the bid
     (Claude review #7, L2). After a crash the claims then waited, and anyone could push the price over the bid's top,
     lock, and sell into a bid above the market: up to 30% of the waiting fees in one transaction (Claude review #8).
@@ -218,7 +221,8 @@ the BUSL `Position.sol`, so the hook reads the pool's price with its own copy of
     indexers see these pools as 0% fee and undercount buy volume;
   - a buy's trader paid `PoolTrade.usdcAmount`; a sell's received `usdcAmount - platformFee - creatorFee`;
   - each `Swap` is followed by its own `PoolTrade` before the next `Swap` in that pool, in multi-swap transactions
-    too; a window buy emits `ModifyLiquidity` (sender the hook) and `BidLocked` between the two, and `BidLocked`'s USDC
+    too; a window buy whose snipe fee is not 0 emits `ModifyLiquidity` (sender the hook) and `BidLocked` between the
+    two, and `BidLocked`'s USDC
     is the snipe fee to within 2 units of rounding;
   - the hook's claims moving are the PoolManager's ERC-6909 `Transfer` events, not USDC transfers.
 - The lister feeds (CoinGecko standard) list v1.4 pools by pool id; the token list and docs add the hook, the
@@ -236,7 +240,26 @@ the BUSL `Position.sol`, so the hook reads the pool's price with its own copy of
 - **Bid ticks cost later swaps gas.** Window buys at many different prices open many bid ticks, and a later swap that
   crosses them pays about 10,600 gas per tick: after 40 dust bids at distinct prices, a 300M-token dump cost 578,627
   gas instead of 155,573 (Claude review #9, I3). Whoever does it pays the surcharge and about 108,000 gas per bid;
-  bids from buys above graduation all share the graduation bid's ticks.
+  bids from buys above the pool's reference share the reference's ticks, and only a new low opens new ones.
+- **Anyone can push the bid reference down on purpose** (Claude review #9's follow-up, I1). A sell, a dust-sized
+  window buy (about 0.001 USDC) and a buy-back, in one transaction, restore the price but leave the reference at the
+  low for the rest of the window, so every later window bid starts from half of it. What it cost in the tests (sell,
+  buy and buy-back; the buy-back pays the surcharge):
+
+  | Block | 82M-token push (reference to 50% of graduation) | 300M-token push (reference to 16%) |
+  | --- | --- | --- |
+  | 0 | 69,287 USDC | 142,969 USDC |
+  | 5 | 15,484 | 31,950 |
+  | 10 | 6,105 | 12,597 |
+  | 15 | 2,207 | 4,555 |
+  | 19 | 418 | 864 |
+
+  What it does: a 300M push at block 9 (15,075 USDC) left later snipers' bids at 7.9% of the market they bought at
+  instead of 50%, so a 450M-token dump after the window got 41,956 USDC instead of 44,202, and someone buying 100M
+  tokens right after that dump saved 1,038. Nobody was found to profit: the saving is far below the cost, dumpers and
+  a rugging creator want bids high, not low, and a creator poisoning his own launch loses more on his dump than he
+  saves buying back. It cannot be closed without reopening the split-buy refund (the reference has to follow a crash
+  inside one transaction, and this is a crash undone afterwards).
 - **Nothing that unlocks runs inside someone else's unlock.** A graduating buy (a `createToken` whose first buy
   graduates included), `syncPoolFees` and `syncPoolFeesBatch` revert `AlreadyUnlocked` when called from inside a v4
   unlock; `collectCreatorFees` then skips the sync and pays what the launchpad already holds.
@@ -288,7 +311,9 @@ regression tests in `contracts-v14/test/review7`, `review8` and `review9`. The A
    change that swap's output, and reproduced exactly by the V4Quoter); the surcharge (up to 90%, the total capped at
    99%, time-bounded, readable through `snipeBpsOf`); `PartialFill` (exact-in buys and exact-out sells revert when a
    price limit stops them; the Universal Router, V4Router and V4Quoter use extreme limits and never hit it); dust
-   minimums (`FeesExceedAmount` under about 30 raw USDC units in the opening block, 3 after the window); closed pools
+   minimums (`FeesExceedAmount`: the largest exact-in buy refused in the opening block is 19 raw USDC units with no
+   creator fee, 29, 39 and 49 at 1%, 3% and 5%, and 252 at 10%; after the window 1, or 2 with any creator fee); closed
+   pools
    refusing outside liquidity (PositionManager mints revert `WrappedError(ClosedPool)`, which affects LP screens, not
    routing); donations refused, initialize restricted, no admin or upgrade path, fees fixed. Aggregators that simulate
    off-chain (KyberSwap, 0x) must model the per-token creator fee (`launchOf`), the 50 bps platform fee, the window's
