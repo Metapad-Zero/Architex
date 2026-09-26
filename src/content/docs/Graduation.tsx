@@ -92,10 +92,10 @@ export function DocsGraduation() {
         that holds only USDC, in a position of its own, from about half the price down to about a
         ten-thousandth of it. It's a standing offer to buy the token, below the market, that nobody
         can ever withdraw. Nobody has to press anything for it. In the pool, the buy that pays the
-        fee places it in the same transaction, from half the lower of two prices: the price just
-        before that buy, and the price the pool opened at. A buy only moves the price up, so
-        every bid starts below the market. No bid ever starts above half the opening price, and
-        after a crash the next bid follows the price down. What the curve's first blocks
+        fee places it in the same transaction, from half the lowest price any buy in the window
+        has started from, beginning with the price the pool opened at. So bids follow a crash
+        down and never move back up, and none starts above half the opening price. A buy only
+        moves the price up, so every bid starts below the market. What the curve's first blocks
         collect waits in the launchpad until graduation, which places it as the pool's first
         bid, from half the price the pool opens at. If a curve never sells out, what it
         collected stays in the launchpad.

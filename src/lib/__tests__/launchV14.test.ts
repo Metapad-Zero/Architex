@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { decodeErrorResult, decodeEventLog, encodeErrorResult, getAbiItem, getAddress, toEventSelector, zeroAddress, type Address, type Hex } from 'viem'
+import { decodeErrorResult, decodeEventLog, decodeFunctionResult, encodeErrorResult, getAbiItem, getAddress, toEventSelector, zeroAddress, type Address, type Hex } from 'viem'
 import mainnet from '../../deployments/arc-mainnet.json'
 import testnet from '../../deployments/arc-testnet.json'
 import { launchHookAbi, launchpadV14Abi } from '../abi'
@@ -17,12 +17,15 @@ import {
   grossOfSell,
   launchPoolKey,
   maxV4Trade,
+  nextBidSpotPrice,
   poolFeesOnGross,
   poolIdOf,
   poolTradeMarketCap,
   secondsUntil,
   snipeBps,
   snipeWindowEnd,
+  sqrtPriceAtTick,
+  tickAtSqrtPrice,
   usdcIsCurrency0,
   v4MarketCap,
   v4SpotPrice,
@@ -284,8 +287,8 @@ describe('pool trades through the router match the hook’s fees', () => {
         .filter((row) => row.k === 'log' && row.emitter === 'hook' && String(row.step).startsWith('pool ') && String(row.step).includes(` ${s}-`))
         .filter((row) => (row.topics as Hex[])[0] === poolTradeTopic)
         .map((row) => decodeTradeLog('poolV14', row.data as Hex, row.topics as Hex[]))
-      // 14 router trades, then the crash inside the window: a dump and a buy.
-      expect(trades.length).toBe(16)
+      // 14 router trades, then the crash inside the window: a dump, a buy, a lift and a buy.
+      expect(trades.length).toBe(18)
       const platform = trades.reduce((sum, trade) => sum + trade.platformFee, 0n)
       const creator = trades.reduce((sum, trade) => sum + trade.creatorFee, 0n)
       expect([big(v.hookPlatform), big(v.hookCreator)]).toEqual([platform, creator])
@@ -310,7 +313,7 @@ describe('pool trades through the router match the hook’s fees', () => {
     return event.args
   }
 
-  test('each buy in a pool’s snipe window places its fee as a bid in the same swap, never above half the graduation price', () => {
+  test('each buy in a pool’s snipe window places its fee as a bid in the same swap, from the cheaper of its price and the pool’s reference', () => {
     const graduationOf = new Map(all.filter((v) => v.k === 'grad').map((v) => [(v.token as string).toLowerCase(), v]))
     const steps = [0, 1].flatMap((s) => [0, 1].flatMap((w) => [0, 1, 2, 3].map((b) => `pool buy ${s}-${w}-${b}`)))
     const buys = quotes.filter((v) => v.side === 'buy')
@@ -319,21 +322,26 @@ describe('pool trades through the router match the hook’s fees', () => {
     buys.forEach((v, index) => {
       const step = steps[index]
       const [trade] = hookEvents(step, 'PoolTrade').map(decode)
+      const usdcIs0 = v.usdcIs0 as boolean
+      const pre = v.tickBefore as number
+      const refBefore = v.refBefore as number
       if ((v.s as number) === 0) {
-        // After the window: no fee, no bid.
+        // After the window: no fee, no bid, and the reference stays where it was.
         expect([hookEvents(step, 'BidLocked').length, trade.snipeFee, big(v.bidsAfter) - big(v.bidsBefore)]).toEqual([0, 0n, 0n])
+        expect(v.refAfter).toBe(refBefore)
         return
       }
       const grad = graduationOf.get((v.token as string).toLowerCase())!
-      const usdcIs0 = v.usdcIs0 as boolean
-      const pre = v.tickBefore as number
       const graduationTick = grad.graduationTick as number
       const bid = bidOf(step)
-      const range = windowBidRange(usdcIs0, pre, graduationTick)
+      // From the reference read before the buy, or the price just before it if that is cheaper; that becomes the reference.
+      const range = windowBidRange(usdcIs0, pre, refBefore)
       expect([bid.tickLower, bid.tickUpper]).toEqual([range.lower, range.upper])
       expect(range.upper - range.lower).toBe(V14.BID_SPAN_TICKS)
-      // A buy above the graduation price places its bid exactly where the graduation bid sits.
-      if (cheaperOf(usdcIs0, pre, graduationTick) === graduationTick) {
+      expect(v.refAfter).toBe(cheaperOf(usdcIs0, pre, refBefore))
+      // Before any crash the reference is the graduation tick, so a buy above the graduation price places its bid
+      // exactly where the graduation bid sits.
+      if (refBefore === graduationTick && cheaperOf(usdcIs0, pre, graduationTick) === graduationTick) {
         const graduationBid = bidOf(grad.step as string)
         expect([bid.tickLower, bid.tickUpper]).toEqual([graduationBid.tickLower, graduationBid.tickUpper])
         if (pre !== graduationTick) aboveGraduation += 1
@@ -349,34 +357,133 @@ describe('pool trades through the router match the hook’s fees', () => {
     expect(aboveGraduation).toBeGreaterThan(3)
   })
 
-  test('after a crash inside the window, the next buy’s bid follows the price down', () => {
+  test('the pool’s bid reference starts at the graduation tick and only ever moves to cheaper prices', () => {
+    const grads = all.filter((v) => v.k === 'grad')
+    for (const grad of grads) expect(grad.bidRefTick).toBe(grad.graduationTick)
+    const tokens = [...new Set(all.filter((v) => v.k === 'crash').map((v) => (v.token as string).toLowerCase()))]
+    expect(tokens.length).toBe(2)
+    for (const token of tokens) {
+      const grad = grads.find((v) => (v.token as string).toLowerCase() === token)!
+      // Every buy in the pool in the order it was made, the router's and the crash's, with sells between them.
+      const sequence = all.filter((v) => (v.k === 'crash' || (v.k === 'pq' && v.side === 'buy')) && (v.token as string).toLowerCase() === token)
+      expect(sequence.length).toBe(11)
+      let ref = grad.graduationTick as number
+      for (const v of sequence) {
+        expect(v.refBefore).toBe(ref)
+        const next = v.refAfter as number
+        expect(cheaperOf(v.usdcIs0 as boolean, next, ref)).toBe(next)
+        ref = next
+      }
+      // The crash moved it, and nothing after the crash moved it back.
+      expect(ref).toBe(all.find((v) => v.k === 'crash' && v.phase === 'buy' && (v.token as string).toLowerCase() === token)!.tickBefore as number)
+    }
+  })
+
+  test('after a crash inside the window, bids follow the price down and stay there when a lift takes it back up', () => {
     const crashes = all.filter((v) => v.k === 'crash')
-    expect(crashes.map((v) => v.usdcIs0).sort()).toEqual([false, true])
-    crashes.forEach((v, s) => {
-      const usdcIs0 = v.usdcIs0 as boolean
-      const pre = v.tickBefore as number
-      const graduationTick = v.graduationTick as number
-      // The dump took the price under the graduation price, and paid no snipe fee (sells never do).
-      expect(cheaperOf(usdcIs0, pre, graduationTick)).toBe(pre)
-      expect(pre).not.toBe(graduationTick)
+    expect(crashes.length).toBe(6)
+    for (const s of [0, 1]) {
+      const [buy, lift, after] = ['buy', 'lift', 'after'].map((phase) => crashes.find((v) => v.step === `pool crash-${phase} ${s}-0`)!)
+      const usdcIs0 = buy.usdcIs0 as boolean
+      const graduationTick = buy.graduationTick as number
+      const crashTick = buy.tickBefore as number
+      /** Whether tick `a` prices the token above tick `b`. */
+      const pricier = (a: number, b: number) => a !== b && cheaperOf(usdcIs0, a, b) === b
+      // The dump took the price under the graduation price, and paid no snipe fee and placed no bid (sells never do).
       const [dump] = hookEvents(`pool crash-sell ${s}-0`, 'PoolTrade').map(decode)
       expect([dump.isBuy, dump.snipeFee, hookEvents(`pool crash-sell ${s}-0`, 'BidLocked').length]).toEqual([false, 0n, 0])
-      // The buy after it pays the window's fee, and its bid starts from half the price just before it.
-      const [trade] = hookEvents(`pool crash-buy ${s}-0`, 'PoolTrade').map(decode)
-      expect(trade.snipeFee).toBe(poolFeesOnGross(big(v.in), 250, v.s as number).snipeFee)
-      const bid = bidOf(`pool crash-buy ${s}-0`)
-      expect([bid.tickLower, bid.tickUpper]).toEqual(Object.values(bidRange(usdcIs0, pre)))
-      expect([bid.tickLower, bid.tickUpper]).toEqual(Object.values(windowBidRange(usdcIs0, pre, graduationTick)))
-      // Cheaper than where the graduation bid sits: lower ticks with USDC as currency1, higher with it as currency0.
+      expect(pricier(graduationTick, crashTick)).toBe(true)
+      // The first buy after it starts at the crash: its bid follows the price down, and the reference moves there.
+      expect([buy.refBefore, buy.refAfter]).toEqual([graduationTick, crashTick])
+      const crashBid = bidOf(buy.step as string)
+      expect([crashBid.tickLower, crashBid.tickUpper]).toEqual(Object.values(bidRange(usdcIs0, crashTick)))
       const graduationRange = bidRange(usdcIs0, graduationTick)
-      expect(usdcIs0 ? bid.tickLower > graduationRange.lower : bid.tickUpper < graduationRange.upper).toBe(true)
-      expect(bid.usdc + big(v.heldAfter)).toBe(big(v.heldBefore) + (trade.snipeFee ?? 0n))
-      expect(big(v.bidsAfter)).toBe(big(v.bidsBefore) + 1n)
-    })
+      expect(usdcIs0 ? crashBid.tickLower > graduationRange.lower : crashBid.tickUpper < graduationRange.upper).toBe(true)
+      // The lift starts above the crash and takes the price back above the graduation price. Its bid, and the next
+      // buy's, still start from the crash.
+      expect(pricier(lift.tickBefore as number, crashTick)).toBe(true)
+      expect(pricier(lift.tickAfter as number, graduationTick)).toBe(true)
+      expect(after.tickBefore).toBe(lift.tickAfter)
+      for (const v of [lift, after]) {
+        expect([v.refBefore, v.refAfter]).toEqual([crashTick, crashTick])
+        const bid = bidOf(v.step as string)
+        expect([bid.tickLower, bid.tickUpper]).toEqual([crashBid.tickLower, crashBid.tickUpper])
+        expect(Object.values(windowBidRange(usdcIs0, v.tickBefore as number, v.refBefore as number))).toEqual([bid.tickLower, bid.tickUpper])
+        // Capped by the graduation price alone it would have climbed back: the reference is what holds it down.
+        expect(windowBidRange(usdcIs0, v.tickBefore as number, graduationTick)).not.toEqual(bidRange(usdcIs0, crashTick))
+      }
+      // Each paid the window's fee then, and all of it became its bid.
+      for (const v of [buy, lift, after]) {
+        const [trade] = hookEvents(v.step as string, 'PoolTrade').map(decode)
+        expect(trade.snipeFee).toBe(poolFeesOnGross(big(v.in), 250, v.s as number).snipeFee)
+        expect(bidOf(v.step as string).usdc + big(v.heldAfter)).toBe(big(v.heldBefore) + (trade.snipeFee ?? 0n))
+        expect(big(v.bidsAfter)).toBe(big(v.bidsBefore) + 1n)
+      }
+    }
     // cheaperOf: the higher tick with USDC as currency0, the lower with it as currency1.
     expect([cheaperOf(true, 10, 20), cheaperOf(true, 20, 10), cheaperOf(false, 10, 20), cheaperOf(false, 20, 10)]).toEqual([20, 20, 10, 10])
     expect(windowBidRange(true, 360_000, 366_200)).toEqual(bidRange(true, 366_200))
     expect(windowBidRange(false, -360_000, -366_201)).toEqual(bidRange(false, -366_201))
+    expect(windowBidRange(true, 380_000, 366_200)).toEqual(bidRange(true, 380_000))
+  })
+
+  test('launchOf decodes into the pool id and all seven fields of the hook’s Launch, the bid reference last', () => {
+    const results = all.filter((v) => v.k === 'launchOf')
+    expect(results.map((v) => v.step)).toEqual(['graduate 0', 'crash 0', 'graduate 1', 'crash 1'])
+    for (const v of results) {
+      const token = v.token as Address
+      const [poolId, launch] = decodeFunctionResult({ abi: launchHookAbi, functionName: 'launchOf', data: v.data as Hex })
+      const key = all.find((row) => row.k === 'key' && row.token === token)!
+      const grad = all.find((row) => row.k === 'grad' && row.token === token)!
+      expect(poolId).toBe(key.poolId as Hex)
+      expect(Object.keys(launch)).toEqual(['token', 'usdcIs0', 'open', 'creatorFeeBps', 'openBlock', 'graduationTick', 'bidRefTick'])
+      expect([launch.token, launch.usdcIs0, launch.creatorFeeBps, launch.graduationTick]).toEqual([token, grad.usdcIs0, 250, grad.graduationTick])
+      // Pool 0 was opened open, pool 1 closed (the builder's default).
+      expect(launch.open).toBe(v.step === 'graduate 0' || v.step === 'crash 0')
+      // At graduation the reference is the graduation tick; after the crash, where the first buy after it started.
+      const crash = all.find((row) => row.k === 'crash' && row.phase === 'buy' && row.token === token)!
+      expect(launch.bidRefTick).toBe((String(v.step).startsWith('graduate') ? grad.graduationTick : crash.tickBefore) as number)
+    }
+  })
+
+  test('where the next window bid would start, as a price: half the cheaper of the pool’s price now and its reference', () => {
+    for (const v of all.filter((row) => row.k === 'crash' && row.phase === 'after')) {
+      const usdcIs0 = v.usdcIs0 as boolean
+      // After the lift the price is well above the reference: the next bid starts where the crash bid starts.
+      const pool = { usdcIs0, tick: v.tickAfter as number, bidRefTick: v.refAfter as number }
+      const top = (range: { lower: number; upper: number }) => (usdcIs0 ? range.lower : range.upper)
+      const at = (tick: number) => v4SpotPrice({ usdcIs0, sqrtPriceX96: sqrtPriceAtTick(tick) })
+      expect(nextBidSpotPrice(pool)).toBe(at(top(bidRange(usdcIs0, v.refAfter as number))))
+      // About half the reference price, and under the price now.
+      const half = Number(at(v.refAfter as number)) / 2
+      expect(Math.abs(Number(nextBidSpotPrice(pool)!) / half - 1)).toBeLessThan(0.021)
+      expect(nextBidSpotPrice(pool)! < at(pool.tick)).toBe(true)
+      // A price under the reference (a sell since the last window buy) sets it instead.
+      const below = pool.bidRefTick + (usdcIs0 ? 5_000 : -5_000)
+      expect(nextBidSpotPrice({ ...pool, tick: below })).toBe(at(top(bidRange(usdcIs0, below))))
+    }
+    // Nothing to show until the tick and the reference are read.
+    expect(nextBidSpotPrice({ usdcIs0: true, tick: 1 })).toBe(undefined)
+    expect(nextBidSpotPrice({ usdcIs0: true, bidRefTick: 1 })).toBe(undefined)
+  })
+
+  test('ticks and sqrt prices convert exactly as Uniswap’s TickMath does', () => {
+    expect(sqrtPriceAtTick(0)).toBe(1n << 96n)
+    // TickMath's MIN_SQRT_PRICE and MAX_SQRT_PRICE.
+    expect(sqrtPriceAtTick(-887_272)).toBe(4_295_128_739n)
+    expect(sqrtPriceAtTick(887_272)).toBe(1_461_446_703_485_210_103_287_273_052_203_988_822_378_723_970_342n)
+    expect(outcome(() => sqrtPriceAtTick(887_273))).toBe('InvalidTick')
+    // Every price the contracts reported with its tick: the pools as they opened, and the price before each buy.
+    const pairs = [
+      ...all.filter((v) => v.k === 'grad').map((v) => [big(v.sqrtPriceX96), v.tick as number] as const),
+      ...quotes.filter((v) => v.side === 'buy').map((v) => [big(v.sqrtBefore), v.tickBefore as number] as const),
+    ]
+    expect(pairs.length).toBe(19)
+    for (const [sqrtPriceX96, tick] of pairs) {
+      expect(tickAtSqrtPrice(sqrtPriceX96)).toBe(tick)
+      expect(sqrtPriceAtTick(tick) <= sqrtPriceX96 && sqrtPriceX96 < sqrtPriceAtTick(tick + 1)).toBe(true)
+    }
+    for (const tick of [-887_272, -366_201, -1, 0, 1, 200, 366_200, 887_271]) expect(tickAtSqrtPrice(sqrtPriceAtTick(tick))).toBe(tick)
   })
 
   test('graduation places the curve’s snipe fees as the pool’s first bid, from half the graduation price', () => {

@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { Hex } from 'viem'
 import { useAccount, usePublicClient, useWriteContract } from 'wagmi'
 import { activeChain } from '../chain'
-import { erc20Abi, launchRouterAbi, launchpadAbi, launchpadV14Abi, v4RouterAbi } from '../lib/abi'
+import { erc20Abi, launchHookAbi, launchRouterAbi, launchpadAbi, launchpadV14Abi, v4RouterAbi } from '../lib/abi'
 import { launchSuite, launchSuiteV14 } from '../lib/deployment'
 import { isUserRejection, revertReason } from '../lib/errors'
 import { formatAmount } from '../lib/format'
@@ -22,6 +22,7 @@ import { pushRecent } from '../lib/recent'
 import type { Token } from '../lib/tokens'
 import { launchFixtureApi } from '../lib/launchFixtureApi'
 import { spendableBalance } from '../lib/gasReserve'
+import { launchTradeGas } from '../lib/windowGas'
 import type { LaunchAllowances } from './useLaunch'
 import type { SwapTxStatus } from './useSwap'
 
@@ -321,16 +322,30 @@ export function useLaunchTrade({
         const args = [launch.token, quote.offer, quote.minReceived, account, deadline] as const
         // The offer, not the quoted spend: on the curve's sell-out buy the spend can be one unit below the smallest
         // offer that sells out, so offering only the spend could buy a hair less and not graduate.
-        // Gas is the wallet's estimate at send time. A buy inside a v1.4 pool's snipe window also places its fee as a
-        // bid (about 56,000 to 93,000 more gas on ticks already in use, 117,000 to 176,000 opening new ones): an
-        // estimate made inside the window includes it, and one made after it needs none, since a window only closes.
-        // The 0.1 USDC gas reserve (lib/gasReserve.ts) covers it.
+        // Gas: a v1.4 buy while its window is open on chain (`snipeBpsOf`, asked now) goes out with a limit of its own,
+        // a fresh estimate of this exact call times 1.3 or plus 200,000 (lib/windowGas.ts): in a pool's window the bid
+        // it places costs more when other trades have just moved the price onto new ticks. Everything else keeps the
+        // wallet's own estimate. The 0.1 USDC gas reserve (lib/gasReserve.ts) covers either limit.
+        const windowClosed = opened !== undefined && block !== undefined && block >= snipeWindowEnd(opened)
+        const gas = await launchTradeGas(
+          { side, v14, windowClosed },
+          {
+            snipeBps: () =>
+              venue === 'curve'
+                ? publicClient.readContract({ address: launchpadAddress, abi: launchpadV14Abi, functionName: 'snipeBpsOf', args: [launch.token] })
+                : publicClient.readContract({ address: launchSuiteV14.hook, abi: launchHookAbi, functionName: 'snipeBpsOf', args: [launch.token] }),
+            estimate: () =>
+              venue === 'curve'
+                ? publicClient.estimateContractGas({ account, address: launchpadAddress, abi: launchpadV14Abi, functionName: 'buy', args })
+                : publicClient.estimateContractGas({ account, address: routerAddress, abi: v4RouterAbi, functionName: 'buy', args }),
+          },
+        )
         hash = venue === 'curve'
           ? v14
-            ? await writeContractAsync({ chainId: activeChain.id, address: launchpadAddress, abi: launchpadV14Abi, functionName: side, args })
+            ? await writeContractAsync({ chainId: activeChain.id, address: launchpadAddress, abi: launchpadV14Abi, functionName: side, args, gas })
             : await writeContractAsync({ chainId: activeChain.id, address: launchpadAddress, abi: launchpadAbi, functionName: side, args })
           : v14
-            ? await writeContractAsync({ chainId: activeChain.id, address: routerAddress, abi: v4RouterAbi, functionName: side, args })
+            ? await writeContractAsync({ chainId: activeChain.id, address: routerAddress, abi: v4RouterAbi, functionName: side, args, gas })
             : await writeContractAsync({ chainId: activeChain.id, address: routerAddress, abi: launchRouterAbi, functionName: side, args })
         setTxStatus({ kind: 'pending', hash })
         const receipt = await publicClient.waitForTransactionReceipt({ hash })
@@ -355,6 +370,7 @@ export function useLaunchTrade({
     }
   }, [
     account,
+    block,
     buttonState,
     deadlineMinutes,
     impactClear,
@@ -363,6 +379,7 @@ export function useLaunchTrade({
     launchpadAddress,
     onClear,
     onConfirmed,
+    opened,
     poolQuoteQuery,
     publicClient,
     quote,

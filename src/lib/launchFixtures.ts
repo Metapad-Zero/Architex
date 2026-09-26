@@ -17,7 +17,7 @@ import { CURVE, INITIAL_CURVE, quoteBuy, quotePoolBuy, quotePoolSell, quoteSell,
 import { FIXTURE_SUITE, FIXTURE_SUITE_V14, isV14Available, suiteFor, type LaunchVersion } from './deployment'
 import type { LaunchRecord, LaunchTrade } from './launch'
 import { setLaunchFixtureApi, type FixtureCreateArgs } from './launchFixtureApi'
-import { launchPoolKey, poolFeesOnGross, poolIdOf, snipeBps, usdcIsCurrency0, type PoolTradeFees } from './launchV14'
+import { cheaperOf, launchPoolKey, poolFeesOnGross, poolIdOf, snipeBps, tickAtSqrtPrice, usdcIsCurrency0, type PoolTradeFees } from './launchV14'
 // The builder's own encoders, so a fixture launch carries exactly what the builder would send.
 import { encodeBurnShareData as encodeBurnShare, encodeComboData as encodeCombo, encodeSplitData as encodeSplit } from './plugins/plan'
 import { DEEPEN_DEFAULT_BURN_BPS, type CreatorFeeState } from './plugins/state'
@@ -75,6 +75,15 @@ interface PoolBook {
   /** The bids placed (hook.bidCount), and the USDC in them. */
   bids: number
   locked: bigint
+  /** The tick the pool opened at, and its bid reference: the lowest tick price any window buy has started from. */
+  graduationTick: number
+  bidRefTick: number
+}
+
+/** √(currency1/currency0) of a pool book in Q64.96, as StateView reports it. */
+function bookSqrtPrice(book: Pick<PoolBook, 'usdc' | 'tokens' | 'usdcIs0'>): bigint {
+  const [amount0, amount1] = book.usdcIs0 ? [book.usdc, book.tokens] : [book.tokens, book.usdc]
+  return sqrt((amount1 << 192n) / amount0)
 }
 
 interface SplitBook {
@@ -427,15 +436,19 @@ function snipeAt(launch: FixtureLaunch, time: number): number {
 function openPool(launch: FixtureLaunch, next: CurveState, time: number): void {
   const id = launch.token.toLowerCase()
   const snipe = store.snipe.get(id) ?? 0n
+  const usdcIs0 = usdcIsCurrency0(usdcAddress(), launch.token)
+  const graduationTick = tickAtSqrtPrice(bookSqrtPrice({ usdc: realUsdc(next), tokens: CURVE.POOL_SUPPLY, usdcIs0 }))
   store.pools.set(id, {
     usdc: realUsdc(next),
     tokens: CURVE.POOL_SUPPLY,
-    usdcIs0: usdcIsCurrency0(usdcAddress(), launch.token),
+    usdcIs0,
     openBlock: blockAt(time),
     poolId: poolIdOf(launchPoolKey(launch.token, usdcAddress(), FIXTURE_SUITE_V14.hook)),
     // The curve's snipe fees become the pool's first bid, from half the graduation price down.
     bids: snipe > 0n ? 1 : 0,
     locked: snipe,
+    graduationTick,
+    bidRefTick: graduationTick,
   })
   store.snipe.set(id, 0n)
 }
@@ -476,15 +489,18 @@ function buyInternal(trader: Address, token: Address, usdcIn: bigint, time: numb
   if (launch.version === 'v14') {
     const book = poolOf(token)
     const trade = poolTrade(book, 'buy', usdcIn, launch.creatorFeeBps, snipeAt(launch, time))
+    const tickBefore = tickAtSqrtPrice(bookSqrtPrice(book))
     if (spender) spendAllowance(trader, spender, usdcIn)
     setBalance(trader, usdcAddress(), fixtureBalance(trader, usdcAddress()) - usdcIn)
     setBalance(trader, token, fixtureBalance(trader, token) + trade.out)
     book.usdc = trade.next.usdc
     book.tokens = trade.next.tokens
-    // A buy inside the window places its own snipe fee as a bid, in the same transaction.
+    // A buy inside the window places its own snipe fee as a bid, in the same transaction, from half the lower of the
+    // price before it and the pool's bid reference, which becomes the reference (it only moves down).
     if (trade.fees.snipeFee > 0n) {
       book.bids += 1
       book.locked += trade.fees.snipeFee
+      book.bidRefTick = cheaperOf(book.usdcIs0, tickBefore, book.bidRefTick)
     }
     accrue(token, trade.fees.creatorFee)
     record(token, {
@@ -923,16 +939,22 @@ function collect(token: Address): Hash {
   return nextHash('collect')
 }
 
-/** The pool as the hook and StateView report it: √(currency1/currency0) in Q64.96 and the liquidity in range. */
+/**
+ * The pool as the hook and StateView report it: √(currency1/currency0) in Q64.96 and its tick, the liquidity in range,
+ * and launchOf's graduation tick and bid reference.
+ */
 function poolState(book: PoolBook): NonNullable<LaunchRecord['v4']> {
-  const [amount0, amount1] = book.usdcIs0 ? [book.usdc, book.tokens] : [book.tokens, book.usdc]
+  const sqrtPriceX96 = bookSqrtPrice(book)
   return {
     poolId: book.poolId,
-    sqrtPriceX96: sqrt((amount1 << 192n) / amount0),
+    sqrtPriceX96,
     usdcIs0: book.usdcIs0,
     openBlock: BigInt(book.openBlock),
     liquidity: sqrt(book.usdc * book.tokens),
     bidCount: BigInt(book.bids),
+    tick: tickAtSqrtPrice(sqrtPriceX96),
+    graduationTick: book.graduationTick,
+    bidRefTick: book.bidRefTick,
   }
 }
 

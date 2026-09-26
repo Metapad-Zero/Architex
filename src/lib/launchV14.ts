@@ -114,6 +114,15 @@ export interface V4PoolState {
   liquidity?: bigint
   /** How many bids the pool has (hook.bidCount): the graduation bid, if the curve collected snipe fees, and one per buy in its snipe window. */
   bidCount?: bigint
+  /** The pool's tick now (StateView's getSlot0); absent until read. */
+  tick?: number
+  /** The tick the pool opened at (launchOf): the graduation bid's reference, and where the bid reference starts. */
+  graduationTick?: number
+  /**
+   * The pool's bid reference (launchOf's bidRefTick): the lowest price any buy in its window has started from, the
+   * graduation price to begin with. It only ever moves down. Absent until read.
+   */
+  bidRefTick?: number
 }
 
 // ─── Bids ────────────────────────────────────────────────────────────────────
@@ -152,12 +161,76 @@ export function cheaperOf(usdcIs0: boolean, a: number, b: number): number {
 }
 
 /**
- * Where a buy in a pool's snipe window places its fee: from half the lower of the price just before that buy
- * (`preTick`) and the graduation price. So no bid ever starts above half the graduation price, and after a crash the
- * next bid follows the price down. A buy only moves the price up, so the bid is always wholly under the market.
+ * Where a buy in a pool's snipe window places its fee (`ArchitexLaunchHook._afterSwap`): from half the lower of the
+ * price just before that buy (`preTick`) and the pool's bid reference as it stood before the buy (`bidRefTick`, launchOf
+ * read before it). That lower price becomes the reference (`cheaperOf`), so the reference is the lowest price any window
+ * buy has started from, the graduation price to begin with: bids follow a crash down and never move back up, and none
+ * starts above half the graduation price. A buy only moves the price up, so every bid is wholly under the market.
  */
-export function windowBidRange(usdcIs0: boolean, preTick: number, graduationTick: number): { lower: number; upper: number } {
-  return bidRange(usdcIs0, cheaperOf(usdcIs0, preTick, graduationTick))
+export function windowBidRange(usdcIs0: boolean, preTick: number, bidRefTick: number): { lower: number; upper: number } {
+  return bidRange(usdcIs0, cheaperOf(usdcIs0, preTick, bidRefTick))
+}
+
+/**
+ * Where the next buy in a pool's window would start its bid, as a price in v4SpotPrice's units: the edge of
+ * windowBidRange nearest the market, from the pool's tick now and its bid reference. Later bids in the window start
+ * there or lower (a sell first lowers it; buys never raise it). Undefined until the tick and the reference are read.
+ */
+export function nextBidSpotPrice(pool: Pick<V4PoolState, 'usdcIs0' | 'tick' | 'bidRefTick'>): bigint | undefined {
+  if (pool.tick === undefined || pool.bidRefTick === undefined) return undefined
+  const range = windowBidRange(pool.usdcIs0, pool.tick, pool.bidRefTick)
+  return v4SpotPrice({ usdcIs0: pool.usdcIs0, sqrtPriceX96: sqrtPriceAtTick(pool.usdcIs0 ? range.lower : range.upper) })
+}
+
+// ─── Ticks (Uniswap's TickMath) ──────────────────────────────────────────────
+
+const MAX_TICK = 887_272
+const MAX_UINT256 = (1n << 256n) - 1n
+/** For bit i of |tick| (i ≥ 1), 1/√(1.0001^(2^i)) in Q128.128, exactly as TickMath has it. */
+const TICK_FACTORS: ReadonlyArray<readonly [number, bigint]> = [
+  [0x2, 0xfff97272373d413259a46990580e213an],
+  [0x4, 0xfff2e50f5f656932ef12357cf3c7fdccn],
+  [0x8, 0xffe5caca7e10e4e61c3624eaa0941cd0n],
+  [0x10, 0xffcb9843d60f6159c9db58835c926644n],
+  [0x20, 0xff973b41fa98c081472e6896dfb254c0n],
+  [0x40, 0xff2ea16466c96a3843ec78b326b52861n],
+  [0x80, 0xfe5dee046a99a2a811c461f1969c3053n],
+  [0x100, 0xfcbe86c7900a88aedcffc83b479aa3a4n],
+  [0x200, 0xf987a7253ac413176f2b074cf7815e54n],
+  [0x400, 0xf3392b0822b70005940c7a398e4b70f3n],
+  [0x800, 0xe7159475a2c29b7443b29c7fa6e889d9n],
+  [0x1000, 0xd097f3bdfd2022b8845ad8f792aa5825n],
+  [0x2000, 0xa9f746462d870fdf8a65dc1f90e061e5n],
+  [0x4000, 0x70d869a156d2a1b890bb3df62baf32f7n],
+  [0x8000, 0x31be135f97d08fd981231505542fcfa6n],
+  [0x10000, 0x9aa508b5b7a84e1c677de54f3e99bc9n],
+  [0x20000, 0x5d6af8dedb81196699c329225ee604n],
+  [0x40000, 0x2216e584f5fa1ea926041bedfe98n],
+  [0x80000, 0x48a170391f7dc42444e8fa2n],
+]
+
+/** TickMath.getSqrtPriceAtTick: √(1.0001^tick) as a Q64.96 number, rounded exactly as the contracts round it. */
+export function sqrtPriceAtTick(tick: number): bigint {
+  const abs = Math.abs(tick)
+  if (!Number.isInteger(tick) || abs > MAX_TICK) throw new Error('InvalidTick')
+  let price = abs & 0x1 ? 0xfffcb933bd6fad37aa2d162d1a594001n : 1n << 128n
+  for (const [bit, factor] of TICK_FACTORS) if (abs & bit) price = (price * factor) >> 128n
+  if (tick > 0) price = MAX_UINT256 / price
+  // Q128.128 to Q64.96, rounded up (so getTickAtSqrtPrice of the result is the tick again).
+  return (price + (1n << 32n) - 1n) >> 32n
+}
+
+/** TickMath.getTickAtSqrtPrice: the greatest tick whose sqrt price is at most `sqrtPriceX96`. */
+export function tickAtSqrtPrice(sqrtPriceX96: bigint): number {
+  if (sqrtPriceX96 < sqrtPriceAtTick(-MAX_TICK) || sqrtPriceX96 >= sqrtPriceAtTick(MAX_TICK)) throw new Error('InvalidSqrtPrice')
+  let low = -MAX_TICK
+  let high = MAX_TICK - 1
+  while (low < high) {
+    const mid = Math.floor((low + high + 1) / 2)
+    if (sqrtPriceAtTick(mid) <= sqrtPriceX96) low = mid
+    else high = mid - 1
+  }
+  return low
 }
 
 type Priced = Pick<V4PoolState, 'sqrtPriceX96' | 'usdcIs0'>

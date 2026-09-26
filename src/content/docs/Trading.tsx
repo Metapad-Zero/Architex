@@ -81,8 +81,11 @@ export function DocsTrading() {
         While it applies, the trade sheet shows it as its own line with the block it reaches zero
         at, and quotes it at the block the chain is at now. A buy lands a block or more later, when
         the fee is lower, so the fee alone never leaves you with less than the sheet showed.
-        Waiting a few seconds avoids it altogether. A buy in a pool's window also costs a little
-        more gas, since it adds the bid too: a fraction of a cent on Arc.
+        Waiting a few seconds avoids it altogether. A buy in a pool's window also costs more gas,
+        since it adds the bid too, and how much depends on what other trades just did. So while a
+        window is open the sheet sends each buy with room to spare: a fresh gas estimate plus 30%,
+        or plus 200,000 if that is more. You only pay for the gas a buy uses, a fraction of a cent
+        on Arc.
       </p>
 
       <h3 className="mt-6 text-base font-semibold text-ink">After graduation on v1.4: Uniswap v4</h3>

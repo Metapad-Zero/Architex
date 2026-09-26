@@ -135,7 +135,9 @@ export function useLaunch(token: Address | undefined) {
     },
   })
 
-  // A graduated v1.4 token trades in its Uniswap pool: the hook names it (and when it opened), StateView prices it.
+  // A graduated v1.4 token trades in its Uniswap pool: the hook names it (and when it opened), StateView prices it. The
+  // pool's bid reference (launchOf's bidRefTick) moves down while its window is open, so launchOf is read again with
+  // the price; the first read only names the pool.
   const graduatedV14 = !fixtureOn && curve?.version === 'v14' && curve.graduated
   const launchOfQuery = useReadContract({
     address: launchSuiteV14.hook,
@@ -151,6 +153,7 @@ export function useLaunch(token: Address | undefined) {
       { address: launchSuiteV14.stateView, abi: stateViewAbi, functionName: 'getSlot0', args: [poolId!] },
       { address: launchSuiteV14.stateView, abi: stateViewAbi, functionName: 'getLiquidity', args: [poolId!] },
       { address: launchSuiteV14.hook, abi: launchHookAbi, functionName: 'bidCount', args: [token!] },
+      { address: launchSuiteV14.hook, abi: launchHookAbi, functionName: 'launchOf', args: [token!] },
     ],
     query: { enabled: graduatedV14 && Boolean(poolId), refetchInterval: 4_000 },
   })
@@ -188,6 +191,9 @@ export function useLaunch(token: Address | undefined) {
               openBlock: launchOf[1].openBlock,
               liquidity: pool[1],
               bidCount: pool[2],
+              tick: pool[0][1],
+              graduationTick: pool[3][1].graduationTick,
+              bidRefTick: pool[3][1].bidRefTick,
             }
           : undefined,
     }

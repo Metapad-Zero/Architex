@@ -481,15 +481,16 @@ export const launchpadV14Abi = parseAbi([
  * snipe fees of every swap in USDC (PoolTrade) and keeps the platform and creator fees as its ERC-6909 claims in the
  * PoolManager until the launchpad releases them (FeesReleased). A snipe fee never waits: the buy that pays it places
  * it as a bid in the same transaction (BidLocked), a position of its own from about half the cheaper of the price just
- * before that buy and the graduation price, down BID_SPAN_TICKS (lib/launchV14.ts windowBidRange); the curve's snipe
- * fees become the first bid at graduation, from half the graduation price.
+ * before that buy and the pool's bid reference (launchOf's `bidRefTick`: the lowest price any window buy has started
+ * from, the graduation price to begin with, which only moves down), down BID_SPAN_TICKS (lib/launchV14.ts
+ * windowBidRange); the curve's snipe fees become the first bid at graduation, from half the graduation price.
  * `bidCount` counts the bids, and `lockHeld` is only the rounding a bid could not take (a unit or two). Nobody can
  * donate to a pool. PoolTrade's `sender` is whoever called the PoolManager (a router), not necessarily the trader.
  * `graduate` and `release` are the launchpad's alone: the site never calls them.
  */
 export const launchHookAbi = parseAbi([
   'struct PoolKey { address currency0; address currency1; uint24 fee; int24 tickSpacing; address hooks; }',
-  'struct Launch { address token; bool usdcIs0; bool open; uint16 creatorFeeBps; uint64 openBlock; int24 graduationTick; }',
+  'struct Launch { address token; bool usdcIs0; bool open; uint16 creatorFeeBps; uint64 openBlock; int24 graduationTick; int24 bidRefTick; }',
   'event PoolOpened(address indexed token, bytes32 indexed poolId, uint160 sqrtPriceX96, uint256 tokensAdded, uint256 usdcAdded, uint128 liquidity, bool open)',
   'event PoolTrade(address indexed token, address indexed sender, bool isBuy, uint256 usdcAmount, uint256 tokenAmount, uint256 platformFee, uint256 creatorFee, uint256 snipeFee)',
   'event BidLocked(address indexed token, uint256 usdc, uint128 liquidity, int24 tickLower, int24 tickUpper)',

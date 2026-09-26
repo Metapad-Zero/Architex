@@ -264,7 +264,9 @@ poolId = keccak256(abi.encode(PoolKey))
 
 // its price: sqrtPriceX96 is sqrt(currency1 / currency0) in Q64.96
 StateView.getSlot0(poolId)
-hook.launchOf(token)       returns (poolId, usdcIs0, open, openBlock, ...)
+hook.launchOf(token)       returns (poolId, Launch(token, usdcIs0, open,
+                             creatorFeeBps, openBlock, graduationTick,
+                             bidRefTick))
 
 // quotes, fees included: not views, call them with eth_call
 v4Router.quoteBuy(token, usdcIn)      returns tokensOut
@@ -278,7 +280,10 @@ launchpad.syncPoolFees(token), launchpad.syncPoolFeesBatch(tokens)
 launchpad.pendingCreatorFees(token)   counts them once synced
 
 // snipe fees never wait: each becomes a bid when it is paid
-hook.bidCount(token)                  bids placed so far (BidLocked each)`
+hook.snipeBpsOf(token)                a pool buy's snipe fee now, in bps
+hook.bidCount(token)                  bids placed so far (BidLocked each)
+launchOf(token).bidRefTick            the lowest price a window buy has
+                                      started from (graduation's at first)`
 
 const ENDPOINTS: ReadonlyArray<readonly [string, string, string]> = [
   ['GET /api/v1/pairs', 'Every market: ticker_id, base, target, pool_id', '5 min'],
@@ -414,23 +419,40 @@ export function DocsIntegrate() {
         and <C>usdcAmount</C> is gross as in <C>Trade</C>: all a buyer paid, or all the pool paid out on a sell. It is
         the per-trade record of a pool&rsquo;s fees: the hook keeps them as its ERC-6909 claims in the PoolManager, and
         <C>PoolFeesAccrued</C> fires only when a sync or a creator-fee collection books them in the launchpad. The
-        PoolManager&rsquo;s own <C>Swap</C> event, keyed by the pool id, carries the price after each swap.
+        PoolManager&rsquo;s own <C>Swap</C> event, keyed by the pool id, carries the price after each swap, and is the
+        pool&rsquo;s side of the trade: on a buy its USDC is what reached the pool after all three fees (inside a window
+        as little as 10% of what the buyer paid), on a sell it is gross, and its <C>fee</C> is always 0, so a generic v4
+        indexer sees these pools as fee-free and undercounts buy volume. Take the trader&rsquo;s side from{' '}
+        <C>PoolTrade</C>: a buyer paid <C>usdcAmount</C>, a seller received <C>usdcAmount</C> less the platform and
+        creator fees. Each <C>Swap</C> is followed by its own <C>PoolTrade</C> before the next <C>Swap</C> in that pool,
+        in multi-swap transactions too; a window buy emits the PoolManager&rsquo;s <C>ModifyLiquidity</C> (its sender
+        the hook) and the hook&rsquo;s <C>BidLocked</C> between the two.
       </p>
       <Pre label="Pools, prices and quotes">{V14_POOLS}</Pre>
       <p>
         Arc&rsquo;s USDC sorts below most token addresses, so it is currency0 in most v1.4 pools and currency1 in
         the rest: read which from the key. The pools refuse donations. Snipe fees become bids with no separate step:
         each a position of its own, a USDC-only range whose top is 6,932 ticks (about half the price) past a reference
-        tick and which runs 92,200 ticks further. A buy in a pool&rsquo;s window places its fee inside the same swap,
-        from the cheaper of the tick just before that buy and the graduation tick (the higher tick when USDC is
-        currency0, the lower when it is currency1), and emits <C>BidLocked</C> before its <C>PoolTrade</C>; graduation
-        places the curve&rsquo;s fees from the graduation tick. So no bid starts above half the graduation price, a buy
-        made above the graduation price places its bid on the graduation bid&rsquo;s ticks, and after a crash the next
-        bid follows the price down. <C>hook.bidCount(token)</C> counts the bids, and <C>lockHeld(token)</C> is only the
-        unit or two of rounding a bid could not take. Such a buy costs about 56,000 to 93,000 more gas when its
-        bid&rsquo;s ticks are already in use, and 117,000 to 176,000 when it opens new ones. Uniswap&rsquo;s app and
-        routing only reach a pool with a hook like this one once Uniswap has approved the hook, which has not happened.
-        The public endpoints below do not list v1.4 markets yet.
+        tick and which runs 92,200 ticks further. Graduation places the curve&rsquo;s fees from the graduation tick. A
+        buy in a pool&rsquo;s window places its fee inside the same swap, from the pool&rsquo;s bid reference,{' '}
+        <C>launchOf(token).bidRefTick</C> read before the buy, or from the tick just before that buy if that is the
+        cheaper price (the higher tick when USDC is currency0, the lower when it is currency1), and that tick becomes the
+        reference. The reference starts at the graduation tick and only ever moves to cheaper prices, so bids follow a
+        crash down, never move back up, and none starts above half the graduation price. The buy emits{' '}
+        <C>BidLocked</C> before its <C>PoolTrade</C>, with the snipe fee to within 2 units of rounding;{' '}
+        <C>hook.bidCount(token)</C> counts the bids, and <C>lockHeld(token)</C> is only the unit or two of rounding a
+        bid could not take. Uniswap&rsquo;s app and routing only reach a pool with a hook like this one once Uniswap has
+        approved the hook, which has not happened. The public endpoints below do not list v1.4 markets yet.
+      </p>
+      <p>
+        A window buy needs more gas than the same buy after the window, measured through Uniswap&rsquo;s V4Router as
+        extra gas limit (extra gas used): about 101,000 (78,000) when its bid lands on ticks an earlier bid opened, the
+        usual case; 146,000 to 149,000 (121,000 to 124,000) on new ticks; 164,000 to 167,000 (139,000 to 142,000) when
+        it also opens a new tick-bitmap word; and 196,000 to 199,000 (170,000 to 173,000) for a pool&rsquo;s first bid.
+        Which of those applies depends on what other trades just did, so while <C>snipeBpsOf(token)</C> is above 0,
+        estimate gas again right before sending and add at least 30% (or 200,000, if more), never size a limit from an
+        earlier window buy&rsquo;s receipt, and expect a sell just before yours to add up to about 60,000. The trade
+        sheet sends window buys this way.
       </p>
 
       <H3>Token details</H3>

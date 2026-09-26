@@ -120,9 +120,11 @@ export function DocsRisks() {
         </li>
         <li>
           What a curve's anti-sniping fee collects stays in the launchpad for good if the curve never
-          sells out. In the pool, each fee becomes a standing bid from half the lower of the price
-          just before the buy that paid it and the price the pool opened at: liquidity that buys the
-          token back from anyone who sells that low, and that nobody can withdraw.
+          sells out. In the pool, each fee becomes a standing bid from half the lowest price any buy
+          in the window has started from, beginning with the price the pool opened at: liquidity
+          that buys the token back from anyone who sells that low, and that nobody can withdraw.
+          Bids follow a crash down and never move back up, so a crash inside the window leaves every
+          later bid further under the market.
         </li>
         <li>
           Tokens in Uniswap's pool contract, anyone's, earn no holder dividends.

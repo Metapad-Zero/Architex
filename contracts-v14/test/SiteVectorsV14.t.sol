@@ -14,8 +14,9 @@ import {V14Base} from "./V14Base.sol";
 /// @notice Prints the reference vectors the site's v1.4 code is tested against (src/lib/__tests__/fixtures/
 ///         v14-vectors.json): the snipe schedule, curve buys with the snipe fee, pool keys and ids with USDC on either
 ///         side, the price a pool opens at and its first bid, router quotes against the fees the hook took, the bid each
-///         buy in a pool's snipe window places (above the graduation price, and after a crash under it), the fees the
-///         hook holds until a sync, and raw event logs to decode.
+///         buy in a pool's snipe window places and the pool's bid reference either side of it (above the graduation
+///         price, after a crash under it, and after a lift back above it), raw launchOf results, the fees the hook holds
+///         until a sync, and raw event logs to decode.
 ///         Every number comes from the contracts themselves, with USDC at Arc's own address. Regenerate with
 ///         FOUNDRY_PROFILE=v14 forge test --match-contract SiteVectorsV14 -vv | sed -n 's/.*VEC //p'
 contract SiteVectorsV14 is V14Base {
@@ -169,7 +170,7 @@ contract SiteVectorsV14 is V14Base {
                 );
                 _logs(string.concat("pool sell ", vm.toString(s), "-", vm.toString(w), "-", vm.toString(b)));
             }
-            if (w == 0) _crashThenBuy(token, key, s);
+            if (w == 0) _crashLiftBuy(token, key, s);
         }
         // The pool's fees wait as the hook's claims until a sync books them in the launchpad.
         _emit(
@@ -190,39 +191,65 @@ contract SiteVectorsV14 is V14Base {
         _logs(string.concat("sync ", vm.toString(s)));
     }
 
-    /// @dev Still inside the window: a dump that takes the price well under the graduation price, then a buy whose bid
-    ///      follows the price down (it is placed from the cheaper of the tick before it and the graduation tick).
-    function _crashThenBuy(address token, PoolKey memory key, uint256 s) internal {
+    /// @dev Still inside the window: a dump that takes the price well under the graduation price; a buy whose bid follows
+    ///      the price down, which lowers the pool's bid reference to where that buy started; a buy that lifts the price
+    ///      back above the graduation price; and a buy after it. The lift's bid and the last one still start from the
+    ///      crash: the reference only ever moves down.
+    function _crashLiftBuy(address token, PoolKey memory key, uint256 s) internal {
         vm.roll(vm.getBlockNumber() + 1);
         vm.recordLogs();
         vm.prank(bob);
         router.sell(token, 300_000_000e18, 0, bob, MAX);
         _logs(string.concat("pool crash-sell ", vm.toString(s), "-0"));
-        vm.roll(vm.getBlockNumber() + 1);
-        (, int24 tickBefore) = _slot0(key.toId());
-        (, IArchitexLaunchHook.Launch memory l) = hook.launchOf(token);
-        uint256 snipe = hook.snipeBpsOf(token);
-        uint256 heldBefore = hook.lockHeld(token);
-        uint256 bidsBefore = hook.bidCount(token);
-        vm.recordLogs();
-        vm.prank(carol);
-        router.buy(token, 2_000e6, 0, carol, MAX);
-        _emit(
-            string.concat(
-                string.concat('{"k":"crash","token":', _a(token), ',"usdcIs0":', _b(l.usdcIs0)),
-                string.concat(',"graduationTick":', vm.toString(int256(l.graduationTick)), ',"tickBefore":', vm.toString(int256(tickBefore))),
-                string.concat(',"s":', vm.toString(snipe), ',"in":', _n(2_000e6)),
-                string.concat(',"heldBefore":', _n(heldBefore), ',"heldAfter":', _n(hook.lockHeld(token))),
-                string.concat(',"bidsBefore":', _n(bidsBefore), ',"bidsAfter":', _n(hook.bidCount(token)), "}")
-            )
-        );
-        _logs(string.concat("pool crash-buy ", vm.toString(s), "-0"));
+        string[3] memory phases = ["buy", "lift", "after"];
+        uint256[3] memory amounts = [uint256(2_000e6), 60_000e6, 500e6];
+        for (uint256 i; i < phases.length; ++i) {
+            vm.roll(vm.getBlockNumber() + 1);
+            _crashBuy(token, key, string.concat("pool crash-", phases[i], " ", vm.toString(s), "-0"), phases[i], amounts[i]);
+        }
+        _launchOfVector(token, string.concat("crash ", vm.toString(s)));
     }
 
-    /// @dev One router buy: its quote and result, the price and tick before it (a window buy's bid is placed from the
-    ///      cheaper of that tick and the graduation tick), and the hook's held rounding and bid count either side of it.
+    /// @dev One router buy in the crash sequence: the ticks either side of it, the pool's bid reference either side of it
+    ///      (launchOf's bidRefTick, read before and after), and the hook's held rounding and bid count either side.
+    function _crashBuy(address token, PoolKey memory key, string memory step, string memory phase, uint256 usdcIn) internal {
+        (, int24 tickBefore) = _slot0(key.toId());
+        (, IArchitexLaunchHook.Launch memory l) = hook.launchOf(token);
+        string memory head = string.concat(
+            string.concat('{"k":"crash","step":', _q(step), ',"phase":', _q(phase), ',"token":', _a(token)),
+            string.concat(',"usdcIs0":', _b(l.usdcIs0), ',"graduationTick":', vm.toString(int256(l.graduationTick))),
+            string.concat(',"tickBefore":', vm.toString(int256(tickBefore)), ',"refBefore":', vm.toString(int256(l.bidRefTick))),
+            string.concat(',"s":', vm.toString(hook.snipeBpsOf(token)), ',"in":', _n(usdcIn)),
+            string.concat(',"heldBefore":', _n(hook.lockHeld(token)), ',"bidsBefore":', _n(hook.bidCount(token)))
+        );
+        vm.recordLogs();
+        vm.prank(carol);
+        router.buy(token, usdcIn, 0, carol, MAX);
+        (, int24 tickAfter) = _slot0(key.toId());
+        (, IArchitexLaunchHook.Launch memory la) = hook.launchOf(token);
+        _emit(
+            string.concat(
+                head,
+                string.concat(',"tickAfter":', vm.toString(int256(tickAfter)), ',"refAfter":', vm.toString(int256(la.bidRefTick))),
+                string.concat(',"heldAfter":', _n(hook.lockHeld(token)), ',"bidsAfter":', _n(hook.bidCount(token)), "}")
+            )
+        );
+        _logs(step);
+    }
+
+    /// @dev The hook's launchOf for `token`, as the raw bytes a call returns, for the site to decode with its ABI.
+    function _launchOfVector(address token, string memory step) internal view {
+        (bool ok, bytes memory data) = address(hook).staticcall(abi.encodeCall(IArchitexLaunchHook.launchOf, (token)));
+        require(ok, "launchOf");
+        _emit(string.concat('{"k":"launchOf","step":', _q(step), ',"token":', _a(token), ',"data":', _q(vm.toString(data)), "}"));
+    }
+
+    /// @dev One router buy: its quote and result, the price and tick before it, the pool's bid reference either side of
+    ///      it (a window buy's bid is placed from the cheaper of its tick before and the reference before, which becomes
+    ///      the reference after), and the hook's held rounding and bid count either side of it.
     function _poolBuy(address token, PoolKey memory key, uint256 usdcIn, string memory step) internal {
         (uint160 before, int24 tickBefore) = _slot0(key.toId());
+        (, IArchitexLaunchHook.Launch memory l) = hook.launchOf(token);
         uint256 snipe = hook.snipeBpsOf(token);
         uint256 heldBefore = hook.lockHeld(token);
         uint256 bidsBefore = hook.bidCount(token);
@@ -231,11 +258,13 @@ contract SiteVectorsV14 is V14Base {
         vm.prank(carol);
         uint256 got = router.buy(token, usdcIn, 0, carol, MAX);
         (uint160 afterP,) = _slot0(key.toId());
+        (, IArchitexLaunchHook.Launch memory la) = hook.launchOf(token);
         _emit(
             string.concat(
                 string.concat('{"k":"pq","side":"buy","token":', _a(token), ',"usdcIs0":', _b(address(usdc) < token)),
                 string.concat(',"c":250,"s":', vm.toString(snipe), ',"in":', _n(usdcIn), ',"quote":', _n(quoted), ',"out":', _n(got)),
                 string.concat(',"sqrtBefore":', _n(before), ',"sqrtAfter":', _n(afterP), ',"tickBefore":', vm.toString(int256(tickBefore))),
+                string.concat(',"refBefore":', vm.toString(int256(l.bidRefTick)), ',"refAfter":', vm.toString(int256(la.bidRefTick))),
                 string.concat(',"heldBefore":', _n(heldBefore), ',"heldAfter":', _n(hook.lockHeld(token))),
                 string.concat(',"bidsBefore":', _n(bidsBefore), ',"bidsAfter":', _n(hook.bidCount(token)), "}")
             )
@@ -243,8 +272,9 @@ contract SiteVectorsV14 is V14Base {
         _logs(string.concat("pool buy ", step));
     }
 
-    /// @dev A pool as it opened: its tick, its graduation tick (the first bid is placed from it), the curve it came from,
-    ///      the curve's snipe fees that became that bid, and the hook's bid count and held rounding after.
+    /// @dev A pool as it opened: its tick, its graduation tick (the first bid is placed from it, and the pool's bid
+    ///      reference starts there), the curve it came from, the curve's snipe fees that became that bid, and the hook's
+    ///      bid count and held rounding after.
     function _gradVector(address token, uint256 snipeHeld, string memory step) internal {
         IArchitexLaunchpadV14.Curve memory c = _curve(token);
         (, IArchitexLaunchHook.Launch memory l) = hook.launchOf(token);
@@ -253,7 +283,8 @@ contract SiteVectorsV14 is V14Base {
             string.concat(
                 string.concat('{"k":"grad","step":', _q(step), ',"token":', _a(token), ',"usdcIs0":', _b(l.usdcIs0)),
                 string.concat(',"sqrtPriceX96":', _n(sqrtP), ',"tick":', vm.toString(int256(tick))),
-                string.concat(',"graduationTick":', vm.toString(int256(l.graduationTick)), ',"vu":', _n(c.virtualUsdc), ',"vt":', _n(c.virtualTokens)),
+                string.concat(',"graduationTick":', vm.toString(int256(l.graduationTick)), ',"bidRefTick":', vm.toString(int256(l.bidRefTick))),
+                string.concat(',"vu":', _n(c.virtualUsdc), ',"vt":', _n(c.virtualTokens)),
                 string.concat(',"snipeHeld":', _n(snipeHeld), ',"bids":', _n(hook.bidCount(token)), ',"held":', _n(hook.lockHeld(token)), "}")
             )
         );
@@ -362,6 +393,7 @@ contract SiteVectorsV14 is V14Base {
             pad.buy(token, 1_000_000e6, 0, bob, MAX);
             _logs(string.concat("graduate ", vm.toString(s)));
             _gradVector(token, snipeHeld, string.concat("graduate ", vm.toString(s)));
+            _launchOfVector(token, string.concat("graduate ", vm.toString(s)));
             _poolTrades(token, s);
         }
 
