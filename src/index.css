@@ -254,13 +254,15 @@ input[type='checkbox'], input[type='radio'], input[type='range'] { accent-color:
   .updates-panel { @apply flex min-h-0 max-h-full flex-col; }
   .updates-main { @apply min-h-0 flex-1 overflow-y-auto; }
   .updates-figure {
-    @apply mx-4 mt-4 flex h-44 shrink-0 flex-col border-y border-ink py-5;
+    @apply mx-4 mt-4 flex min-h-44 shrink-0 flex-col border-y border-ink py-5;
   }
   .updates-specimen { @apply flex flex-1 flex-col justify-center; }
   .updates-copy { @apply flex min-h-[220px] flex-col px-4 pb-2 pt-5; }
   .updates-figure .launch-meter { @apply w-full; }
+  .updates-figure .receipt-lines > div { @apply flex-col items-start gap-0 py-1 sm:flex-row sm:items-center sm:gap-4 sm:py-2; }
+  .updates-figure .receipt-lines dd { @apply whitespace-normal text-left sm:text-right; }
   .updates-actions { @apply flex shrink-0 flex-col gap-3 border-t border-ink p-4 sm:flex-row sm:items-center sm:justify-between; }
-  .updates-later {
+  .updates-dismiss {
     @apply min-h-11 text-sm font-semibold text-g700 underline underline-offset-[3px] hover:text-ink;
   }
   .icon-button { @apply flex h-11 w-11 items-center justify-center rounded hover:bg-g100 active:bg-ink active:text-paper; }

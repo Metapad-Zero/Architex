@@ -62,11 +62,14 @@ export function AppShell({ route, onRoute, children }: AppShellProps) {
         </div>
       </header>
       <main>{children}</main>
-      {!activeChain.isTestnet && (
-        <footer className="mx-auto w-full max-w-[512px] px-4 pb-24 text-sm leading-6 text-g500">
-          Beta. The Architex contracts have not been audited by a third party, so only use funds you can afford to lose.
-        </footer>
-      )}
+      <footer className="mx-auto w-full max-w-[512px] px-4 pb-24 text-sm leading-6 text-g500">
+        {!activeChain.isTestnet && (
+          <p>Beta. The Architex contracts have not been audited by a third party, so only use funds you can afford to lose.</p>
+        )}
+        <button type="button" className="mt-3 min-h-11 underline underline-offset-[3px] hover:text-ink lg:hidden" onClick={requestUpdates}>
+          Updates
+        </button>
+      </footer>
       <ConnectSheet />
     </div>
   )

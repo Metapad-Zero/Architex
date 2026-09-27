@@ -3,7 +3,7 @@ import { isLaunchViewAvailable } from './deployment'
 
 export type UpdateView = 'launch' | 'bridge' | 'docs'
 
-export type UpdateFigure = 'fees' | 'launch' | 'bridge' | 'docs'
+export type UpdateFigure = 'fees' | 'deepen-pool' | 'launch' | 'bridge' | 'docs'
 
 export interface ProductUpdate {
   id: string
@@ -27,7 +27,7 @@ export const PRODUCT_UPDATES: readonly ProductUpdate[] = [
     title: 'Deepen pool: burn the token, grow its pool',
     body: 'A new place to send creator fees. While a token is on its curve, Deepen pool buys it and burns it. Once it graduates, each run splits between burning and adding liquidity to its pool that nobody can ever take out. The creator picks the split at launch.',
     action: { label: 'Open Launch', view: 'launch' },
-    figure: 'fees',
+    figure: 'deepen-pool',
     requiresLaunch: true,
   },
   {

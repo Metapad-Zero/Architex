@@ -59,7 +59,7 @@ export function SettingsPopover({ slippageBps, deadlineMinutes, onSlippage, onDe
             <legend className="mb-2 text-sm text-g500">Slippage</legend>
             <div className="grid grid-cols-3 gap-2">
               {[10, 50, 100].map((value) => (
-                <button type="button" key={value} className="choice-button" data-active={slippageBps === value} onClick={() => onSlippage(value)}>
+                <button type="button" key={value} className="choice-button" data-active={slippageBps === value} aria-pressed={slippageBps === value} onClick={() => onSlippage(value)}>
                   {(value / 100).toFixed(value % 100 === 0 ? 0 : 1)}%
                 </button>
               ))}

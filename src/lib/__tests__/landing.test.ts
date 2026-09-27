@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
 import { hashFor, type AppRoute } from '../../hooks/useHashRoute'
+import { CURVE, marketCap } from '../curve'
 
 // The landing page (public/home/index.html) is served at architex.fun/ and the app at architex.fun/app/: one origin,
 // so the passkeys and browser wallets people saved on architex.fun are still there. vite.config.ts moves both pages
@@ -52,6 +53,25 @@ function forward(
 }
 
 describe('landing page', () => {
+  test('the curve chart uses the same market cap as the app at every stage', () => {
+    const source = LANDING.match(/var V0=[\s\S]*?(?=\/\/ LP earnings)/)?.[0] ?? ''
+    const chart = runInNewContext(`${source}; ({ mcap, chart: curveChart() })`, {
+      svg: (_width: number, _height: number, body: string, label: string) => `${body} ${label}`,
+    }) as { mcap: (raised: number) => number; chart: string }
+    const invariant = CURVE.VIRTUAL_USDC_0 * CURVE.VIRTUAL_TOKENS_0
+    for (const raised of [0, 5_000, 10_000, 15_000, 20_000, 25_000]) {
+      const virtualUsdc = CURVE.VIRTUAL_USDC_0 + BigInt(raised) * 1_000_000n
+      const cap = Number(marketCap({ virtualUsdc, virtualTokens: invariant / virtualUsdc })) / 1e6
+      expect(Math.abs(chart.mcap(raised) - cap)).toBeLessThan(0.0001)
+    }
+    expect(chart.chart).toContain('Opens at $6,250')
+    expect(chart.chart).toContain('Graduates at $100,000')
+    expect(chart.chart).toContain('800 million curve tokens')
+    expect(LANDING).toContain('Market cap (800M curve supply)')
+    expect(LANDING).not.toContain('$7,812')
+    expect(LANDING).not.toContain('$125,000')
+  })
+
   test('opens the app on this origin, at a view the app knows', () => {
     expect(LANDING).not.toContain('app.architex.fun')
     const links = [...LANDING.matchAll(/href="(\/app\/[^"]*)"/g)].map((m) => m[1])

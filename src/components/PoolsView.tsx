@@ -69,7 +69,7 @@ export function PoolsView({ selectedPair, onSelectPair }: PoolsViewProps) {
 
   return (
     <div className="pools-page">
-      <div className="mb-10 flex items-end justify-between gap-4">
+      <div className="mb-10 flex flex-col items-start justify-between gap-4 sm:flex-row sm:items-end">
         <div><h1 className="text-xl font-semibold tracking-[-0.02em]">Pools</h1><p className="mt-2 max-w-xl text-sm text-g500">Add liquidity to earn the 0.30% fee paid by swaps through a pool. Swaps through a pool open once it holds $50,000.</p></div>
         <GhostButton className="shrink-0 whitespace-nowrap" onClick={() => setCreating((value) => !value)}>Create a pool</GhostButton>
       </div>

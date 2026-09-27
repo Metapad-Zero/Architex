@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import type { Address, EIP1193Provider, Hash, Hex } from 'viem'
 import { useAccount } from 'wagmi'
 import { activeChain } from '../chain'
@@ -29,6 +30,7 @@ export type BridgeButtonState =
   | 'enterAmount'
   | 'insufficientBalance'
   | 'balanceUnavailable'
+  | 'readingBalance'
   | 'estimating'
   | 'ready'
   | 'bridging'
@@ -68,8 +70,6 @@ export function useBridge() {
   const [foreign, setForeign] = useState<ForeignChain>(initial.foreign)
   const [amount, setAmount] = useState(initial.amount ?? '')
   const [solanaAddress, setSolanaAddress] = useState<string | undefined>(() => solanaProvider()?.publicKey?.toString())
-  const [sourceBalance, setSourceBalance] = useState<bigint>(0n)
-  const [balanceUnavailable, setBalanceUnavailable] = useState(false)
   const [estimate, setEstimate] = useState<EstimateKitResult>()
   const [estimateError, setEstimateError] = useState<string>()
   const [phase, setPhase] = useState<'idle' | 'estimating' | 'bridging'>('idle')
@@ -96,36 +96,26 @@ export function useBridge() {
     }
   }, [amount])
 
-  const refreshBalance = useCallback(async () => {
-    let next = 0n
-    let failed = false
-    try {
-      if (source.kind === 'solana' && solanaAddress) next = await fetchSplUsdcBalance(source, solanaAddress)
-      else if (address && source.id === 'arc') {
+  const sourceOwner = source.kind === 'solana' ? solanaAddress : address
+  // Key reads by chain and wallet so a late response cannot become another route's balance.
+  const balanceQuery = useQuery({
+    queryKey: ['bridge-balance', activeChain.id, source.id, sourceOwner],
+    enabled: Boolean(sourceOwner),
+    queryFn: async () => {
+      if (source.kind === 'solana' && solanaAddress) return fetchSplUsdcBalance(source, solanaAddress)
+      if (address && source.id === 'arc') {
         const { createPublicClient, http, erc20Abi } = await import('viem')
         const client = createPublicClient({ transport: http(activeChain.rpc) })
-        next = await client.readContract({ address: source.usdc as Address, abi: erc20Abi, functionName: 'balanceOf', args: [address] })
-      } else if (address && source.kind === 'evm') {
-        next = await fetchEvmUsdcBalance(source, address)
+        return client.readContract({ address: source.usdc as Address, abi: erc20Abi, functionName: 'balanceOf', args: [address] })
       }
-    } catch {
-      failed = true
-    }
-    setBalanceUnavailable(failed)
-    setSourceBalance(next)
-  }, [address, solanaAddress, source])
-
-  useEffect(() => {
-    let live = true
-    void (async () => {
-      await Promise.resolve()
-      if (!live) return
-      await refreshBalance()
-    })()
-    return () => {
-      live = false
-    }
-  }, [refreshBalance])
+      if (address && source.kind === 'evm') return fetchEvmUsdcBalance(source, address)
+      throw new Error('Connect a source wallet to read its balance')
+    },
+  })
+  const sourceBalance = balanceQuery.data ?? 0n
+  const balanceAvailable = Boolean(sourceOwner) && balanceQuery.isSuccess
+  const balanceUnavailable = Boolean(sourceOwner) && balanceQuery.isError
+  const refreshBalance = balanceQuery.refetch
 
   const canQuote = parsed > 0n && Boolean(address) && (!usesSolana || Boolean(solanaAddress))
 
@@ -179,10 +169,11 @@ export function useBridge() {
     if (phase === 'bridging') return 'bridging'
     if (parsed === 0n) return 'enterAmount'
     if (balanceUnavailable) return 'balanceUnavailable'
+    if (!balanceAvailable) return 'readingBalance'
     if (parsed > spendableBalance(source.usdc, sourceBalance)) return 'insufficientBalance'
     if (phase === 'estimating') return 'estimating'
     return 'ready'
-  }, [address, balanceUnavailable, chainId, isConnected, parsed, phase, side, solanaAddress, source.usdc, sourceBalance, usesSolana])
+  }, [address, balanceAvailable, balanceUnavailable, chainId, isConnected, parsed, phase, side, solanaAddress, source.usdc, sourceBalance, usesSolana])
 
   const label = useMemo(() => {
     switch (buttonState) {
@@ -198,6 +189,8 @@ export function useBridge() {
         return 'Not enough USDC'
       case 'balanceUnavailable':
         return `Couldn't read your ${source.label} balance`
+      case 'readingBalance':
+        return 'Reading balance…'
       case 'estimating':
         return 'Quoting…'
       case 'bridging':
@@ -303,6 +296,7 @@ export function useBridge() {
     fee,
     estimateError: canQuote ? estimateError : undefined,
     sourceBalance,
+    balanceAvailable,
     balanceUnavailable,
     solanaAddress,
     buttonState,

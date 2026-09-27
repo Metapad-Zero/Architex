@@ -28,6 +28,7 @@ interface TokenSelectProps {
 export function TokenSelect({ token, tokens, balances, onSelect, disabled = false, label = 'Select token', hotkey, extra }: TokenSelectProps) {
   const rawId = useId()
   const popoverId = `token-${rawId.replace(/:/g, '')}`
+  const listId = `${popoverId}-list`
   const triggerRef = useRef<HTMLButtonElement>(null)
   const panelRef = useRef<HTMLDivElement>(null)
   const searchRef = useRef<HTMLInputElement>(null)
@@ -43,6 +44,18 @@ export function TokenSelect({ token, tokens, balances, onSelect, disabled = fals
       `${item.symbol} ${item.name} ${item.address}`.toLowerCase().includes(normalized),
     )
   }, [query, tokens])
+  const activeOption = Math.min(activeIndex, filtered.length - 1)
+
+  useEffect(() => {
+    if (!isOpen || activeOption < 0) return
+    const row = document.getElementById(`${listId}-${activeOption}`)
+    const list = row?.closest('.token-list')
+    if (!row || !list) return
+    const rowRect = row.getBoundingClientRect()
+    const listRect = list.getBoundingClientRect()
+    if (rowRect.top < listRect.top) list.scrollTop += rowRect.top - listRect.top
+    else if (rowRect.bottom > listRect.bottom) list.scrollTop += rowRect.bottom - listRect.bottom
+  }, [activeOption, isOpen, listId, query])
 
   const close = (restoreFocus = true) => {
     hidePopover(panelRef.current)
@@ -71,7 +84,10 @@ export function TokenSelect({ token, tokens, balances, onSelect, disabled = fals
       const toggle = event as ToggleEvent
       const openNow = toggle.newState === 'open'
       setIsOpen(openNow)
-      if (!openNow) triggerRef.current?.focus()
+      if (!openNow) {
+        setQuery('')
+        triggerRef.current?.focus()
+      }
     }
     panel.addEventListener('toggle', onToggle)
     return () => panel.removeEventListener('toggle', onToggle)
@@ -87,18 +103,21 @@ export function TokenSelect({ token, tokens, balances, onSelect, disabled = fals
   }, [isOpen])
 
   const handleKeys = (event: KeyboardEvent) => {
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      close()
+      return
+    }
+    if (event.target !== searchRef.current) return
     if (event.key === 'ArrowDown') {
       event.preventDefault()
-      setActiveIndex((index) => Math.min(filtered.length - 1, index + 1))
+      setActiveIndex(Math.max(0, Math.min(filtered.length - 1, activeOption + 1)))
     } else if (event.key === 'ArrowUp') {
       event.preventDefault()
-      setActiveIndex((index) => Math.max(0, index - 1))
-    } else if (event.key === 'Enter' && filtered[activeIndex]) {
+      setActiveIndex(Math.max(0, activeOption - 1))
+    } else if (event.key === 'Enter' && filtered[activeOption]) {
       event.preventDefault()
-      onSelect(filtered[activeIndex])
-      close()
-    } else if (event.key === 'Escape') {
-      event.preventDefault()
+      onSelect(filtered[activeOption])
       close()
     }
   }
@@ -144,21 +163,28 @@ export function TokenSelect({ token, tokens, balances, onSelect, disabled = fals
               setActiveIndex(0)
             }}
             aria-label="Search tokens"
+            role="combobox"
+            aria-autocomplete="list"
+            aria-expanded={isOpen}
+            aria-controls={listId}
+            aria-activedescendant={isOpen && activeOption >= 0 ? `${listId}-${activeOption}` : undefined}
             placeholder="Search symbol, name, or address"
           />
         </div>
         <div className="token-list">
-          <div role="listbox" aria-label="Tokens">
+          <div id={listId} role="listbox" aria-label="Tokens">
           {filtered.map((item, index) => {
             const selected = item.address.toLowerCase() === token?.address.toLowerCase()
             return (
               <button
                 type="button"
                 role="option"
+                id={`${listId}-${index}`}
+                tabIndex={-1}
                 aria-selected={selected}
                 key={item.address}
                 className="token-row"
-                data-active={index === activeIndex}
+                data-active={index === activeOption}
                 data-selected={selected}
                 onMouseEnter={() => setActiveIndex(index)}
                 onClick={() => {
@@ -175,12 +201,14 @@ export function TokenSelect({ token, tokens, balances, onSelect, disabled = fals
                       : item.name || shortAddress(item.address)}
                   </span>
                 </span>
-                <span className="ml-auto pl-4 text-right text-sm">{formatAmount(balances.get(item.address.toLowerCase()) ?? 0n, item.decimals)}</span>
+                {balances.has(item.address.toLowerCase()) && (
+                  <span className="ml-auto pl-4 text-right text-sm">{formatAmount(balances.get(item.address.toLowerCase())!, item.decimals)}</span>
+                )}
               </button>
             )
           })}
           </div>
-          {filtered.length === 0 && <p className="px-4 py-8 text-center text-sm text-g500">{extra ? 'No pool tokens match.' : 'No matching tokens.'}</p>}
+          {filtered.length === 0 && <p role="status" className="px-4 py-8 text-center text-sm text-g500">{extra ? 'No pool tokens match.' : 'No matching tokens.'}</p>}
           {isOpen && extra?.({ query })}
         </div>
       </div>

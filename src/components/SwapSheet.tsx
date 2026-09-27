@@ -168,6 +168,7 @@ export function SwapSheet() {
   const payUsd = tokenUsdValue(tokenIn, quote?.amountIn ?? parseDisplayed(displayedIn, tokenIn))
   const receiveUsd = tokenUsdValue(tokenOut, quote?.amountOut ?? parseDisplayed(displayedOut, tokenOut))
   const balance = tokenIn ? balances.get(tokenIn.address.toLowerCase()) ?? 0n : 0n
+  const balanceAvailable = Boolean(tokenIn && balances.has(tokenIn.address.toLowerCase()))
   const allowance = tokenIn ? allowances.get(tokenIn.address.toLowerCase()) ?? 0n : 0n
   const afterTransaction = useCallback(async () => {
     await Promise.all([refetchPairs(), refetchBalances(), refetchAllowances()])
@@ -343,10 +344,10 @@ export function SwapSheet() {
         />
 
         <PrimaryButton className="mt-6 w-full" loading={swap.isLoading} disabled={swap.isDisabled} onClick={() => void handlePrimary()}>
-          {swap.label}
+          {swap.buttonState === 'insufficientBalance' && !balanceAvailable ? 'Balance unavailable' : swap.label}
         </PrimaryButton>
         {swap.hint && <p className="hint-line" role="status">{swap.hint}</p>}
-        {account && (balances.get(activeChain.usdc.toLowerCase()) ?? 0n) === 0n && (
+        {account && balances.get(activeChain.usdc.toLowerCase()) === 0n && (
           <p className="hint-line" role="status">
             No USDC on Arc.{' '}
             <button type="button" className="font-semibold underline" onClick={() => { window.location.hash = '#bridge' }}>
