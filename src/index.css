@@ -130,6 +130,16 @@ input[type='checkbox'], input[type='radio'], input[type='range'] { accent-color:
   }
 
   .swap-sheet { @apply relative border-t border-ink; }
+  /* A pair whose pool is under the swap-opening goal ($50,000, lib/swapOpening.ts): the sheet's place holds the goal. */
+  .coming-soon { @apply flex flex-col items-start gap-4 pt-6 text-sm leading-6 text-g700; }
+  .coming-soon h2 { @apply text-xl font-semibold tracking-[-0.02em] text-ink; }
+  .coming-soon-chip { @apply rounded border border-ink bg-g100 px-2 py-0.5 text-2xs font-semibold text-ink; }
+  .coming-soon-actions { @apply flex flex-wrap gap-3 pt-2; }
+  .coming-soon-actions:empty { @apply hidden; }
+  .pool-goal { @apply flex w-full flex-col gap-2; }
+  .pool-goal-head { @apply flex items-baseline justify-between gap-4 text-sm; }
+  .pool-goal-head > span:first-child { @apply font-semibold text-ink; }
+  .pool-goal-head > span:last-child { @apply text-g500; }
   .sheet-tools { @apply absolute right-0 top-0 -translate-y-1/2; }
   /* The one authored motion: a short ink bar running along a sheet's top rule while the chain confirms. */
   .rule-sweep { @apply pointer-events-none absolute left-0 top-[-1px] h-0.5 w-1/4 bg-ink; animation: rule-sweep 1.4s cubic-bezier(0.2, 0, 0, 1) infinite; }
