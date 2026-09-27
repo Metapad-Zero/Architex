@@ -29,9 +29,13 @@ a plugin isn't listed.
 4. **Account per token.** One deployment serves every token that picks it. Never treat your USDC balance as
    one token's balance.
 5. **Don't trade inside a hook.** Hooks run under the launchpad's reentrancy guard. Do anything that buys, sells
-   or adds liquidity in a separate, permissionless function, as Buyback & burn's `run` does. If anyone can
-   trigger it, pace it by time, not by block: a trader can hold across blocks, and on Arc blocks come faster
-   than one a second (V13-SPEC §2.2).
+   or adds liquidity in a separate, permissionless function, as Buyback & burn's and Deepen pool's `run` do. If
+   anyone can trigger it, pace it by time, not by block: a trader can hold across blocks, and on Arc blocks come
+   faster than one a second (V13-SPEC §2.2, §2.3). Work out, and write down, how long a trader has to hold before
+   front-running your runs pays. The pacing is per plugin, so two paced plugins on one token spend twice as fast and
+   roughly halve that time: if your plugin does two things with a token's fees, do them under **one** budget and one
+   clock, as Deepen pool does with its burn share, rather than asking creators to pair two plugins in a Combo
+   (V13-SPEC §2.3).
 6. **Pay out by pull, not push.** One bad recipient must never block the others.
 7. **A broken plugin strands fees.** If `onFees` reverts, that token's fees stay with the launchpad forever
    (owner decision D10). Test like it.
@@ -39,9 +43,28 @@ a plugin isn't listed.
    zero, your plugin, the launchpad, USDC, the token, any launch pair (`launchpad.isLaunchPair`; anyone can
    skim a transfer out of one), the launch router, the pair factory and any launch token, reading only the
    launchpad, never the recipient.
+9. **Size what a run spends from something one transaction can't move.** A launch pair charges nothing to add or
+   remove liquidity, so its reserves, like any balance, are anyone's to inflate for the length of one transaction.
+   Buyback & burn v1 took its cap from the pool's whole USDC reserve, and one transaction could push the price, park
+   the bag as liquidity and make a single run spend the whole pot at the pushed price (V13-SPEC §2.2, round-5
+   review H1). Deepen pool takes it from the locked part instead: the share of the reserve owned by LP at
+   `0x…dEaD`. Test your plugin against an attacker who pushes, parks, runs, unparks and sells in one transaction.
 
 The reference plugins in `contracts/plugins/launch/` share these rules through `LaunchFeePluginBase.sol`.
 Inherit from it.
+
+**Moving liquidity** (Deepen pool, V13-SPEC §2.3) adds three rules of its own, because a launch pair pays out on
+balances, not on what you tell it:
+
+- `sync()` the pair before you read its reserves, so what you compute from them is what your own swap will trade
+  against; anything donated into the pair and not yet synced is folded in by that swap otherwise.
+- Transfer both sides in and `mint` in the same call, with no call in between that anyone else could use: a plain
+  transfer sitting in a pair can be skimmed by anyone.
+- Compute the LP the pair's formula owes your deposit and check what you were minted against it, and send the LP
+  somewhere it can never come back from (Deepen pool mints it to `0x…dEaD`).
+- Say what each part of a run does to the price. Buying and burning takes tokens out of the pool and leaves the USDC
+  in, so it moves the price about twice as far per USDC as buying and adding does, which is why Deepen pool's
+  front-running bound depends on its burn share (V13-SPEC §2.3).
 
 ## Checklist
 

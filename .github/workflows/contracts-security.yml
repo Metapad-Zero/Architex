@@ -7,6 +7,9 @@ on:
       - "contracts/**"
       - "!contracts/test/**"
       - "!contracts/script/**"
+      - "contracts-v14/**"
+      - "!contracts-v14/test/**"
+      - "!contracts-v14/script/**"
       - "foundry.toml"
       - "remappings.txt"
       - ".solhint.json"
@@ -15,6 +18,7 @@ on:
   pull_request:
     paths:
       - "contracts/**"
+      - "contracts-v14/**"
       - "foundry.toml"
       - "remappings.txt"
       - ".solhint.json"
@@ -40,6 +44,21 @@ jobs:
       - run: bun install --frozen-lockfile
       - uses: foundry-rs/foundry-toolchain@v1
       - run: forge test -vvv
+
+  # Launchpad v1.4 (Uniswap v4 hook): its own Foundry profile (Cancun, contracts-v14/), against Uniswap's PoolManager
+  # bytecode from Arc etched at its real address.
+  forge-tests-v14:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - uses: foundry-rs/foundry-toolchain@v1
+      - run: forge test -vvv
+        env:
+          FOUNDRY_PROFILE: v14
 
   slither:
     runs-on: ubuntu-latest
@@ -70,12 +89,12 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
       - uses: foundry-rs/foundry-toolchain@v1
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: aderyn-cli
-      - run: cargo install aderyn --locked
-      - run: mkdir -p reports/security && aderyn . -o reports/security/aderyn-report.md
+      # Aderyn's prebuilt release, pinned. `cargo install aderyn` stopped building in September 2026: a dependency
+      # generates one constant per solc release and the release list now names 0.8.31 and 0.8.35 twice.
+      - run: npm install --global @cyfrin/aderyn@0.6.8 && aderyn --version
+      - run: >-
+          mkdir -p reports/security &&
+          aderyn . --skip-update-check -x contracts/test,contracts/script -o reports/security/aderyn-report.md
       - uses: actions/upload-artifact@v4
         with:
           name: aderyn-report

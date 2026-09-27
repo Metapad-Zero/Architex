@@ -1,9 +1,10 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { Hex } from 'viem'
 import { useAccount, usePublicClient, useWriteContract } from 'wagmi'
 import { activeChain } from '../chain'
-import { erc20Abi, launchRouterAbi, launchpadAbi } from '../lib/abi'
-import { deployment, launchSuite } from '../lib/deployment'
+import { erc20Abi, launchHookAbi, launchRouterAbi, launchpadAbi, launchpadV14Abi, v4RouterAbi } from '../lib/abi'
+import { launchSuite, launchSuiteV14 } from '../lib/deployment'
 import { isUserRejection, revertReason } from '../lib/errors'
 import { formatAmount } from '../lib/format'
 import {
@@ -14,16 +15,26 @@ import {
   isHighImpact,
   launchImpactLossUsd,
 } from '../lib/impactGuard'
-import type { LaunchRecord, TradeVenue } from '../lib/launch'
-import { quoteLaunchTrade, type LaunchQuote, type LaunchSide } from '../lib/launchQuote'
+import { isPriced, launchVersion, type LaunchRecord, type TradeVenue } from '../lib/launch'
+import { quoteLaunchTrade, quoteV4Trade, type LaunchQuote, type LaunchSide } from '../lib/launchQuote'
+import { snipeBps, snipeWindowEnd } from '../lib/launchV14'
 import { pushRecent } from '../lib/recent'
 import type { Token } from '../lib/tokens'
 import { launchFixtureApi } from '../lib/launchFixtureApi'
 import { spendableBalance } from '../lib/gasReserve'
+import { launchTradeGas } from '../lib/windowGas'
 import type { LaunchAllowances } from './useLaunch'
 import type { SwapTxStatus } from './useSwap'
 
 const fixtureOn = import.meta.env.DEV && import.meta.env.VITE_LAUNCHPAD_FIXTURE === '1'
+/** A pool quote is a call to the chain: it waits until typing pauses. */
+const POOL_QUOTE_DEBOUNCE_MS = 250
+
+/** The router's answer for a pool trade, and the snipe rate of the block it was worked out at. */
+interface PoolQuote {
+  amountOut: bigint
+  snipeBps: number
+}
 
 export type { LaunchQuote, LaunchSide }
 
@@ -32,6 +43,7 @@ export type LaunchButtonState =
   | 'wrongChain'
   | 'enterAmount'
   | 'poolLoading'
+  | 'quoting'
   | 'insufficientBalance'
   | 'needsApproval'
   | 'approving'
@@ -51,10 +63,28 @@ interface UseLaunchTradeArgs {
   tokenBalance: bigint
   usdcBalance: bigint
   usdcAllowance: LaunchAllowances
+  /** The chain's latest block (hooks/useChainBlock.ts), for v1.4's anti-sniping fee; undefined until read. */
+  block?: bigint
   onConfirmed: () => void | Promise<void>
   onClear: () => void
   /** The `impactKey` the trader ticked the price-impact acknowledgment for, if any. */
   impactAcknowledgedKey: string | undefined
+}
+
+/** Why the pool could not quote, in a sentence: the contract's refusal, or a chain that could not be read. */
+function poolQuoteProblem(error: unknown): string {
+  const reason = revertReason(error)
+  return reason === 'Transaction reverted' ? 'The pool could not be read just now. Trying again.' : `The pool could not quote that amount. ${reason}`
+}
+
+/** The typed amount, once it has held still for a moment. */
+function useSettled(value: bigint, delayMs: number): bigint {
+  const [settled, setSettled] = useState(value)
+  useEffect(() => {
+    const timer = window.setTimeout(() => setSettled(value), delayMs)
+    return () => window.clearTimeout(timer)
+  }, [delayMs, value])
+  return settled
 }
 
 export function useLaunchTrade({
@@ -68,6 +98,7 @@ export function useLaunchTrade({
   tokenBalance,
   usdcBalance,
   usdcAllowance,
+  block,
   onConfirmed,
   onClear,
   impactAcknowledgedKey,
@@ -79,7 +110,61 @@ export function useLaunchTrade({
   const [txStatus, setTxStatus] = useState<SwapTxStatus | undefined>()
   const [approvedThisSession, setApprovedThisSession] = useState(false)
 
-  const quote = useMemo(() => (launch ? quoteLaunchTrade(launch, side, parsedIn, slippageBps) : undefined), [launch, parsedIn, side, slippageBps])
+  const venue: TradeVenue = launch?.graduated ? 'pool' : 'curve'
+  const v14 = launch !== undefined && launchVersion(launch) === 'v14'
+  const inV4Pool = v14 && venue === 'pool'
+
+  // v1.4's anti-sniping fee on a buy: on the curve from its creation block, in the pool from the block it opened. A
+  // v1.4 curve buy is quoted at the block the chain is at now (a buy lands later, when the fee is lower, so the quote
+  // never promises too much), and not before that block is known: quoted without the fee it would promise far too much.
+  const opened = launch && v14 ? (launch.graduated ? launch.v4?.openBlock : launch.createdBlock) : undefined
+  const snipe = side === 'buy' && launch && opened !== undefined && block !== undefined ? snipeBps(opened, block, launch.creatorFeeBps) : 0
+  const curveAwaitsBlock = v14 && side === 'buy' && venue === 'curve' && block === undefined
+
+  // In a v1.4 pool the quote is the router's (a call to the chain, every fee included), made at one pinned block whose
+  // snipe rate splits its fees, so the fees and the impact always describe the same swap. Everywhere else it is local.
+  const settledIn = useSettled(parsedIn, POOL_QUOTE_DEBOUNCE_MS)
+  const poolWindowOpen = inV4Pool && opened !== undefined && (block === undefined || block < snipeWindowEnd(opened))
+  const poolQuoteQuery = useQuery<PoolQuote, Error>({
+    queryKey: ['v4Quote', activeChain.id, launch?.token, side, settledIn.toString()],
+    enabled: inV4Pool && settledIn > 0n && isPriced(launch) && (fixtureOn || Boolean(publicClient)),
+    staleTime: 2_000,
+    // While the pool's window is open its fee falls every block: quote more often.
+    refetchInterval: poolWindowOpen ? 2_000 : 8_000,
+    retry: false,
+    queryFn: async () => {
+      if (!launch?.v4) throw new Error('No pool')
+      const rateAt = (at: bigint) => (side === 'buy' ? snipeBps(launch.v4!.openBlock, at, launch.creatorFeeBps) : 0)
+      if (fixtureOn) {
+        const api = launchFixtureApi()
+        if (!api) throw new Error('No fixture')
+        const at = api.blockNumber()
+        return { amountOut: api.quoteV4(launch.token, side, settledIn), snipeBps: rateAt(at) }
+      }
+      if (!publicClient) throw new Error('No RPC client for Arc')
+      const at = await publicClient.getBlockNumber({ cacheTime: 0 })
+      const amountOut = await publicClient.readContract({
+        address: launchSuiteV14.router,
+        abi: v4RouterAbi,
+        functionName: side === 'buy' ? 'quoteBuy' : 'quoteSell',
+        args: [launch.token, settledIn],
+        blockNumber: at,
+      })
+      return { amountOut, snipeBps: rateAt(at) }
+    },
+  })
+  const poolQuoteFresh = inV4Pool && settledIn === parsedIn && poolQuoteQuery.data !== undefined && !poolQuoteQuery.isPlaceholderData
+  const poolQuoteError = inV4Pool && settledIn === parsedIn && parsedIn > 0n && poolQuoteQuery.isError ? poolQuoteProblem(poolQuoteQuery.error) : undefined
+
+  const quote = useMemo(() => {
+    if (!launch) return undefined
+    if (inV4Pool) {
+      const answer = poolQuoteFresh ? poolQuoteQuery.data : undefined
+      return answer ? quoteV4Trade(launch, side, parsedIn, answer.amountOut, slippageBps, answer.snipeBps) : undefined
+    }
+    if (curveAwaitsBlock) return undefined
+    return quoteLaunchTrade(launch, side, parsedIn, slippageBps, snipe)
+  }, [curveAwaitsBlock, inV4Pool, launch, parsedIn, poolQuoteFresh, poolQuoteQuery.data, side, slippageBps, snipe])
 
   // The price-impact guard (lib/impactGuard.ts), as on Swap: a refused trade is neither approved nor sent, and one past
   // the acknowledgment line only while the sheet's checkbox is ticked for this trade (side, typed amount, venue) and
@@ -94,10 +179,11 @@ export function useLaunchTrade({
   const impactRefused = quote !== undefined && impactTier(quote.priceImpactBps) === 'refused'
   const impactClear = quote === undefined || impactAllows(quote.priceImpactBps, impactAcknowledged)
 
-  const venue: TradeVenue = launch?.graduated ? 'pool' : 'curve'
-  // A buy on the curve spends through the launchpad, in the pool through the launch router. A sell needs no
-  // approval at all: the token lets either pull only from whoever is selling.
-  const spender = venue === 'curve' ? launchSuite.launchpad : launchSuite.launchRouter
+  // A buy on the curve spends through the token's launchpad, in the pool through its router (v1.3's launch router or
+  // v1.4's v4 router). A sell needs no approval at all: the token lets either pull only from whoever is selling.
+  const launchpadAddress = v14 ? launchSuiteV14.launchpad : launchSuite.launchpad
+  const routerAddress = v14 ? launchSuiteV14.router : launchSuite.launchRouter
+  const spender = venue === 'curve' ? launchpadAddress : routerAddress
   const allowance = venue === 'curve' ? usdcAllowance.launchpad : usdcAllowance.router
   const payToken = side === 'buy' ? usdc : token
   const balance = side === 'buy' ? usdcBalance : tokenBalance
@@ -113,12 +199,17 @@ export function useLaunchTrade({
     if (phase === 'approving') return 'approving'
     if (phase === 'quoteMoved') return 'quoteMoved'
     if (phase === 'pending') return 'pending'
-    if (launch?.graduated && !launch.pool) return 'poolLoading'
-    if (!quote) return 'enterAmount'
+    if (launch && !isPriced(launch)) return 'poolLoading'
+    // A pool quote on its way, or a v1.4 curve buy waiting for the chain's block, reads as quoting; a pool quote that
+    // came back unusable, or refused, as no quote.
+    if (!quote) {
+      const waiting = (inV4Pool && !poolQuoteError && !poolQuoteFresh) || curveAwaitsBlock
+      return parsedIn > 0n && waiting ? 'quoting' : 'enterAmount'
+    }
     if (!payToken || spendableBalance(payToken.address, balance) < required) return 'insufficientBalance'
     if (side === 'buy' && allowance < required) return 'needsApproval'
     return 'ready'
-  }, [account, allowance, balance, chainId, impactRefused, isConnected, launch?.graduated, launch?.pool, payToken, phase, quote, required, side])
+  }, [account, allowance, balance, chainId, curveAwaitsBlock, impactRefused, inV4Pool, isConnected, launch, parsedIn, payToken, phase, poolQuoteError, poolQuoteFresh, quote, required, side])
 
   const label = useMemo(() => {
     const symbol = token?.symbol ?? 'token'
@@ -131,6 +222,8 @@ export function useLaunchTrade({
         return 'Enter an amount'
       case 'poolLoading':
         return 'Reading the pool…'
+      case 'quoting':
+        return 'Quoting…'
       case 'insufficientBalance':
         return `Not enough ${payToken?.symbol ?? 'balance'}`
       case 'needsApproval':
@@ -156,6 +249,7 @@ export function useLaunchTrade({
 
     if (buttonState === 'quoteMoved') {
       setPhase('idle')
+      if (inV4Pool) void poolQuoteQuery.refetch()
       return
     }
 
@@ -174,7 +268,7 @@ export function useLaunchTrade({
             address: usdc.address,
             abi: erc20Abi,
             functionName: 'approve',
-            args: [venue === 'curve' ? deployment.launchpad : deployment.launchRouter, required],
+            args: [spender, required],
           })
           const receipt = await publicClient.waitForTransactionReceipt({ hash })
           if (receipt.status !== 'success') throw new Error('Transaction reverted')
@@ -191,13 +285,21 @@ export function useLaunchTrade({
       if (!fixtureOn && publicClient) {
         let chainOut: bigint
         if (venue === 'curve') {
+          const abi = v14 ? launchpadV14Abi : launchpadAbi
           chainOut = side === 'buy'
-            ? (await publicClient.readContract({ address: deployment.launchpad, abi: launchpadAbi, functionName: 'quoteBuy', args: [launch.token, quote.offer] }))[0]
-            : (await publicClient.readContract({ address: deployment.launchpad, abi: launchpadAbi, functionName: 'quoteSell', args: [launch.token, quote.offer] }))[0]
+            ? (await publicClient.readContract({ address: launchpadAddress, abi, functionName: 'quoteBuy', args: [launch.token, quote.offer] }))[0]
+            : (await publicClient.readContract({ address: launchpadAddress, abi, functionName: 'quoteSell', args: [launch.token, quote.offer] }))[0]
+        } else if (inV4Pool) {
+          chainOut = await publicClient.readContract({
+            address: routerAddress,
+            abi: v4RouterAbi,
+            functionName: side === 'buy' ? 'quoteBuy' : 'quoteSell',
+            args: [launch.token, quote.offer],
+          })
         } else {
           chainOut = side === 'buy'
-            ? (await publicClient.readContract({ address: deployment.launchRouter, abi: launchRouterAbi, functionName: 'quoteBuy', args: [launch.token, quote.offer] }))[0]
-            : (await publicClient.readContract({ address: deployment.launchRouter, abi: launchRouterAbi, functionName: 'quoteSell', args: [launch.token, quote.offer] }))[0]
+            ? (await publicClient.readContract({ address: routerAddress, abi: launchRouterAbi, functionName: 'quoteBuy', args: [launch.token, quote.offer] }))[0]
+            : (await publicClient.readContract({ address: routerAddress, abi: launchRouterAbi, functionName: 'quoteSell', args: [launch.token, quote.offer] }))[0]
         }
         if (chainOut < quote.minReceived) {
           setPhase('quoteMoved')
@@ -214,26 +316,37 @@ export function useLaunchTrade({
         hash = side === 'buy' ? api.buy(account, launch.token, quote.offer).hash : api.sell(account, launch.token, quote.offer).hash
       } else {
         if (!publicClient) return
-        // One deadline for both venues, from the sheet's settings: the curve and the launch router both revert
-        // Expired once block.timestamp is past it.
+        // One deadline for every venue, from the sheet's settings: the curve, the launch router and the v4 router all
+        // revert Expired once block.timestamp is past it.
         const deadline = BigInt(Math.floor(Date.now() / 1_000) + deadlineMinutes * 60)
+        const args = [launch.token, quote.offer, quote.minReceived, account, deadline] as const
         // The offer, not the quoted spend: on the curve's sell-out buy the spend can be one unit below the smallest
         // offer that sells out, so offering only the spend could buy a hair less and not graduate.
+        // Gas: a v1.4 buy while its window is open on chain (`snipeBpsOf`, asked now) goes out with a limit of its own,
+        // a fresh estimate of this exact call times 1.3 or plus 200,000 (lib/windowGas.ts): in a pool's window the bid
+        // it places costs more when other trades have just moved the price onto new ticks. Everything else keeps the
+        // wallet's own estimate. The 0.1 USDC gas reserve (lib/gasReserve.ts) covers either limit.
+        const windowClosed = opened !== undefined && block !== undefined && block >= snipeWindowEnd(opened)
+        const gas = await launchTradeGas(
+          { side, v14, windowClosed },
+          {
+            snipeBps: () =>
+              venue === 'curve'
+                ? publicClient.readContract({ address: launchpadAddress, abi: launchpadV14Abi, functionName: 'snipeBpsOf', args: [launch.token] })
+                : publicClient.readContract({ address: launchSuiteV14.hook, abi: launchHookAbi, functionName: 'snipeBpsOf', args: [launch.token] }),
+            estimate: () =>
+              venue === 'curve'
+                ? publicClient.estimateContractGas({ account, address: launchpadAddress, abi: launchpadV14Abi, functionName: 'buy', args })
+                : publicClient.estimateContractGas({ account, address: routerAddress, abi: v4RouterAbi, functionName: 'buy', args }),
+          },
+        )
         hash = venue === 'curve'
-          ? await writeContractAsync({
-              chainId: activeChain.id,
-              address: deployment.launchpad,
-              abi: launchpadAbi,
-              functionName: side,
-              args: [launch.token, quote.offer, quote.minReceived, account, deadline],
-            })
-          : await writeContractAsync({
-              chainId: activeChain.id,
-              address: deployment.launchRouter,
-              abi: launchRouterAbi,
-              functionName: side,
-              args: [launch.token, quote.offer, quote.minReceived, account, deadline],
-            })
+          ? v14
+            ? await writeContractAsync({ chainId: activeChain.id, address: launchpadAddress, abi: launchpadV14Abi, functionName: side, args, gas })
+            : await writeContractAsync({ chainId: activeChain.id, address: launchpadAddress, abi: launchpadAbi, functionName: side, args })
+          : v14
+            ? await writeContractAsync({ chainId: activeChain.id, address: routerAddress, abi: v4RouterAbi, functionName: side, args, gas })
+            : await writeContractAsync({ chainId: activeChain.id, address: routerAddress, abi: launchRouterAbi, functionName: side, args })
         setTxStatus({ kind: 'pending', hash })
         const receipt = await publicClient.waitForTransactionReceipt({ hash })
         if (receipt.status !== 'success') throw new Error('Transaction reverted')
@@ -257,20 +370,27 @@ export function useLaunchTrade({
     }
   }, [
     account,
+    block,
     buttonState,
     deadlineMinutes,
     impactClear,
+    inV4Pool,
     launch,
+    launchpadAddress,
     onClear,
     onConfirmed,
+    opened,
+    poolQuoteQuery,
     publicClient,
     quote,
     required,
+    routerAddress,
     side,
     spender,
     token,
     usdc.address,
     usdc.decimals,
+    v14,
     venue,
     writeContractAsync,
   ])
@@ -290,12 +410,19 @@ export function useLaunchTrade({
   return {
     quote,
     venue,
+    /**
+     * v1.4's anti-sniping fee on a buy, in bps: the quote's own rate once there is one, else the latest block's; 0
+     * outside the window, for sells and on v1.3.
+     */
+    snipeBps: quote ? quote.snipeBps : snipe,
+    /** Why the pool could not quote the typed amount, in a sentence. */
+    quoteError: poolQuoteError,
     buttonState,
     label,
     hint,
     isLoading: buttonState === 'approving' || buttonState === 'pending',
     isDisabled:
-      ['enterAmount', 'poolLoading', 'insufficientBalance', 'pending', 'impactTooHigh'].includes(buttonState)
+      ['enterAmount', 'poolLoading', 'quoting', 'insufficientBalance', 'pending', 'impactTooHigh'].includes(buttonState)
       || (!impactClear && (buttonState === 'needsApproval' || buttonState === 'ready')),
     txStatus,
     execute,

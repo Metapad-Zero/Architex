@@ -5,6 +5,8 @@ dist
 .env.*
 contracts/out
 contracts/cache
+contracts-v14/out
+contracts-v14/cache
 .impeccable/review
 .agents/skills/impeccable
 

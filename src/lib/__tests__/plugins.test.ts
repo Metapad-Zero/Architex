@@ -1,10 +1,13 @@
 import { describe, expect, test } from 'bun:test'
 import { decodeAbiParameters, getAddress, zeroAddress, type Address, type Hex } from 'viem'
+import { listedPlugin } from '../../content/plugins/registry'
 import type { LaunchSuite } from '../deployment'
 import { destinationLabel, destinationName, feeDestination } from '../plugins/destination'
 import { dividendStatus, hasDividends, hourlyRate, roughly } from '../plugins/holders'
 import {
   bpsToPercentText,
+  comboRival,
+  emptyTarget,
   encodeSplitData,
   parsePercentBps,
   planFeePlugin,
@@ -13,6 +16,7 @@ import {
   type FeePlan,
   type PayeeRow,
   type PlanContext,
+  type SimpleTarget,
 } from '../plugins/plan'
 import vectors from './fixtures/v13-vectors.json'
 
@@ -25,6 +29,7 @@ const suite: LaunchSuite = {
   buybackPlugin: getAddress('0x6666666666666666666666666666666666666666'),
   holderPlugin: getAddress('0x00000000000000000000000000000000000000e3'),
   comboPlugin: getAddress('0x00000000000000000000000000000000000000e4'),
+  deepenPlugin: getAddress('0x00000000000000000000000000000000000000e5'),
 }
 const usdc = getAddress('0x3600000000000000000000000000000000000000')
 const creator = getAddress('0x00000000000000000000000000000000000000c1')
@@ -83,12 +88,29 @@ describe('where creator fees go: a single destination', () => {
     expect(planFeePlugin({ kind: 'custom', address: bob }, ctx).plan).toEqual({ plugin: bob, pluginData: '0x' })
   })
 
-  test('Buyback & burn and Distribute to holders are their singletons with empty data', () => {
-    expect(planFeePlugin({ kind: 'buyback' }, ctx).plan).toEqual({ plugin: suite.buybackPlugin, pluginData: '0x' })
+  test('Distribute to holders is its singleton with empty data', () => {
     expect(planFeePlugin({ kind: 'holders' }, ctx).plan).toEqual({ plugin: suite.holderPlugin, pluginData: '0x' })
     const undeployed = planFeePlugin({ kind: 'holders' }, { ...ctx, suite: { ...suite, holderPlugin: zeroAddress } })
     expect(undeployed.plan).toBe(undefined)
     expect(undeployed.errors.holders).toBe('Distribute to holders is not deployed on this network yet.')
+  })
+})
+
+describe('a paused plugin', () => {
+  test('Buyback & burn is refused for a new launch: from the list, as a Combo entry, or by pasting its address', () => {
+    const direct = planFeePlugin({ kind: 'buyback' }, ctx)
+    expect(direct.plan).toBe(undefined)
+    expect(direct.errors.buyback).toBe('Buyback & burn is paused for new launches.')
+    const inCombo = planFeePlugin({ kind: 'combo', entries: [entry('b', { kind: 'buyback' }, '100')] }, ctx)
+    expect(inCombo.plan).toBe(undefined)
+    expect(inCombo.errors['entry:b:target']).toBe('Buyback & burn is paused for new launches.')
+    const pasted = 'That is the Buyback & burn plugin, which is paused for new launches.'
+    expect(planFeePlugin({ kind: 'custom', address: suite.buybackPlugin }, ctx).errors.custom).toBe(pasted)
+    expect(planFeePlugin({ kind: 'combo', entries: [entry('c', { kind: 'custom', address: suite.buybackPlugin }, '100')] }, ctx).errors['entry:c:target']).toBe(pasted)
+  })
+
+  test('a token that already sends its fees to it still names it', () => {
+    expect(destinationName(feeDestination({ plugin: suite.buybackPlugin, creator, pluginHooks: true }, suite))).toBe('Buyback & burn')
   })
 })
 
@@ -189,13 +211,16 @@ describe('Combo', () => {
   const combo = (entries: ComboEntry[]): FeePlan => ({ kind: 'combo', entries })
 
   test('reproduces the Solidity encoding of a Split, a plugin with no data and a wallet', () => {
+    // The vector's plugin with no data sits at the address this suite gives Buyback & burn, which is paused for new
+    // launches; Distribute to holders, moved to that address, takes its place (the encoding only sees the address).
+    const vectorCtx = { ...ctx, suite: { ...suite, holderPlugin: suite.buybackPlugin, buybackPlugin: getAddress('0x0000000000000000000000000000000000006667') } }
     const result = planFeePlugin(
       combo([
         entry('s', { kind: 'split', payees: [payee('a', alice, '50'), payee('b', bob, '30'), payee('c', carol, '20')] }, '50'),
-        entry('b', { kind: 'buyback' }, '33.33'),
+        entry('b', { kind: 'holders' }, '33.33'),
         entry('w', { kind: 'wallet', address: '0x00000000000000000000000000000000000000A1' }, '16.67'),
       ]),
-      ctx,
+      vectorCtx,
     )
     expect(result.errors).toEqual({})
     expect(result.plan?.plugin).toBe(suite.comboPlugin)
@@ -215,10 +240,10 @@ describe('Combo', () => {
     expect(planFeePlugin(combo([]), ctx).errors.entries).toBe('Add at least one destination.')
     const six = Array.from({ length: 6 }, (_, i) => entry(`e${i}`, { kind: 'custom', address: getAddress(`0x${(0x2000 + i).toString(16).padStart(40, '0')}`) }, '10'))
     expect(planFeePlugin(combo(six), ctx).errors.entries).toBe('A Combo takes at most 5 destinations.')
-    expect(planFeePlugin(combo([entry('a', { kind: 'buyback' }, '50'), entry('b', { kind: 'holders' }, '40')]), ctx).errors.entries).toBe(
+    expect(planFeePlugin(combo([entry('a', { kind: 'custom', address: bob }, '50'), entry('b', { kind: 'holders' }, '40')]), ctx).errors.entries).toBe(
       'The shares add up to 90.00%. They must add up to 100%.',
     )
-    expect(planFeePlugin(combo([entry('a', { kind: 'buyback' }, '100'), entry('b', { kind: 'holders' }, '0')]), ctx).errors['entry:b:percent']).toBe(
+    expect(planFeePlugin(combo([entry('a', { kind: 'custom', address: bob }, '100'), entry('b', { kind: 'holders' }, '0')]), ctx).errors['entry:b:percent']).toBe(
       'Give each destination more than 0%.',
     )
     const twice = planFeePlugin(combo([entry('a', { kind: 'custom', address: alice }, '50'), entry('b', { kind: 'wallet', address: alice.toLowerCase() }, '50')]), ctx)
@@ -226,11 +251,95 @@ describe('Combo', () => {
     expect(planFeePlugin(combo([entry('a', { kind: 'custom', address: suite.comboPlugin }, '100')]), ctx).errors['entry:a:target']).toBe(
       'A Combo cannot include itself.',
     )
-    expect(planFeePlugin(combo([entry('a', { kind: 'custom', address: suite.buybackPlugin }, '100')]), ctx).errors['entry:a:target']).toBe(
-      'That is the Buyback & burn plugin. Add it as its own destination so it is set up.',
+    expect(planFeePlugin(combo([entry('a', { kind: 'custom', address: suite.splitPlugin }, '100')]), ctx).errors['entry:a:target']).toBe(
+      'That is the Split plugin. Add it as its own destination so it is set up.',
     )
     const badPayee = planFeePlugin(combo([entry('s', { kind: 'split', payees: [payee('x', usdc)] }, '100')]), ctx)
     expect(badPayee.errors['entry:s:payee:x:address']).toBe('That is the USDC contract. USDC sent to it is lost.')
+  })
+})
+
+describe('Deepen pool', () => {
+  const deepen = (burnShare: string): SimpleTarget => ({ kind: 'deepen', burnShare })
+  /** abi.encode(uint16 burnBps): one 32-byte word, the only encoding DeepenPoolPlugin.onLaunch accepts. */
+  const burnShare = (bps: number): Hex => `0x${bps.toString(16).padStart(64, '0')}`
+
+  test('starts at 50% and encodes the burn share as one canonical uint16, as DeepenPoolPlugin.onLaunch decodes it', () => {
+    expect(emptyTarget('deepen')).toEqual({ kind: 'deepen', burnShare: '50' })
+    expect(planFeePlugin(emptyTarget('deepen'), ctx).plan).toEqual({ plugin: suite.deepenPlugin, pluginData: burnShare(5_000) })
+    expect(planFeePlugin(deepen('0'), ctx).plan?.pluginData).toBe(burnShare(0))
+    expect(planFeePlugin(deepen('100'), ctx).plan?.pluginData).toBe(burnShare(10_000))
+    expect(planFeePlugin(deepen('33.33'), ctx).plan?.pluginData).toBe(burnShare(3_333))
+    expect(planFeePlugin(deepen('.5'), ctx).plan?.pluginData).toBe(burnShare(50))
+    expect(decodeAbiParameters([{ type: 'uint16' }], planFeePlugin(deepen('75'), ctx).plan!.pluginData)).toEqual([7_500])
+  })
+
+  test('refuses what DeepenPoolPlugin.onLaunch refuses, and anything that is not a percentage', () => {
+    expect(planFeePlugin(deepen('100.01'), ctx).errors.burnShare).toBe('At most 100.00%.')
+    expect(planFeePlugin(deepen('150'), ctx).plan).toBe(undefined)
+    expect(planFeePlugin(deepen(''), ctx).errors.burnShare).toBe('Enter a percentage.')
+    expect(planFeePlugin(deepen('12.345'), ctx).errors.burnShare).toBe('Use a number with up to two decimals, like 2.5.')
+    const undeployed = planFeePlugin(deepen('50'), { ...ctx, suite: { ...suite, deepenPlugin: zeroAddress } })
+    expect(undeployed.plan).toBe(undefined)
+    expect(undeployed.errors.deepen).toBe('Deepen pool is not deployed on this network yet.')
+  })
+
+  test('its address is refused when pasted, and as a Split payee', () => {
+    expect(planFeePlugin({ kind: 'custom', address: suite.deepenPlugin }, ctx).errors.custom).toBe(
+      'That is the Deepen pool plugin. Choose it from the list so it is set up.',
+    )
+    expect(planFeePlugin({ kind: 'split', payees: [payee('a', suite.deepenPlugin)] }, ctx).errors['payee:a:address']).toBe(
+      'That is the Deepen pool plugin. USDC a Split pays it is credited to no token and is lost.',
+    )
+  })
+
+  test('a token that sends its fees to it is named for it', () => {
+    expect(destinationName(feeDestination({ plugin: suite.deepenPlugin, creator, pluginHooks: true }, suite))).toBe('Deepen pool')
+  })
+
+  describe('in a Combo', () => {
+    const combo = (entries: ComboEntry[]): FeePlan => ({ kind: 'combo', entries })
+    const paired =
+      'Deepen pool and Buyback & burn cannot share a Combo: each paces its own spending, so together they spend twice as fast, which weakens the protection against traders buying ahead of the runs. Use Deepen pool’s burn share instead.'
+
+    test('the Combo forwards its burn share', () => {
+      const result = planFeePlugin(combo([entry('h', { kind: 'holders' }, '60'), entry('d', deepen('75'), '40')]), ctx)
+      expect(result.errors).toEqual({})
+      expect(result.plan?.plugin).toBe(suite.comboPlugin)
+      const [targets, bps, datas] = decodeAbiParameters([{ type: 'address[]' }, { type: 'uint16[]' }, { type: 'bytes[]' }], result.plan!.pluginData)
+      expect(targets).toEqual([suite.holderPlugin, suite.deepenPlugin])
+      expect(bps).toEqual([6_000, 4_000])
+      expect(datas).toEqual(['0x', burnShare(7_500)])
+      expect(planFeePlugin(combo([entry('d', deepen('101'), '100')]), ctx).errors['entry:d:burnShare']).toBe('At most 100.00%.')
+      expect(planFeePlugin(combo([entry('a', { kind: 'custom', address: suite.deepenPlugin }, '100')]), ctx).errors['entry:a:target']).toBe(
+        'That is the Deepen pool plugin. Add it as its own destination so it is set up.',
+      )
+    })
+
+    test('never beside Buyback & burn, in either order', () => {
+      expect([comboRival('deepen'), comboRival('buyback'), comboRival('holders'), comboRival('split')]).toEqual(['buyback', 'deepen', undefined, undefined])
+      const after = planFeePlugin(combo([entry('d', deepen('50'), '50'), entry('b', { kind: 'buyback' }, '50')]), ctx)
+      expect(after.plan).toBe(undefined)
+      expect(after.errors['entry:b:target']).toBe(paired)
+      const before = planFeePlugin(combo([entry('b', { kind: 'buyback' }, '50'), entry('d', deepen('50'), '50')]), ctx)
+      expect(before.plan).toBe(undefined)
+      expect(before.errors['entry:d:target']).toBe(paired)
+    })
+
+    test('and still not once Buyback & burn is offered again', () => {
+      const buyback = listedPlugin('buyback')
+      const paused = buyback.paused
+      buyback.paused = undefined
+      try {
+        expect(planFeePlugin(combo([entry('b', { kind: 'buyback' }, '50'), entry('h', { kind: 'holders' }, '50')]), ctx).errors).toEqual({})
+        const both = planFeePlugin(combo([entry('b', { kind: 'buyback' }, '50'), entry('d', deepen('50'), '50')]), ctx)
+        expect(both.plan).toBe(undefined)
+        expect(both.errors).toEqual({ 'entry:d:target': paired })
+      } finally {
+        buyback.paused = paused
+      }
+      expect(listedPlugin('buyback').paused).toBe('Paused for new launches. Deepen pool at a 100% burn share does the same job.')
+    })
   })
 })
 

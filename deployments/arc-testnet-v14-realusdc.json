@@ -1,0 +1,56 @@
+{
+  "chainId": 5042002,
+  "network": "Arc Testnet",
+  "mode": "real-usdc",
+  "deployer": "0x7212fA4Fe663d063A7a83dA0467d592ed3A51D46",
+  "commit": "3bc28ab",
+  "usdc": "0x3600000000000000000000000000000000000000",
+  "poolManager": "0x8366a39CC670B4001A1121B8F6A443A643e40951",
+  "create2Deployer": "0x4e59b44847b379578588920cA78FbF26c0B4956C",
+  "launchpad": "0x5abc3eA7416fAaE83d5B6d4046E3F67718EA4592",
+  "hook": "0xa17E63F995831e60769743c7195e82835Ff8e8Ec",
+  "hookSalt": "0x00000000000000000000000000000000000000000000000000000000000027a3",
+  "router": "0x433E576B36890F1D516C8C678BE932778f7b4c13",
+  "plugins": {
+    "split": "0x67e087811E5953Ea447eD5c7ac83c3C7BDE3D7fe",
+    "holders": "0x3C87c4AcDb4fB00F0C1E3567aFa6B9Eb940b316B",
+    "combo": "0x9668A944A320326BB72f7DBEd93E1a4AC67C416A"
+  },
+  "launchFee": "0",
+  "feeTo": "0x7212fA4Fe663d063A7a83dA0467d592ed3A51D46",
+  "feeToSetter": "0x7212fA4Fe663d063A7a83dA0467d592ed3A51D46",
+  "deployedAt": "2026-09-26T06:08:28.000Z",
+  "txs": {
+    "launchpad": "0xffb23f546807a097b336e1a024c599afa342f1a49570ddd9d3d6d40ae431c849",
+    "hook": "0xb45645c8013b14019a6a947dd7e44c52b791ce37871773c895d1ea9355915497",
+    "router": "0x7e7cda7e65aa084dc8326bb168e0ee78d9717f28502469a777df782197f51170",
+    "initialize": "0x01e261754bf42e3d86adfc08eff84599b32fdbe81cdca1ada21713e401c82008",
+    "split": "0x63f3aba0de799d4d71972bdfe1e2184f58f0ed182dac01e5008616f08b8a8af6",
+    "holders": "0x6361f470f391a27816b31c6ff932f2a3c087b6eb6fec211230a89e7de287ab49",
+    "combo": "0x1c48f5898241768d610452e7257ef654d9bb0b6129ba8a6826f0d903052bb2cf"
+  },
+  "rehearsal": {
+    "actor": "0x7212fA4Fe663d063A7a83dA0467d592ed3A51D46",
+    "signer": "key",
+    "rawSwapper": null,
+    "tokens": {
+      "RARC": {
+        "address": "0x516d7d4cA63F359CceB94c172496a63E2817b314",
+        "kind": "wallet",
+        "creatorFeeBps": 100,
+        "open": false,
+        "usdcIsCurrency0": true,
+        "poolId": null
+      }
+    },
+    "steps": 8,
+    "transactions": 15,
+    "checks": 191,
+    "gas": {
+      "deploy": "12114234",
+      "drive": "2324017"
+    },
+    "usdcAt25Gwei": "0.360956",
+    "finishedAt": "2026-09-26T06:09:02.114Z"
+  }
+}

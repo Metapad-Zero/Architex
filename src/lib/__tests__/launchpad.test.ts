@@ -1,11 +1,11 @@
 import { describe, expect, test } from 'bun:test'
 import { decodeErrorResult, encodeErrorResult, encodeFunctionData, getAddress, parseAbi, zeroAddress, type Hex } from 'viem'
-import { buybackPluginAbi, launchRouterAbi, launchTokenAbi, launchpadAbi, launchpadWithPluginErrorsAbi, splitPluginAbi } from '../abi'
+import { buybackPluginAbi, deepenPluginAbi, launchRouterAbi, launchTokenAbi, launchpadAbi, launchpadWithPluginErrorsAbi, splitPluginAbi } from '../abi'
 import type { LaunchSuite } from '../deployment'
 import { explainRevert } from '../errors'
 import { formatCurveSold, soldLabel, utf8ByteLength } from '../launch'
 import { holderPluginAbi } from '../plugins/holders'
-import { encodeComboData, encodeSplitData } from '../plugins/plan'
+import { encodeBurnShareData, encodeComboData, encodeSplitData } from '../plugins/plan'
 import { describeLaunchRouterCall, describeLaunchTokenCall, describeLaunchpadCall, describePluginCall } from '../signingIntent'
 import type { Token } from '../tokens'
 
@@ -23,6 +23,7 @@ const suite: LaunchSuite = {
   buybackPlugin: getAddress('0x00000000000000000000000000000000000000e2'),
   holderPlugin: getAddress('0x00000000000000000000000000000000000000e3'),
   comboPlugin: getAddress('0x00000000000000000000000000000000000000e4'),
+  deepenPlugin: getAddress('0x00000000000000000000000000000000000000e5'),
 }
 
 const tokens: Token[] = [
@@ -50,8 +51,20 @@ describe('launchpad copy and validation', () => {
   test('explains the plugins’ refusals too', () => {
     expect(explainRevert('DuplicatePayee')).toBe('The same address is in the Split twice.')
     expect(explainRevert('BpsSumNot10000')).toBe('The Combo shares must add up to exactly 100%.')
-    expect(explainRevert('AlreadyRanThisBlock')).toBe('A buyback already ran in this block. Try again in a moment.')
+    // Buyback & burn and Deepen pool share the run errors, so the sentences name neither.
+    expect(explainRevert('AlreadyRanThisBlock')).toBe('It already ran for this token in this block. Try again in a moment.')
+    expect(explainRevert('NothingToBuy')).toBe('Nothing to buy with yet: no USDC is waiting, or the budget is still building up since the last run.')
+    expect(explainRevert('InvalidBurnBps')).toBe('The burn share can be at most 100%.')
     expect(explainRevert('NotConfigured')).toBe('That plugin does not serve this token.')
+  })
+
+  test('decodes Deepen pool’s refusals: the run’s from its own ABI, the burn share’s from createToken', () => {
+    for (const errorName of ['NothingToBuy', 'AlreadyRanThisBlock'] as const) {
+      const data = encodeErrorResult({ abi: deepenPluginAbi, errorName, args: [token] })
+      expect(decodeErrorResult({ abi: deepenPluginAbi, data }).errorName).toBe(errorName)
+    }
+    const tooHigh = encodeErrorResult({ abi: launchpadWithPluginErrorsAbi, errorName: 'InvalidBurnBps', args: [10_001n] })
+    expect(explainRevert(decodeErrorResult({ abi: launchpadWithPluginErrorsAbi, data: tooHigh }).errorName)).toBe('The burn share can be at most 100%.')
   })
 
   test('explains the review’s new refusals', () => {
@@ -114,6 +127,27 @@ describe('launchpad signing intent', () => {
       { label: 'Split · 2 payees', value: '50.00%' },
       { label: 'Distribute to holders', value: '30.00%' },
       { label: 'Wallet 0x1111…1111', value: '20.00%' },
+    ])
+  })
+
+  test('spells out Deepen pool’s burn share, on its own and in a Combo', () => {
+    const own = describeLaunchpadCall(createToken(100, suite.deepenPlugin, encodeBurnShareData(2_500)), account, tokens, suite)
+    expect(own?.lines.slice(3, 5)).toEqual([
+      { label: 'Fees go to', value: 'Deepen pool' },
+      { label: 'Burn share', value: '25.00%' },
+    ])
+    // Empty data is the plugin's default, half and half.
+    expect(describeLaunchpadCall(createToken(100, suite.deepenPlugin, '0x'), account, tokens, suite)?.lines[4]).toEqual({ label: 'Burn share', value: '50.00%' })
+    const combo = describeLaunchpadCall(
+      createToken(100, suite.comboPlugin, encodeComboData([suite.holderPlugin, suite.deepenPlugin], [6_000, 4_000], ['0x', encodeBurnShareData(7_500)])),
+      account,
+      tokens,
+      suite,
+    )
+    expect(combo?.lines.slice(3, 6)).toEqual([
+      { label: 'Fees go to', value: 'Combo' },
+      { label: 'Distribute to holders', value: '60.00%' },
+      { label: 'Deepen pool · 75.00% burn share', value: '40.00%' },
     ])
   })
 
@@ -181,6 +215,9 @@ describe('launchpad signing intent', () => {
     expect(release?.lines[1]).toEqual({ label: 'Paid to', value: 'You' })
     const run = describePluginCall(suite.buybackPlugin, encodeFunctionData({ abi: buybackPluginAbi, functionName: 'run', args: [token] }), account, tokens, suite)
     expect(run?.title).toBe('Run DOGE buyback')
+    const deepen = describePluginCall(suite.deepenPlugin, encodeFunctionData({ abi: deepenPluginAbi, functionName: 'run', args: [token] }), account, tokens, suite)
+    expect(deepen?.title).toBe('Run Deepen pool')
+    expect(deepen?.lines).toEqual([{ label: 'Token', value: 'DOGE' }])
     // Distribute to holders only forwards fees to the token: it has no action of its own to describe.
     expect(describePluginCall(suite.holderPlugin, encodeFunctionData({ abi: holderPluginAbi, functionName: 'totalDistributed', args: [token] }), account, tokens, suite)).toBe(undefined)
     // The same calldata sent to an address that is not the listed plugin is not described as that plugin's action.

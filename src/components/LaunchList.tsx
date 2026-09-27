@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import type { Address } from 'viem'
-import { launchFacts, type LaunchRecord } from '../lib/launch'
+import { builderVersion } from '../lib/deployment'
+import { isPriced, launchFacts, type LaunchRecord } from '../lib/launch'
 import { parseLaunchAddress } from '../lib/launchPages'
 import { destinationLabel, feeDestination } from '../lib/plugins/destination'
 import { relativeTime } from '../lib/recent'
@@ -42,7 +43,9 @@ export function LaunchList({ onOpen, onCreate }: LaunchListProps) {
         <div>
           <h1 className="text-xl font-semibold tracking-[-0.02em]">Launch</h1>
           <p className="mt-2 max-w-xl text-sm text-g500">
-            Launch a token on a bonding curve, with a creator fee of up to 10% on every trade sent where you choose. When the curve sells out, its liquidity moves to the token’s own launch pool and is locked for good.
+            {builderVersion === 'v14'
+              ? 'Launch a token on a bonding curve, with a creator fee of up to 10% on every trade sent where you choose. When the curve sells out, its liquidity opens the token’s own Uniswap v4 pool and is locked there for good.'
+              : 'Launch a token on a bonding curve, with a creator fee of up to 10% on every trade sent where you choose. When the curve sells out, its liquidity moves to the token’s own launch pool and is locked for good.'}
           </p>
         </div>
         <GhostButton className="shrink-0 whitespace-nowrap" onClick={onCreate}>Create a token</GhostButton>
@@ -127,7 +130,7 @@ function LaunchRow({ launch, now, onOpen }: { launch: LaunchRecord; now: number;
           </span>
         </button>
       </th>
-      <td data-label="Market cap">{launch.graduated && !launch.pool ? GHOST : facts.cap}</td>
+      <td data-label="Market cap">{isPriced(launch) ? facts.cap : GHOST}</td>
       <td data-label="Creator fee">
         <span className="launch-fee">
           <FeeGauge bps={launch.creatorFeeBps} label={`${launch.symbol} creator fee`} />

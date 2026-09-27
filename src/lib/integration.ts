@@ -35,3 +35,15 @@ export const LAUNCH_TOPICS = {
   PoolTrade: '0x6bc65ab609361247b21bdca12478db9bc5435fba69d50ecab2495d3109d1ca78',
   LaunchPairCreated: '0xc1db9ba7c4b7ce660fe8d17bbcf07167549381df2abd694a970bd1402d86d313',
 } as const satisfies Record<string, Hex>
+
+/** Launchpad v1.4's own events: the launchpad's, and the hook's (every v1.4 pool's trades and locks). */
+export const LAUNCH_V14_TOPICS = {
+  TokenCreated: '0xe8417223fa785d687f775abe65b3a9062151fabf4c6d5b2c02e7406d33c8a43f',
+  Trade: '0xd5bfddbe72aa2c9b73b3fe3ad6d90e4dc2bb1b80d51272e831927c33f587a441',
+  Graduated: '0x819fcdd992a6bd4039b37fd3f53611638e48a1ec83bfad5050f26b0f5f5d7dae',
+  PoolOpened: '0xbcd8140ba57b584223c260db25386ddf8f5805d690e00e25a36a9b8fe574c9ad',
+  PoolTrade: '0x9a96e557d7ca9d7ffdc15090e918b600cf14e24d23aca695e344f0f896d7ca1c',
+  BidLocked: '0x4ff958855c24f443feb330e3d64c24afe5379fe97e10eac93d6687076e679739',
+  FeesReleased: '0xaf3cb1d4e3118cf86dcc5a60d719c346f961a5ed8bdf30e5df48750b162d81dd',
+  PoolFeesAccrued: '0x224ebb718a43a951a3eefba40c38ae681d4a27940b58fe8d89750d3ef81f5398',
+} as const satisfies Record<string, Hex>

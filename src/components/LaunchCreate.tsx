@@ -8,7 +8,7 @@ import { useDestinationProbe } from '../hooks/useDestinationProbe'
 import { useLaunch } from '../hooks/useLaunch'
 import { useSettings } from '../hooks/useSettings'
 import { parseOptionalAmount, sanitizeAmount } from '../lib/amountInput'
-import { deployment, launchSuite } from '../lib/deployment'
+import { builderVersion, deployment, launchSuiteV14, suiteFor } from '../lib/deployment'
 import { GHOST, formatAmount, formatPct } from '../lib/format'
 import { metadataStatus } from '../lib/ipfs'
 import { NAME_MAX_BYTES, SYMBOL_MAX_BYTES, utf8ByteLength } from '../lib/launch'
@@ -27,6 +27,16 @@ import { useSwitchToArc } from '../hooks/useSwitchToArc'
 interface LaunchCreateProps {
   onCreated: (token: Address) => void
 }
+
+/** v1.4's choice of who may add liquidity to the token's Uniswap pool once it graduates, closed first (the default). */
+const POOL_CHOICES = [
+  { open: false, name: 'Closed pool', tagline: 'Only the launch liquidity, locked for good.' },
+  { open: true, name: 'Open pool', tagline: 'Anyone can add their own liquidity too.' },
+] as const
+
+/** The launchpad new launches go to, and the plugins deployed for it. */
+const LAUNCHPAD = { suite: suiteFor(builderVersion), version: builderVersion }
+const V14 = builderVersion === 'v14'
 
 export function LaunchCreate({ onCreated }: LaunchCreateProps) {
   const { address } = useAccount()
@@ -83,6 +93,8 @@ export function LaunchCreate({ onCreated }: LaunchCreateProps) {
   const fee = parsePercentBps(feeText, MAX_CREATOR_FEE_BPS, 0)
   const creatorFeeBps = fee.bps ?? 0
   const [plan, setPlan] = useState<FeePlan>({ kind: 'wallet', address: '' })
+  // v1.4: who may add liquidity to the token's pool once it graduates. Closed unless the creator opens it.
+  const [openPool, setOpenPool] = useState(false)
   // Every typed address is checked against the launchpad before the launch can go (launch pools, launch tokens,
   // the router and pair factory are refused on chain), and against ERC-165 (a plugin is never a Split payee).
   const facts = useDestinationProbe(useMemo(() => planAddresses(plan), [plan]))
@@ -91,8 +103,9 @@ export function LaunchCreate({ onCreated }: LaunchCreateProps) {
       planFeePlugin(plan, {
         creator: address,
         usdc: activeChain.usdc,
-        suite: launchSuite,
+        suite: LAUNCHPAD.suite,
         architexContracts: [deployment.factory, deployment.router, deployment.lens],
+        poolManager: launchSuiteV14.poolManager,
         facts,
       }),
     [address, facts, plan],
@@ -107,6 +120,7 @@ export function LaunchCreate({ onCreated }: LaunchCreateProps) {
     metadataURI: '',
     creatorFeeBps,
     pluginPlan: planned.plan,
+    openPool,
     valid,
     initialBuyUsdc,
     slippageBps: settings.slippageBps,
@@ -181,7 +195,9 @@ export function LaunchCreate({ onCreated }: LaunchCreateProps) {
       <div className="mb-10 max-w-xl">
         <h1 className="text-xl font-semibold tracking-[-0.02em]">Create a token</h1>
         <p className="mt-2 text-sm text-g500">
-          Name, symbol, creator fee and where the fees go are on-chain forever. The optional first buy happens in the same transaction, so nobody can buy before you.
+          {V14
+            ? 'Name, symbol, creator fee, where the fees go and who may add to its pool are on-chain forever. The optional first buy happens in the same transaction, so nobody can buy before you.'
+            : 'Name, symbol, creator fee and where the fees go are on-chain forever. The optional first buy happens in the same transaction, so nobody can buy before you.'}
         </p>
       </div>
 
@@ -227,6 +243,7 @@ export function LaunchCreate({ onCreated }: LaunchCreateProps) {
           <CreatorFeeField text={feeText} onText={setFeeText} showError={submitted} />
 
           <FeeDestinationPicker
+            launchpad={LAUNCHPAD}
             plan={plan}
             onPlan={setPlan}
             errors={planned.errors}
@@ -234,6 +251,39 @@ export function LaunchCreate({ onCreated }: LaunchCreateProps) {
             account={address}
             probed={facts.plugins}
           />
+
+          {V14 && (
+            <fieldset className="fee-destination">
+              <legend className="text-sm text-g500">Pool after graduation</legend>
+              <p className="mt-1 text-xs leading-5 text-g500">
+                When the curve sells out, the token moves to its own Uniswap v4 pool. Locked for good at launch, like the fee.
+              </p>
+              <div className="fee-options">
+                {POOL_CHOICES.map((choice) => (
+                  <label key={choice.name} className="fee-option" data-selected={openPool === choice.open}>
+                    <input
+                      type="radio"
+                      className="sr-only"
+                      name="pool-choice"
+                      value={choice.open ? 'open' : 'closed'}
+                      checked={openPool === choice.open}
+                      onChange={() => setOpenPool(choice.open)}
+                    />
+                    <span className="fee-option-name">{choice.name}</span>
+                    <span className="fee-option-tagline">{choice.tagline}</span>
+                  </label>
+                ))}
+              </div>
+              <p className="mt-3 text-sm leading-6 text-g700">
+                {openPool
+                  ? 'Anyone can add liquidity to the pool and take their own back out. The launch liquidity is locked either way: nobody can ever withdraw it.'
+                  : 'Nobody else can add liquidity to the pool. The launch liquidity is locked either way: nobody can ever withdraw it.'}
+              </p>
+              <p className="mt-1 text-xs leading-5 text-g500">
+                The pool charges no liquidity fee of its own, so liquidity added to an open pool earns nothing from trades.
+              </p>
+            </fieldset>
+          )}
 
           {detailsEnabled && (
             <fieldset className="launch-details">
@@ -323,8 +373,15 @@ export function LaunchCreate({ onCreated }: LaunchCreateProps) {
             </div>
             {submitted && firstBuyError && <p id="launch-first-buy-error" className="mt-2 text-sm text-loss" role="alert">{firstBuyError}</p>}
             <p className="mt-2 text-xs leading-5 text-g500">
-              Optional. This buy happens in the same transaction as the create, so nobody can buy before you. It pays both fees like any other buy.
+              {V14
+                ? 'Optional. This buy happens in the same transaction as the create, so nobody can buy before you, and it pays no anti-sniping fee. It pays both fees like any other buy.'
+                : 'Optional. This buy happens in the same transaction as the create, so nobody can buy before you. It pays both fees like any other buy.'}
             </p>
+            {V14 && (
+              <p className="mt-1 text-xs leading-5 text-g500">
+                For the first 20 blocks after launch (about 10 seconds), and again for 20 blocks after its pool opens, every buy also pays an anti-sniping fee that starts at 90% and falls to 0. It stays with the token, locked into its pool as liquidity nobody can withdraw.
+              </p>
+            )}
             {address && (
               <p className="mt-1 text-sm text-g500">Balance {formatAmount(usdcBalance, usdc.decimals)}</p>
             )}
@@ -345,6 +402,7 @@ export function LaunchCreate({ onCreated }: LaunchCreateProps) {
             </dd>
           </div>
           <div><dt>Fees go to</dt><dd>{planSummary(plan, address)}</dd></div>
+          {V14 && <div><dt>Pool</dt><dd>{openPool ? 'Uniswap v4 · open' : 'Uniswap v4 · closed'}</dd></div>}
           <div><dt>You receive</dt><dd className={create.firstBuy ? '' : 'text-g500'}>{receive}</dd></div>
           <div><dt>Fees on your buy</dt><dd className={create.firstBuy ? '' : 'text-g500'}>{buyFees}</dd></div>
           <div><dt>Total</dt><dd>{total}</dd></div>

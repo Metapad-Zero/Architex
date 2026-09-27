@@ -7,7 +7,7 @@
 import { zeroAddress, type Address } from 'viem'
 import { launchSuite, type LaunchSuite } from '../../lib/deployment'
 
-export type ListedPluginKind = 'split' | 'buyback' | 'holders' | 'combo'
+export type ListedPluginKind = 'split' | 'buyback' | 'deepen' | 'holders' | 'combo'
 
 export interface ListedPlugin {
   kind: ListedPluginKind
@@ -16,12 +16,23 @@ export interface ListedPlugin {
   tagline: string
   /** What happens to the fees, in the site's plain voice. */
   description: string
-  /** What the builder asks for: payees and shares, Combo allocations, or nothing. */
-  config: 'split' | 'combo' | 'none'
+  /** What the builder asks for: payees and shares, Combo allocations, a burn share, or nothing. */
+  config: 'split' | 'combo' | 'burnShare' | 'none'
   /** Which deployment entry holds the plugin's singleton address. */
-  suiteKey: keyof Pick<LaunchSuite, 'splitPlugin' | 'buybackPlugin' | 'holderPlugin' | 'comboPlugin'>
+  suiteKey: keyof Pick<LaunchSuite, 'splitPlugin' | 'buybackPlugin' | 'deepenPlugin' | 'holderPlugin' | 'comboPlugin'>
   /** Path from the repo root to the contract's source. */
   contractPath: string
+  /**
+   * Set while the plugin is closed to new launches: one short line, shown where the builder would offer it. The
+   * builder stops offering it, on its own and as a Combo entry; tokens that already chose it still show it and can
+   * still run it.
+   */
+  paused?: string
+  /**
+   * Set when the plugin has no deployment for launchpad v1.4 (a plugin binds to one launchpad when it is deployed,
+   * V14-SPEC §7): one short line, shown where the builder would offer it for a v1.4 launch.
+   */
+  notOnV14?: string
 }
 
 export const LISTED_PLUGINS: readonly ListedPlugin[] = [
@@ -44,6 +55,19 @@ export const LISTED_PLUGINS: readonly ListedPlugin[] = [
     config: 'none',
     suiteKey: 'buybackPlugin',
     contractPath: 'contracts/plugins/launch/BuybackBurnPlugin.sol',
+    paused: 'Paused for new launches. Deepen pool at a 100% burn share does the same job.',
+    notOnV14: 'Not offered for v1.4 launches.',
+  },
+  {
+    kind: 'deepen',
+    name: 'Deepen pool',
+    tagline: 'Burns the token and grows its pool, in one.',
+    description:
+      'Spends the fees buying the token and burning it while it is on the curve. Once it graduates, every run splits: your burn share buys the token and burns it, and the rest buys the token and adds it to the launch pool, locking the new liquidity at the burn address. Anyone can run it; it spends at most 0.25% of the curve’s USDC side, or of the pool’s locked USDC, per hour, whatever the mix.',
+    config: 'burnShare',
+    suiteKey: 'deepenPlugin',
+    contractPath: 'contracts/plugins/launch/DeepenPoolPlugin.sol',
+    notOnV14: 'Not available for v1.4 launches yet.',
   },
   {
     kind: 'holders',
@@ -59,7 +83,7 @@ export const LISTED_PLUGINS: readonly ListedPlugin[] = [
     kind: 'combo',
     name: 'Combo',
     tagline: 'Up to five of these, by percentage.',
-    description: 'Splits the fees across up to five destinations by percentage: wallets, a Split, Buyback & burn or Distribute to holders.',
+    description: 'Splits the fees across up to five destinations by percentage: wallets, a Split, Buyback & burn, Deepen pool or Distribute to holders.',
     config: 'combo',
     suiteKey: 'comboPlugin',
     contractPath: 'contracts/plugins/launch/ComboPlugin.sol',
@@ -79,6 +103,11 @@ export function pluginAddress(plugin: ListedPlugin, suite: LaunchSuite = launchS
 
 export function isPluginDeployed(plugin: ListedPlugin, suite: LaunchSuite = launchSuite): boolean {
   return pluginAddress(plugin, suite) !== zeroAddress
+}
+
+/** Whether the builder offers the plugin for a new launch: deployed on this network and not paused. */
+export function isPluginOffered(plugin: ListedPlugin, suite: LaunchSuite = launchSuite): boolean {
+  return isPluginDeployed(plugin, suite) && !plugin.paused
 }
 
 /** The listed plugin deployed at `address`, if any. */

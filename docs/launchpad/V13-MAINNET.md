@@ -33,11 +33,21 @@ testnet rehearsals, the second on the reviewed contracts; the only change since 
 | `BuybackBurnPlugin` | `0xB9Be42e021194e33866a0C43b36Ffb357369944D` |
 | `HolderDistributionPlugin` | `0x11278F83eb85fFB8987C59A62C316aB4E27CF012` |
 | `ComboPlugin` | `0x6f265D785191e7F13357940a2D4A94C35e54df9D` |
+| `DeepenPoolPlugin` (added 2026-09-25) | `0x50351E90A19491550b14e909C051fB2181613079` |
 
 Deployed by the owner from `0xc387…9cf60` (`feeTo` = `feeToSetter` = that wallet, launch fee 1 USDC). Gas: 7,528,131
 (0.171 USDC) for the launchpad suite, 4,152,048 (0.091 USDC) for the plugins. All seven match the local build byte
 for byte (`scripts/verify-bytecode.ts`, immutables and metadata masked), and the wiring reads back correctly on
 chain. Records: `broadcast/DeployLaunchpad.s.sol/5042/`, `broadcast/DeployLaunchPlugins.s.sol/5042/`.
+
+**Deepen pool, 2026-09-25** (V13-SPEC §2.3). Deployed by the owner from the same wallet with
+`contracts/script/DeployDeepenPool.s.sol` (`LAUNCHPAD` set to the launchpad above): tx
+`0xa26ce59b752717ac6d76a2f974eadf0d0416e5759e464d50b7e2baf8a849cf81`, block 22,703,890, 2,110,960 gas. It matches the
+local build byte for byte, reads back the launchpad, USDC and every pacing constant, declares `IArchitexFeePlugin`,
+and its source is verified on Sourcify (exact match, runtime and creation) and ArcScan. It has no owner, so nothing is
+handed over. Reviews: SECURITY.md §3c; Arc Testnet rehearsal: `DEEPEN-REHEARSAL.md`. Record:
+`broadcast/DeployDeepenPool.s.sol/5042/`. Buyback & burn above stays deployed but is paused in the builder (H1, V13-SPEC
+§2.2); Deepen pool at a 100% burn share does its job.
 
 Two things the deploy ran into, for next time: a terminal opened before Foundry was on the PATH needs
 `~/.foundry/bin/forge`; and Arc's RPC once answered Forge's EIP-1559 fee lookup with "request beyond head block"

@@ -1,12 +1,14 @@
 import { useId, useRef } from 'react'
 import type { Address } from 'viem'
-import { LISTED_PLUGINS, isPluginDeployed, listedPlugin, type ListedPluginKind } from '../content/plugins/registry'
+import { LISTED_PLUGINS, isPluginOffered, listedPlugin, type ListedPluginKind } from '../content/plugins/registry'
+import type { LaunchSuite, LaunchVersion } from '../lib/deployment'
 import { GHOST, formatPct, shortAddress } from '../lib/format'
 import {
   MAX_COMBO_ENTRIES,
   MAX_PAYEES,
   TOTAL_BPS,
   bpsToPercentText,
+  comboRival,
   emptyTarget,
   parsePercentBps,
   rowId,
@@ -28,14 +30,27 @@ const WALLET: Option = { kind: 'wallet', name: 'Creator wallet', tagline: 'Your 
 const CUSTOM: Option = { kind: 'custom', name: 'Custom address', tagline: 'Any address. Architex has not reviewed it.' }
 const OPTIONS: readonly Option[] = [WALLET, ...LISTED_PLUGINS.map((plugin) => ({ kind: plugin.kind, name: plugin.name, tagline: plugin.tagline })), CUSTOM]
 /** What a Combo entry can be: anything but another Combo (a Combo cannot include itself). */
-const ENTRY_KINDS: readonly SimpleTarget['kind'][] = ['wallet', 'split', 'buyback', 'holders', 'custom']
+const ENTRY_KINDS: readonly SimpleTarget['kind'][] = ['wallet', 'split', 'buyback', 'deepen', 'holders', 'custom']
 
 function isListedKind(kind: string): kind is ListedPluginKind {
-  return kind === 'split' || kind === 'buyback' || kind === 'holders' || kind === 'combo'
+  return kind === 'split' || kind === 'buyback' || kind === 'deepen' || kind === 'holders' || kind === 'combo'
 }
 
-function available(kind: FeePlanKind): boolean {
-  return !isListedKind(kind) || isPluginDeployed(listedPlugin(kind))
+/** The launchpad the builder creates on, whose plugins it offers: they bind to one launchpad when deployed. */
+interface Launchpad {
+  suite: LaunchSuite
+  version: LaunchVersion
+}
+
+function available(kind: FeePlanKind, launchpad: Launchpad): boolean {
+  return !isListedKind(kind) || isPluginOffered(listedPlugin(kind), launchpad.suite)
+}
+
+/** Why a listed plugin is not offered: none for this launchpad's version, paused for new launches, or not deployed here. */
+function unavailableReason(kind: FeePlanKind, launchpad: Launchpad): string {
+  if (!isListedKind(kind)) return 'Not deployed on this network yet.'
+  const plugin = listedPlugin(kind)
+  return (launchpad.version === 'v14' && plugin.notOnV14) || plugin.paused || 'Not deployed on this network yet.'
 }
 
 function kindName(kind: FeePlanKind): string {
@@ -43,9 +58,9 @@ function kindName(kind: FeePlanKind): string {
 }
 
 /** A new plan of `kind`, as the picker shows it when that kind is chosen. */
-export function initialPlan(kind: FeePlanKind, creator?: Address): FeePlan {
+export function initialPlan(kind: FeePlanKind, launchpad: Launchpad, creator?: Address): FeePlan {
   if (kind !== 'combo') return emptyTarget(kind, creator)
-  const second: SimpleTarget['kind'] = available('buyback') ? 'buyback' : 'custom'
+  const second: SimpleTarget['kind'] = available('buyback', launchpad) ? 'buyback' : available('holders', launchpad) ? 'holders' : 'custom'
   return {
     kind: 'combo',
     entries: [
@@ -202,6 +217,7 @@ function PayeeList({ idPrefix, payees, onChange, errors, prefix, showErrors }: P
 
 interface ComboEditorProps {
   idPrefix: string
+  launchpad: Launchpad
   entries: ComboEntry[]
   onChange: (entries: ComboEntry[]) => void
   errors: Record<string, string>
@@ -210,11 +226,16 @@ interface ComboEditorProps {
   probed: ReadonlySet<string>
 }
 
-function ComboEditor({ idPrefix, entries, onChange, errors, showErrors, account, probed }: ComboEditorProps) {
+function ComboEditor({ idPrefix, launchpad, entries, onChange, errors, showErrors, account, probed }: ComboEditorProps) {
   const allocated = entries.reduce((sum, entry) => sum + (parsePercentBps(entry.percent, TOTAL_BPS).bps ?? 0), 0)
   const usedListed = new Set(entries.map((entry) => entry.target.kind).filter((kind) => isListedKind(kind)))
   const update = (id: string, patch: Partial<ComboEntry>) => onChange(entries.map((entry) => (entry.id === id ? { ...entry, ...patch } : entry)))
-  const addKind = ENTRY_KINDS.find((kind) => available(kind) && !(isListedKind(kind) && usedListed.has(kind))) ?? 'custom'
+  const addKind = ENTRY_KINDS.find((kind) => available(kind, launchpad) && !(isListedKind(kind) && usedListed.has(kind))) ?? 'custom'
+  // Deepen pool and Buyback & burn are never offered side by side (comboRival in lib/plugins/plan.ts says why).
+  const clashes = (option: SimpleTarget['kind'], id: string) => {
+    const rival = comboRival(option)
+    return Boolean(rival) && entries.some((other) => other.id !== id && other.target.kind === rival)
+  }
 
   return (
     <div>
@@ -236,7 +257,11 @@ function ComboEditor({ idPrefix, entries, onChange, errors, showErrors, account,
                     onChange={(event) => update(entry.id, { target: emptyTarget(event.target.value as SimpleTarget['kind'], account) })}
                   >
                     {ENTRY_KINDS.map((option) => (
-                      <option key={option} value={option} disabled={!available(option) || (option !== kind && isListedKind(option) && usedListed.has(option))}>
+                      <option
+                        key={option}
+                        value={option}
+                        disabled={!available(option, launchpad) || (option !== kind && isListedKind(option) && usedListed.has(option)) || clashes(option, entry.id)}
+                      >
                         {kindName(option)}
                       </option>
                     ))}
@@ -298,7 +323,9 @@ function ComboEditor({ idPrefix, entries, onChange, errors, showErrors, account,
       </div>
       <FieldErrors errors={errors} keys={['entries', 'combo']} show={showErrors} idPrefix={idPrefix} />
       <p className="mt-3 text-xs leading-5 text-g500">
-        Each collection is split by these shares; the last destination takes any rounding. One of each plugin, and up to five destinations in all.
+        {launchpad.version === 'v14'
+          ? 'Each collection is split by these shares; the last destination takes any rounding. One of each plugin, and up to five destinations in all.'
+          : 'Each collection is split by these shares; the last destination takes any rounding. One of each plugin (Deepen pool or Buyback & burn, not both), and up to five destinations in all.'}
       </p>
     </div>
   )
@@ -323,6 +350,71 @@ function probeNote(address: string, probed: ReadonlySet<string>): string | undef
   return probed.has(address.trim().toLowerCase())
     ? 'This address declares the fee-plugin interface. It is configured at launch with no settings, so if it needs settings the launch fails.'
     : undefined
+}
+
+/** The common burn shares: the rows of Deepen pool's front-running table (V13-SPEC §2.3). */
+const BURN_SHARE_PRESETS = [0, 2_500, 5_000, 7_500, 10_000] as const
+
+interface BurnShareFieldProps {
+  id: string
+  /** What the creator typed, in percent ("50"). */
+  text: string
+  onText: (text: string) => void
+  error?: string
+  showError: boolean
+}
+
+/**
+ * Deepen pool's one setting: how much of each pool run buys the token and burns it, from 0% to 100% at basis-point
+ * precision, 50% to start. The line under the field says what the choice does.
+ */
+function BurnShareField({ id, text, onText, error, showError }: BurnShareFieldProps) {
+  const bps = parsePercentBps(text, TOTAL_BPS).bps
+  const effect =
+    bps === undefined
+      ? GHOST
+      : bps === 0
+        ? 'Everything goes into the pool.'
+        : bps === TOTAL_BPS
+          ? 'Everything is burned (the same as Buyback & burn).'
+          : `${bpsToPercentText(bps)}% is burned and ${bpsToPercentText(TOTAL_BPS - bps)}% goes into the pool.`
+  const describedBy = [showError && error ? `${id}-error` : '', `${id}-effect`, `${id}-hint`].filter(Boolean).join(' ')
+  return (
+    <div className="mt-4">
+      <label className="block text-sm text-g500" htmlFor={id}>Burn share</label>
+      <div className="mt-1 grid grid-cols-5 gap-2" role="group" aria-label="Common burn shares">
+        {BURN_SHARE_PRESETS.map((preset) => {
+          const active = bps === preset
+          return (
+            <button key={preset} type="button" className="choice-button" data-active={active} aria-pressed={active} onClick={() => onText(bpsToPercentText(preset))}>
+              {bpsToPercentText(preset)}%
+            </button>
+          )
+        })}
+      </div>
+      <div className="field-with-suffix mt-2">
+        <input
+          id={id}
+          inputMode="decimal"
+          autoComplete="off"
+          placeholder="50"
+          value={text}
+          onChange={(event) => {
+            const next = event.target.value.replace(/,/g, '.').trim()
+            if (next === '' || /^\d{0,3}(?:\.\d{0,2})?$/.test(next)) onText(next)
+          }}
+          aria-invalid={showError && Boolean(error)}
+          aria-describedby={describedBy}
+        />
+        <span>%</span>
+      </div>
+      {showError && error && <p id={`${id}-error`} className="mt-2 text-sm text-loss" role="alert">{error}</p>}
+      <p id={`${id}-effect`} className="mt-2 text-sm leading-6 text-g700" aria-live="polite">{effect}</p>
+      <p id={`${id}-hint`} className="mt-1 text-xs leading-5 text-g500">
+        How much of each run buys the token and burns it. The rest buys the token and adds it to the pool as liquidity nobody can take out. Locked forever either way.
+      </p>
+    </div>
+  )
 }
 
 function TargetConfig({ idPrefix, target, onTarget, errors, errorKey, prefix, showErrors, account, probed, inCombo = false }: TargetConfigProps) {
@@ -379,6 +471,22 @@ function TargetConfig({ idPrefix, target, onTarget, errors, errorKey, prefix, sh
           <FieldErrors errors={errors} keys={[errorKey]} show={showErrors} idPrefix={idPrefix} />
         </>
       )
+    case 'deepen': {
+      const plugin = listedPlugin('deepen')
+      return (
+        <>
+          <p className="text-sm leading-6 text-g700">{inCombo ? plugin.tagline : plugin.description}</p>
+          <BurnShareField
+            id={`${idPrefix}-burn-share`}
+            text={target.burnShare}
+            onText={(burnShare) => onTarget({ kind: 'deepen', burnShare })}
+            error={errors[`${prefix}burnShare`]}
+            showError={showErrors}
+          />
+          <FieldErrors errors={errors} keys={[errorKey]} show={showErrors} idPrefix={idPrefix} />
+        </>
+      )
+    }
     case 'buyback':
     case 'holders': {
       const plugin = listedPlugin(target.kind)
@@ -393,6 +501,8 @@ function TargetConfig({ idPrefix, target, onTarget, errors, errorKey, prefix, sh
 }
 
 interface FeeDestinationPickerProps {
+  /** The launchpad the token is created on: its own plugins are the ones offered. */
+  launchpad: Launchpad
   plan: FeePlan
   onPlan: (plan: FeePlan) => void
   errors: Record<string, string>
@@ -407,14 +517,14 @@ interface FeeDestinationPickerProps {
  * Listed plugins are configured here; a wallet or a custom address takes no settings. It says where the fees go
  * and nothing more: no plugin is called safe [D7].
  */
-export function FeeDestinationPicker({ plan, onPlan, errors, showErrors, account, probed }: FeeDestinationPickerProps) {
+export function FeeDestinationPicker({ launchpad, plan, onPlan, errors, showErrors, account, probed }: FeeDestinationPickerProps) {
   const id = useId().replace(/:/g, '')
   // Switching between options keeps what was typed in each, so a detour does not lose a Split's payees.
   const drafts = useRef(new Map<FeePlanKind, FeePlan>())
   const choose = (kind: FeePlanKind) => {
     if (kind === plan.kind) return
     drafts.current.set(plan.kind, plan)
-    onPlan(drafts.current.get(kind) ?? initialPlan(kind, account))
+    onPlan(drafts.current.get(kind) ?? initialPlan(kind, launchpad, account))
   }
   const selected = OPTIONS.find((option) => option.kind === plan.kind) ?? WALLET
 
@@ -426,7 +536,7 @@ export function FeeDestinationPicker({ plan, onPlan, errors, showErrors, account
       </p>
       <div className="fee-options">
         {OPTIONS.map((option) => {
-          const open = available(option.kind)
+          const open = available(option.kind, launchpad)
           const checked = plan.kind === option.kind
           return (
             <label key={option.kind} className="fee-option" data-selected={checked} data-disabled={!open || undefined}>
@@ -440,7 +550,7 @@ export function FeeDestinationPicker({ plan, onPlan, errors, showErrors, account
                 onChange={() => choose(option.kind)}
               />
               <span className="fee-option-name">{option.name}</span>
-              <span className="fee-option-tagline">{open ? option.tagline : 'Not deployed on this network yet.'}</span>
+              <span className="fee-option-tagline">{open ? option.tagline : unavailableReason(option.kind, launchpad)}</span>
             </label>
           )
         })}
@@ -449,6 +559,7 @@ export function FeeDestinationPicker({ plan, onPlan, errors, showErrors, account
         {plan.kind === 'combo' ? (
           <ComboEditor
             idPrefix={id}
+            launchpad={launchpad}
             entries={plan.entries}
             onChange={(entries) => onPlan({ kind: 'combo', entries })}
             errors={errors}
@@ -503,6 +614,10 @@ export function planSummary(plan: FeePlan, account?: Address): string {
       return `Split · ${plan.payees.length} ${plan.payees.length === 1 ? 'payee' : 'payees'}`
     case 'combo':
       return `Combo · ${plan.entries.length} ${plan.entries.length === 1 ? 'destination' : 'destinations'}`
+    case 'deepen': {
+      const share = parsePercentBps(plan.burnShare, TOTAL_BPS).bps
+      return share === undefined ? listedPlugin('deepen').name : `${listedPlugin('deepen').name} · ${formatPct(share)} burn share`
+    }
     case 'buyback':
     case 'holders':
       return listedPlugin(plan.kind).name

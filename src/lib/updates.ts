@@ -23,9 +23,17 @@ const STORAGE_KEY = 'architex-updates'
  */
 export const PRODUCT_UPDATES: readonly ProductUpdate[] = [
   {
+    id: 'deepen-pool',
+    title: 'Deepen pool: burn the token, grow its pool',
+    body: 'A new place to send creator fees. While a token is on its curve, Deepen pool buys it and burns it. Once it graduates, each run splits between burning and adding liquidity to its pool that nobody can ever take out. The creator picks the split at launch.',
+    action: { label: 'Open Launch', view: 'launch' },
+    figure: 'fees',
+    requiresLaunch: true,
+  },
+  {
     id: 'creator-fees',
     title: 'Creator fees, sent where you choose',
-    body: 'A launch now sets a creator fee of up to 10% on every buy and sell, and where it goes: your wallet, a Split, Buyback & burn, holders over 24 hours, or a mix. Both are locked at launch, anyone can collect a token’s fees, and graduated tokens keep trading in their own launch pool.',
+    body: 'A launch now sets a creator fee of up to 10% on every buy and sell, and where it goes: your wallet, a Split, holders over 24 hours, or a mix. Both are locked at launch, anyone can collect a token’s fees, and graduated tokens keep trading in their own launch pool.',
     action: { label: 'Open Launch', view: 'launch' },
     figure: 'fees',
     requiresLaunch: true,

@@ -2,15 +2,26 @@ import { useEffect, useState } from 'react'
 import type { Address } from 'viem'
 import { useAccount } from 'wagmi'
 import { activeChain, addressExplorerUrl } from '../chain'
-import { listedPluginAt } from '../content/plugins/registry'
+import { listedPlugin, listedPluginAt } from '../content/plugins/registry'
+import { suiteFor, type LaunchSuite } from '../lib/deployment'
 import { useConnectSheet } from '../hooks/useConnectSheet'
 import { useCreatorFees, type CreatorFeeAction } from '../hooks/useCreatorFees'
 import { useSwitchToArc } from '../hooks/useSwitchToArc'
-import { GHOST, formatAmount, formatPct, shortAddress } from '../lib/format'
-import type { LaunchRecord } from '../lib/launch'
+import { GHOST, formatAmount, formatLp, formatPct, shortAddress } from '../lib/format'
+import { launchVersion, type LaunchRecord } from '../lib/launch'
 import { destinationLabel, destinationName, feeDestination } from '../lib/plugins/destination'
 import { dividendStatus, roughly } from '../lib/plugins/holders'
-import { BUYBACK_MIN_RUN_USDC, BUYBACK_RUN_INTERVAL, type BuybackState, type ComboEntryState, type HolderState, type SplitState } from '../lib/plugins/state'
+import {
+  BUYBACK_MIN_RUN_USDC,
+  BUYBACK_RUN_INTERVAL,
+  DEEPEN_MIN_RUN_USDC,
+  DEEPEN_RUN_INTERVAL,
+  type BuybackState,
+  type ComboEntryState,
+  type DeepenState,
+  type HolderState,
+  type SplitState,
+} from '../lib/plugins/state'
 import { FeeGauge } from './FeeGauge'
 import { GhostButton } from './GhostButton'
 import { ExternalLinkIcon } from './Icons'
@@ -148,14 +159,12 @@ function BuybackPanel({ buyback, symbol, graduated, alsoPaysHolders, busy, statu
         <div><dt>Next run</dt><dd className={buyback.offer > 0n ? '' : 'text-g500'}>{next}</dd></div>
         <div>
           <dt>Last run</dt>
-          <dd className={buyback.lastRunAt > 0n ? '' : 'text-g500'}>
-            {buyback.lastRunAt === 0n
-              ? 'Never'
-              : fullAt > now
-                ? `${formatWhen(buyback.lastRunAt)} · full budget again at ${formatTime(fullAt)}`
-                : formatWhen(buyback.lastRunAt)}
-          </dd>
+          <dd className={buyback.lastRunAt > 0n ? '' : 'text-g500'}>{buyback.lastRunAt === 0n ? 'Never' : formatWhen(buyback.lastRunAt)}</dd>
         </div>
+        {/* Its own row: beside the last run it was cut off on a phone. */}
+        {buyback.lastRunAt > 0n && fullAt > now && (
+          <div><dt>Full budget again</dt><dd>{formatTime(fullAt)}</dd></div>
+        )}
         <div><dt>Spent so far</dt><dd>{usdc(buyback.totalSpent)}</dd></div>
         <div><dt>Burned so far</dt><dd>{formatAmount(buyback.totalBurned, 18)} {symbol}</dd></div>
       </dl>
@@ -168,6 +177,78 @@ function BuybackPanel({ buyback, symbol, graduated, alsoPaysHolders, busy, statu
       <p className="fee-plugin-note">
         Anyone can run it. It spends at most 0.25% of the {side} USDC side per hour and burns every token it buys, so the supply only goes down.
         {alsoPaysHolders && ' It doesn’t raise anyone’s share of holder dividends: the tokens it buys come from the curve or the pool, which earn none.'}
+        {listedPlugin('buyback').paused && ' It is paused for new launches; Deepen pool at a 100% burn share does the same job.'}
+      </p>
+    </section>
+  )
+}
+
+function DeepenPanel({ deepen, symbol, graduated, alsoPaysHolders, busy, status, run, runDeepen }: {
+  deepen: DeepenState
+  symbol: string
+  graduated: boolean
+  /** The token also pays holders (a Combo): say that neither burning nor adding raises their share. */
+  alsoPaysHolders: boolean
+  busy: CreatorFeeAction | undefined
+  status: ActionProps['status']
+  run: Run
+  runDeepen: () => Promise<void>
+}) {
+  // previewRun is the plugin's own answer for this block, as Buyback & burn's is, and says how the offer divides.
+  const next = deepen.offer > 0n
+    ? `Up to ${usdc(deepen.offer)}`
+    : deepen.held >= DEEPEN_MIN_RUN_USDC
+      ? 'Builds up over the next hour'
+      : 'Nothing waiting yet'
+  const fullAt = deepen.lastRunAt > 0n ? deepen.lastRunAt + DEEPEN_RUN_INTERVAL : 0n
+  const now = BigInt(Math.floor(useNow() / 1_000))
+  return (
+    <section className="fee-plugin" aria-label="Deepen pool">
+      <div className="fee-plugin-head">
+        <h3>Deepen pool</h3>
+        <span>{graduated ? 'Burns and adds to the pool' : 'Buys on the curve and burns'}</span>
+      </div>
+      <dl className="receipt-lines">
+        <div><dt>Burn share</dt><dd>{formatPct(deepen.burnBps)}</dd></div>
+        <div><dt>USDC waiting</dt><dd>{usdc(deepen.held)}</dd></div>
+        <div><dt>Next run</dt><dd className={deepen.offer > 0n ? '' : 'text-g500'}>{next}</dd></div>
+        {/* On the curve a run burns all it buys, so only a pool run has a split to show. */}
+        {graduated && deepen.offer > 0n && (
+          <>
+            <div><dt>Buys and burns</dt><dd>{usdc(deepen.toBurn)}</dd></div>
+            <div><dt>Buys and adds to the pool</dt><dd>{usdc(deepen.toDeepen)}</dd></div>
+          </>
+        )}
+        <div>
+          <dt>Last run</dt>
+          <dd className={deepen.lastRunAt > 0n ? '' : 'text-g500'}>{deepen.lastRunAt === 0n ? 'Never' : formatWhen(deepen.lastRunAt)}</dd>
+        </div>
+        {/* Its own row: beside the last run it was cut off on a phone. */}
+        {deepen.lastRunAt > 0n && fullAt > now && (
+          <div><dt>Full budget again</dt><dd>{formatTime(fullAt)}</dd></div>
+        )}
+        <div><dt>Spent so far</dt><dd>{usdc(deepen.totalSpent)}</dd></div>
+        <div><dt>Burned so far</dt><dd>{formatAmount(deepen.totalBurned, 18)} {symbol}</dd></div>
+        {/* One fact per line, so each fits a phone's width. */}
+        {graduated ? (
+          <>
+            <div><dt>USDC added to the pool</dt><dd>{usdc(deepen.totalUsdcAdded)}</dd></div>
+            <div><dt>Tokens added to the pool</dt><dd>{formatAmount(deepen.totalTokensAdded, 18)} {symbol}</dd></div>
+            <div><dt>Liquidity locked</dt><dd>{formatLp(deepen.totalLiquidity)} LP</dd></div>
+          </>
+        ) : (
+          <div><dt>Added to the pool</dt><dd className="text-g500">Starts once it graduates</dd></div>
+        )}
+      </dl>
+      <div className="mt-4">
+        <GhostButton disabled={deepen.offer === 0n || Boolean(busy)} onClick={() => run(runDeepen)}>
+          {busy === 'deepen' ? 'Running…' : 'Run'}
+        </GhostButton>
+      </div>
+      <ActionStatus action="deepen" status={status} />
+      <p className="fee-plugin-note">
+        Anyone can run it. It spends at most 0.25% of the {graduated ? 'pool’s locked USDC' : 'curve’s USDC side'} per hour. On the curve it buys the token and burns it; once the token graduates, each run burns its burn share and adds the rest to the pool, with the new liquidity locked at the burn address for good.
+        {alsoPaysHolders && ' It doesn’t raise anyone’s share of holder dividends: the tokens it buys come from the curve or the pool, which earn none.'}
       </p>
     </section>
   )
@@ -178,9 +259,11 @@ function perHourText(perHour: bigint): string {
   return perHour === 0n ? 'Under 0.000001 USDC/hour to all holders' : `≈ ${usdc(roughly(perHour))}/hour to all holders`
 }
 
-function HoldersPanel({ holders, symbol, busy, status, run, claim, connected }: {
+function HoldersPanel({ holders, symbol, inUniswap, busy, status, run, claim, connected }: {
   holders: HolderState
   symbol: string
+  /** A v1.4 token: its pool is a Uniswap pool, not a launch pool. */
+  inUniswap: boolean
   busy: CreatorFeeAction | undefined
   status: ActionProps['status']
   run: Run
@@ -227,13 +310,13 @@ function HoldersPanel({ holders, symbol, busy, status, run, claim, connected }: 
       </div>
       <ActionStatus action="claim" status={status} />
       <p className="fee-plugin-note">
-        You earn for every second you hold, in proportion to what you hold, so buying just before a payout earns nothing extra. Each payment to holders streams out over about a day{holders.fromFees ? '; collecting creator fees adds to the stream' : ''}. Tokens on the curve, in the launch pool or burned earn nothing.
+        You earn for every second you hold, in proportion to what you hold, so buying just before a payout earns nothing extra. Each payment to holders streams out over about a day{holders.fromFees ? '; collecting creator fees adds to the stream' : ''}. Tokens on the curve, in {inUniswap ? 'its Uniswap pool' : 'the launch pool'} or burned earn nothing.
       </p>
     </section>
   )
 }
 
-function ComboAllocation({ entries }: { entries: ComboEntryState[] }) {
+function ComboAllocation({ entries, suite }: { entries: ComboEntryState[]; suite: LaunchSuite }) {
   return (
     <section className="fee-plugin" aria-label="Combo allocation">
       <div className="fee-plugin-head">
@@ -243,7 +326,7 @@ function ComboAllocation({ entries }: { entries: ComboEntryState[] }) {
       <dl className="receipt-lines">
         {entries.map((entry) => {
           // From allocationOf alone: its isPlugin flag is the Combo's stored decision to pay through hooks.
-          const listed = entry.isPlugin ? listedPluginAt(entry.target) : undefined
+          const listed = entry.isPlugin ? listedPluginAt(entry.target, suite) : undefined
           return (
             <div key={entry.target}>
               <dt>
@@ -337,7 +420,7 @@ export function CreatorFeesPanel({ launch, onChanged }: CreatorFeesPanelProps) {
         </div>
       </div>
 
-      {state?.combo && <ComboAllocation entries={state.combo} />}
+      {state?.combo && <ComboAllocation entries={state.combo} suite={suiteFor(launchVersion(launch))} />}
       {state?.split && (
         <SplitPanel split={state.split} symbol={launch.symbol} busy={fees.busy} status={fees.status} run={run} release={fees.release} you={address} />
       )}
@@ -353,10 +436,23 @@ export function CreatorFeesPanel({ launch, onChanged }: CreatorFeesPanelProps) {
           runBuyback={fees.runBuyback}
         />
       )}
+      {state?.deepen && (
+        <DeepenPanel
+          deepen={state.deepen}
+          symbol={launch.symbol}
+          graduated={launch.graduated}
+          alsoPaysHolders={Boolean(state.holders)}
+          busy={fees.busy}
+          status={fees.status}
+          run={run}
+          runDeepen={fees.runDeepen}
+        />
+      )}
       {state?.holders && (
         <HoldersPanel
           holders={state.holders}
           symbol={launch.symbol}
+          inUniswap={launchVersion(launch) === 'v14'}
           busy={fees.busy}
           status={fees.status}
           run={run}

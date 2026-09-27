@@ -524,8 +524,11 @@ input[type='checkbox'], input[type='radio'], input[type='range'] { accent-color:
   .wordmark { position: relative; min-width: 44px; min-height: 44px; justify-content: center; }
   .wordmark-mark { width: 1.625rem; height: 1.625rem; }
   .masthead > div:first-child { gap: 8px; min-width: 0; }
-  .nav-tab { min-width: 44px; padding-inline: 8px; }
-  .masthead nav { margin-left: 0; overflow-x: auto; }
+  /* Five tabs cannot fit a phone, so the nav scrolls sideways. Tabs keep their own width: shrinking them
+     below the label ran "Launch" into "Bridge" and pushed "Docs" off the screen. */
+  .nav-tab { min-width: 44px; padding-inline: 8px; flex: 0 0 auto; }
+  .masthead nav { margin-left: 0; overflow-x: auto; scrollbar-width: none; }
+  .masthead nav::-webkit-scrollbar { display: none; }
   .masthead .ghost-button { max-width: 7.5rem; overflow: hidden; text-overflow: ellipsis; padding-inline: 8px; white-space: nowrap; font-size: 0.8125rem; }
   .masthead .ghost-button svg { display: none; }
   .choice-button { padding-inline: 4px; font-size: 0.8125rem; }

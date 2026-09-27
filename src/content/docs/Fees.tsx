@@ -1,3 +1,5 @@
+import { V14Note, V14_NOTE } from './V14Note'
+
 export function DocsFees() {
   return (
     <div className="space-y-4">
@@ -5,8 +7,9 @@ export function DocsFees() {
         Every launch token carries a creator fee: a percentage, from 0% to 10%, taken from every
         buy and every sell of that token. The creator picks it when they launch, and it's locked
         for good from then on: nobody can raise it, lower it, or switch it off, the creator
-        included. The fee applies on the curve and keeps applying in the token's launch pool
-        after it graduates. The creator's own first buy pays it too.
+        included. The fee applies on the curve and keeps applying in the token's pool after it
+        graduates (its launch pool on v1.3; on v1.4 its Uniswap v4 pool, whose hook takes it).
+        The creator's own first buy pays it too.
       </p>
       <p>
         It comes on top of the platform's 0.5% fee, and both are taken in USDC: out of the USDC
@@ -22,8 +25,8 @@ export function DocsFees() {
         too. It can be a wallet (their own, or any other), one of the plugins listed in the token
         builder, or any other address that can pass fees on. The launchpad refuses the few that
         can't: USDC itself, the launchpad and its launch router and pair factory, launch tokens,
-        and launch pools, where anyone could take fees sent in; the builder catches these before
-        you sign. Settings only go to a plugin: an address that isn't one takes none, which also
+        and launch pools, where anyone could take fees sent in (on v1.4 also the hook, the v4
+        router and Uniswap's PoolManager); the builder catches these before you sign. Settings only go to a plugin: an address that isn't one takes none, which also
         catches a mistyped plugin address. The site always says plainly where a token's fees go: the
         listed plugin's name, "Creator wallet" when it's the creator's own address, or "Custom
         address" with the address itself. Architex hasn't reviewed a custom address and makes no
@@ -55,9 +58,34 @@ export function DocsFees() {
         about two days at 10%), and by then they're just a holder.
       </p>
       <p>
+        Buyback &amp; burn is paused for new launches: Deepen pool at a 100% burn share, below, does
+        the same job. Tokens that already use it keep it, and anyone can still run their buybacks.
+      </p>
+      <p>
         Burning lowers the total supply, but it doesn't raise anyone's share of holder dividends:
         the tokens a buyback buys come from the curve or the launch pool, which earn none, and are
         burned straight away.
+      </p>
+      <p>
+        <span className="font-semibold text-ink">Deepen pool</span> does Buyback &amp; burn's job and
+        one more, under one budget. While the token is on its curve, every run buys the token and
+        burns it. Once it graduates, each run splits in two: the burn share buys the token and burns
+        it, and the rest buys the token and adds it to the launch pool with USDC, as new liquidity
+        that's locked at the burn address for good. The creator picks the burn share at launch, from
+        0% (everything goes into the pool) to 100% (everything is burned), 50% to start, and it's
+        locked like the rest. Anyone can run it, paced like a buyback: at most 0.25% of the curve's
+        USDC side per hour, or, once the token graduates, of the pool's locked USDC (the part that
+        belongs to liquidity at the burn address). Liquidity that can be taken back out doesn't
+        count, so parking some in the pool for a moment can't make a run spend more.
+      </p>
+      <p>
+        Burning takes tokens out of the pool and leaves the USDC in, so per USDC it lifts the price
+        about twice as much as adding liquidity does. That cuts both ways: a higher burn share lifts
+        the price faster, and a lower one makes buying ahead of the runs take longer to pay off. At a
+        1% creator fee, a trader doing that has to hold about five hours at 100%, seven at the default
+        50% and eleven at 0%; on the curve, where every run burns, the hours are Buyback &amp; burn's.
+        It's also why a Combo can't hold both Deepen pool and Buyback &amp; burn: each paces its own
+        spending, so together they'd spend twice as fast and cut those hours by more than half.
       </p>
       <p>
         <span className="font-semibold text-ink">Distribute to holders</span> pays the fees to
@@ -78,8 +106,9 @@ export function DocsFees() {
       <p>
         <span className="font-semibold text-ink">Combo</span> splits the fees across up to five
         of these destinations by percentage, adding up to exactly 100%: wallets, a Split, Buyback
-        &amp; burn, or Distribute to holders, each plugin at most once. Every collection is split
-        on the spot; the last destination takes any rounding.
+        &amp; burn, Deepen pool, or Distribute to holders, each plugin at most once, and never
+        Deepen pool beside Buyback &amp; burn. Every collection is split on the spot; the last
+        destination takes any rounding.
       </p>
       <p>
         Plugins are listed in the builder after their code has been reviewed by pull request.
@@ -92,6 +121,23 @@ export function DocsFees() {
         refuses to pay), the collection is undone and the fees stay in the launchpad. Trading
         carries on exactly as before, and nobody, Architex included, can send those fees anywhere
         else. That's the cost of a destination nobody can change: a broken one keeps its fees.
+      </p>
+
+      <h3 className="mt-10 text-base font-semibold text-ink">On launchpad v1.4</h3>
+      <V14Note {...V14_NOTE} />
+      <p>
+        Creator fees work the same way on v1.4: the same range, locked at launch, waiting in the
+        v1.4 launchpad until anyone collects them. After graduation, the fees the pool's hook takes
+        wait in Uniswap's pool contract until they're moved to the launchpad; collecting does that
+        first, so the token's page counts both and its Collect button pays both. A plugin works
+        with one launchpad, so v1.4 has its own Split, Distribute to holders and Combo, and those
+        are the ones its builder lists. Buyback &amp; burn and Deepen pool are v1.3's alone for
+        now.
+      </p>
+      <p>
+        v1.4's anti-sniping fee is not a creator fee and goes to no one: it becomes liquidity in
+        the token's own pool, below the market, that nobody can withdraw, with nothing for anyone
+        to collect or press. See <span className="font-semibold">Graduation</span>.
       </p>
     </div>
   )
