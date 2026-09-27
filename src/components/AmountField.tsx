@@ -64,11 +64,11 @@ export function AmountField({
   hotkey,
   pickerExtra,
 }: AmountFieldProps) {
-  const balance = token ? balances.get(token.address.toLowerCase()) ?? 0n : 0n
-  const spendable = token ? spendableBalance(token.address, balance) : 0n
+  const balance = token ? balances.get(token.address.toLowerCase()) : undefined
+  const spendable = token && balance !== undefined ? spendableBalance(token.address, balance) : 0n
   let overBalance = false
   let overSpendable = false
-  if (checkBalance && token && amount) {
+  if (checkBalance && token && balance !== undefined && amount) {
     try {
       const sanitized = sanitizeAmount(amount, token.decimals)
       if (sanitized) {
@@ -95,6 +95,8 @@ export function AmountField({
           value={amount}
           readOnly={readOnly}
           disabled={disabled}
+          aria-invalid={overSpendable || undefined}
+          aria-describedby={balance !== undefined ? `${id}-balance` : undefined}
           onChange={(event) => {
             const next = sanitizeAmount(event.target.value, token?.decimals ?? 18)
             if (next !== undefined) onAmount(next)
@@ -117,8 +119,8 @@ export function AmountField({
       </div>
       <div className="mt-2 flex min-h-6 items-center justify-between gap-3 text-sm">
         <span className="text-g500">{usdValue ?? ''}</span>
-        {token && (checkBalance || balances.has(token.address.toLowerCase())) && (
-          <span className={overSpendable ? 'text-loss' : 'text-g500'}>
+        {token && balance !== undefined && (
+          <span id={`${id}-balance`} className={overSpendable ? 'text-loss' : 'text-g500'}>
             {overBalance
               ? `Not enough ${token.symbol}`
               : overSpendable

@@ -89,6 +89,18 @@
         ],
         "createdAt": "2026-09-26T08:47:34.316Z",
         "reason": "Misread for this page: h1 runs to 92px and h2 to 56px over a 16px body; the 14px uppercase h3s are the card labels of the nuvex.family-style landing recorded as owner-approved 2026-09-25"
+      },
+      {
+        "rule": "design-system-font",
+        "value": "dejavu sans mono",
+        "createdAt": "2026-09-27T17:09:24.663Z",
+        "reason": "Existing landing address typeface shipped in production commit 11bbf7d and covered by landing.test.ts; this UX patch preserves it."
+      },
+      {
+        "rule": "design-system-font",
+        "value": "menlo",
+        "createdAt": "2026-09-27T17:09:24.912Z",
+        "reason": "Existing landing address typeface shipped in production commit 11bbf7d and covered by landing.test.ts; this UX patch preserves it."
       }
     ]
   }

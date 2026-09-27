@@ -23,6 +23,7 @@ interface LaunchTradeSheetProps {
   usdc: Token
   tokenBalance: bigint
   usdcBalance: bigint
+  balancesAvailable: boolean
   usdcAllowance: LaunchAllowances
   /** The chain's latest block (hooks/useChainBlock.ts), for v1.4's anti-sniping fee; undefined until read. */
   block?: bigint
@@ -36,6 +37,7 @@ export function LaunchTradeSheet({
   usdc,
   tokenBalance,
   usdcBalance,
+  balancesAvailable,
   usdcAllowance,
   block,
   initialSide = 'buy',
@@ -66,10 +68,11 @@ export function LaunchTradeSheet({
 
   const balances = useMemo(() => {
     const map = new Map<string, bigint>()
+    if (!balancesAvailable) return map
     map.set(token.address.toLowerCase(), tokenBalance)
     map.set(usdc.address.toLowerCase(), usdcBalance)
     return map
-  }, [token.address, tokenBalance, usdc.address, usdcBalance])
+  }, [balancesAvailable, token.address, tokenBalance, usdc.address, usdcBalance])
 
   const trade = useLaunchTrade({
     launch,
@@ -79,8 +82,8 @@ export function LaunchTradeSheet({
     parsedIn,
     slippageBps: settings.slippageBps,
     deadlineMinutes: settings.deadlineMinutes,
-    tokenBalance,
-    usdcBalance,
+    tokenBalance: balancesAvailable ? tokenBalance : 0n,
+    usdcBalance: balancesAvailable ? usdcBalance : 0n,
     usdcAllowance,
     block,
     onConfirmed,
@@ -241,7 +244,7 @@ export function LaunchTradeSheet({
         onAcknowledge={(checked) => setImpactAcknowledgedKey(checked ? trade.impactKey : undefined)}
       />
       <PrimaryButton className="mt-6 w-full" loading={trade.isLoading} disabled={trade.isDisabled} onClick={() => void handlePrimary()}>
-        {trade.label}
+        {trade.buttonState === 'insufficientBalance' && !balancesAvailable ? 'Balance unavailable' : trade.label}
       </PrimaryButton>
       {trade.hint && <p className="hint-line" role="status">{trade.hint}</p>}
       <TxStatus status={trade.txStatus} />

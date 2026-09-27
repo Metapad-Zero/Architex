@@ -269,6 +269,7 @@ export function useLaunch(token: Address | undefined) {
     usdc,
     tokenBalance: token ? tokenBalance : 0n,
     usdcBalance,
+    balancesAvailable: Boolean(owner) && (fixtureOn || (balancesQuery.isSuccess && balancesQuery.data?.length === balanceTokens.length)),
     usdcAllowance,
     snipeHeld,
     isLoading: !fixtureOn && valid && !curve && searching,
