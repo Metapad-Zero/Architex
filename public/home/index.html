@@ -7,10 +7,8 @@
 // Old share links (architex.fun/#swap, #pools/..., #launch/...) and home-screen installs made before the move open it.
 (function(){var own=['top','about','features','why','product','ecosystem','mission','technology','contracts'];
 function app(){var h=location.hash.slice(1);return h&&own.indexOf(h)<0}
-// Anyone who has used the app in this browser (a saved wallet, a connection, a recent trade) goes straight back to it.
-// architex.fun/?home shows the landing regardless.
-function returning(){if(location.pathname!=='/'||/(^|[?&])home\b/.test(location.search))return false;try{for(var i=0;i<localStorage.length;i++){var k=localStorage.key(i)||'';if((k.indexOf('architex.')===0&&k.indexOf('architex.home.')!==0)||k==='wagmi.recentConnectorId')return true}}catch(e){}return false}
-if(app()||returning()||navigator.standalone===true||matchMedia('(display-mode: standalone)').matches){location.replace('/app/'+location.search+(app()?location.hash:''));return}
+// Everyone else sees the landing, people who have used the app included (the owner's call, 2026-09-27).
+if(app()||navigator.standalone===true||matchMedia('(display-mode: standalone)').matches){location.replace('/app/'+location.search+(app()?location.hash:''));return}
 addEventListener('hashchange',function(){if(app())location.replace('/app/'+location.search+location.hash)});
 var t=null;try{t=localStorage.getItem('architex.home.theme')}catch(e){}if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);
 document.documentElement.classList.add('js');
@@ -95,7 +93,9 @@ body{margin:0;background:var(--bg);color:var(--ink);font-family:"Public Sans",He
 a{color:inherit;text-decoration:none}
 svg{display:block}
 .wrap{max-width:var(--maxw);margin:0 auto;padding:0 24px}
-.mono{font-family:ui-monospace,Menlo,Consolas,monospace}
+/* Menlo where it is installed (Apple devices), DejaVu Sans Mono (the font Menlo was made from) everywhere else */
+@font-face{font-family:"DejaVu Sans Mono";src:local("DejaVu Sans Mono"),url(/fonts/dejavu-sans-mono-latin.woff2) format("woff2");font-display:swap;unicode-range:U+0020-007E,U+00A0-00FF,U+2013-2014,U+2018-201D,U+2022,U+2026,U+2190-2193}
+.mono{font-family:Menlo,"DejaVu Sans Mono",monospace}
 .tnum{font-variant-numeric:tabular-nums}
 :focus-visible{outline:2px solid var(--amber);outline-offset:3px;border-radius:6px}
 
@@ -239,16 +239,20 @@ h2 .g{background:linear-gradient(95deg,#f2a100,#e0b000);-webkit-background-clip:
 .status b{display:flex;align-items:center;gap:6px;color:var(--green);font-size:13px;margin-top:2px}
 .status b::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--green)}
 .side nav{display:grid;gap:4px}
-.side nav span{padding:10px 12px;border-radius:10px;font-size:14px;font-weight:500;color:var(--ink-2)}
-.side nav span.on{background:var(--inv-bg);color:var(--inv-fg)}
+.side nav button{display:block;width:100%;padding:10px 12px;border:0;border-radius:10px;background:none;font:500 14px "Public Sans",Helvetica,Arial,sans-serif;color:var(--ink-2);text-align:left;cursor:pointer;transition:background .2s,color .2s}
+.side nav button:hover{background:var(--line);color:var(--ink)}
+.side nav button.on{background:var(--cream);color:var(--ink);font-weight:700;box-shadow:inset 3px 0 0 var(--yellow)}
 .main{padding:28px;display:grid;gap:18px}
 .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
 .kpi{padding:16px;border-radius:14px;background:var(--solid);border:1px solid var(--line)}
 .kpi small{font-size:12px;color:var(--muted)}
 .kpi b{display:block;font-size:24px;letter-spacing:-.02em;margin-top:4px}
 .panels{display:grid;grid-template-columns:1.1fr 1fr;gap:18px}
+.views{display:grid}
+.views>.panels{grid-area:1/1;align-content:start}
+.views>.panels[hidden]{display:grid;visibility:hidden}
 .swap,.act{padding:20px;border-radius:16px;background:var(--solid);border:1px solid var(--line)}
-.swap h4,.act h4{margin:0 0 14px;font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.swap h3,.act h3{margin:0 0 14px;font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
 .field{border:1px solid var(--line-2);border-radius:12px;padding:12px 14px;display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
 .field .amt{font-size:28px;font-weight:600;letter-spacing:-.02em}
 .field .tok{display:flex;align-items:center;gap:8px;font-weight:700;padding:6px 10px;border-radius:999px;border:1px solid var(--line);font-size:14px}
@@ -261,6 +265,13 @@ h2 .g{background:linear-gradient(95deg,#f2a100,#e0b000);-webkit-background-clip:
 .act li{display:flex;justify-content:space-between;gap:10px;padding:12px 0;border-bottom:1px solid var(--line);font-size:14px}
 .act li:last-child{border:0}
 .act li span:last-child{color:var(--muted);font-size:12.5px;white-space:nowrap}
+.field small{display:block;font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.field .txt{font-size:20px;font-weight:600;letter-spacing:-.01em}
+.bar{height:10px;border-radius:999px;background:var(--line);overflow:hidden;margin:6px 2px 10px}
+.bar i{display:block;height:100%;width:40%;border-radius:inherit;background:linear-gradient(90deg,#f2a100,#ffd400)}
+.doc{margin:0 0 6px;font-size:14.5px;line-height:1.6;color:var(--ink-2)}
+.toc li span:first-child{font-size:14px;color:var(--ink-2)}
+.toc li.on span:first-child{color:var(--ink);font-weight:700}
 .demo-note{font-size:12px;color:var(--muted);text-align:center;margin-top:14px}
 
 /* ecosystem */
@@ -346,7 +357,11 @@ footer{padding:50px 0 60px;border-top:1px solid var(--line)}
   .feat-grid,.stats{grid-template-columns:1fr 1fr}
   .preview,.panels{grid-template-columns:1fr}
   .mock{grid-template-columns:1fr}
-  .side{display:none}
+  .side{padding:16px 28px 0;border-right:0}
+  .side .brand,.side .status{display:none}
+  .side nav{display:flex;gap:6px;overflow-x:auto;scrollbar-width:none}
+  .side nav button{width:auto;flex:none}
+  .side nav button.on{box-shadow:inset 0 -3px 0 var(--yellow)}
   .kpis{grid-template-columns:1fr 1fr}
   .mission,.tech{grid-template-columns:1fr}
   .t{border-right:0;border-bottom:1px solid var(--line)}
@@ -359,6 +374,7 @@ footer{padding:50px 0 60px;border-top:1px solid var(--line)}
   .facts{grid-template-columns:1fr}
   .crow{grid-template-columns:1fr}
   .preview,.main,.cmp{padding:16px}
+  .side{padding:14px 16px 0}
   .final .box{padding:60px 22px}
   .hero-facts{gap:20px}
   .node span{font-size:11px;padding:7px 10px}
@@ -533,10 +549,15 @@ footer{padding:50px 0 60px;border-top:1px solid var(--line)}
       <p class="intro rv d2">A bank form, not a trading terminal. Clear numbers on a clean sheet and one yellow button that moves money.</p>
     </div>
     <div class="card mock rv d2">
-      <aside class="side" aria-hidden="true">
-        <div class="brand"><svg><use href="#mark"/></svg>ARCHITEX</div>
-        <div class="status">Network<b>Arc mainnet</b></div>
-        <nav><span class="on">Swap</span><span>Pools</span><span>Launch</span><span>Docs</span></nav>
+      <aside class="side">
+        <div class="brand" aria-hidden="true"><svg><use href="#mark"/></svg>ARCHITEX</div>
+        <div class="status" aria-hidden="true">Network<b>Arc mainnet</b></div>
+        <nav id="mock-tabs" role="tablist" aria-label="Preview of the app">
+          <button type="button" role="tab" id="tab-swap" aria-controls="mock-swap" aria-selected="true" class="on">Swap</button>
+          <button type="button" role="tab" id="tab-pools" aria-controls="mock-pools" aria-selected="false" tabindex="-1">Pools</button>
+          <button type="button" role="tab" id="tab-launch" aria-controls="mock-launch" aria-selected="false" tabindex="-1">Launch</button>
+          <button type="button" role="tab" id="tab-docs" aria-controls="mock-docs" aria-selected="false" tabindex="-1">Docs</button>
+        </nav>
       </aside>
       <div class="main">
         <div class="kpis">
@@ -545,24 +566,85 @@ footer{padding:50px 0 60px;border-top:1px solid var(--line)}
           <div class="kpi"><small>Launch fee</small><b class="tnum">1 USDC</b></div>
           <div class="kpi"><small>Creator fee range</small><b class="tnum">0 to 10%</b></div>
         </div>
-        <div class="panels">
-          <div class="swap">
-            <h4>Swap</h4>
-            <div class="field"><span class="amt tnum" id="amt-in">250.00</span><span class="tok"><i></i>USDC</span></div>
-            <div class="field"><span class="amt tnum" id="amt-out">231.48</span><span class="tok"><i class="y"></i>EURC</span></div>
-            <div class="qrow"><span>Route</span><b>USDC → EURC</b></div>
-            <div class="qrow"><span>Minimum received</span><b class="tnum" id="amt-min">230.32 EURC</b></div>
-            <div class="qrow"><span>Price impact</span><b class="tnum">0.04%</b></div>
-            <a class="btn btn-y" href="/app/#swap">Swap</a>
+        <div class="views">
+          <div class="panels" id="mock-swap" role="tabpanel" aria-labelledby="tab-swap">
+            <div class="swap">
+              <h3>Swap</h3>
+              <div class="field"><span class="amt tnum" id="amt-in">250.00</span><span class="tok"><i></i>USDC</span></div>
+              <div class="field"><span class="amt tnum" id="amt-out">231.48</span><span class="tok"><i class="y"></i>EURC</span></div>
+              <div class="qrow"><span>Route</span><b>USDC → EURC</b></div>
+              <div class="qrow"><span>Minimum received</span><b class="tnum" id="amt-min">230.32 EURC</b></div>
+              <div class="qrow"><span>Price impact</span><b class="tnum">0.04%</b></div>
+              <a class="btn btn-y" href="/app/#swap">Swap</a>
+            </div>
+            <div class="act">
+              <h3>Recent activity</h3>
+              <ul>
+                <li><span>Swapped 250 USDC for EURC</span><span>just now</span></li>
+                <li><span>Added liquidity to USDC / EURC</span><span>4m ago</span></li>
+                <li><span>Launched a token on the curve</span><span>9m ago</span></li>
+                <li><span>Collected creator fees to plugin</span><span>12m ago</span></li>
+              </ul>
+            </div>
           </div>
-          <div class="act">
-            <h4>Recent activity</h4>
-            <ul>
-              <li><span>Swapped 250 USDC for EURC</span><span>just now</span></li>
-              <li><span>Added liquidity to USDC / EURC</span><span>4m ago</span></li>
-              <li><span>Launched a token on the curve</span><span>9m ago</span></li>
-              <li><span>Collected creator fees to plugin</span><span>12m ago</span></li>
-            </ul>
+          <div class="panels" id="mock-pools" role="tabpanel" aria-labelledby="tab-pools" hidden>
+            <div class="swap">
+              <h3>Add liquidity</h3>
+              <div class="field"><span class="amt tnum">500.00</span><span class="tok"><i></i>USDC</span></div>
+              <div class="field"><span class="amt tnum">462.96</span><span class="tok"><i class="y"></i>EURC</span></div>
+              <div class="qrow"><span>Pool</span><b>USDC / EURC</b></div>
+              <div class="qrow"><span>You earn</span><b>0.30% of every trade</b></div>
+              <div class="qrow"><span>Exit</span><b>One transaction with permit</b></div>
+              <a class="btn btn-y" href="/app/#pools">Add liquidity</a>
+            </div>
+            <div class="act">
+              <h3>Your positions</h3>
+              <ul>
+                <li><span>USDC / EURC</span><span class="tnum">500 USDC + 462.96 EURC</span></li>
+                <li><span>Fees</span><span>stay in the pool, so your share grows</span></li>
+                <li><span>Protocol fee</span><span>off on core pools</span></li>
+                <li><span>Remove</span><span>any time, one transaction</span></li>
+              </ul>
+            </div>
+          </div>
+          <div class="panels" id="mock-launch" role="tabpanel" aria-labelledby="tab-launch" hidden>
+            <div class="swap">
+              <h3>Create a token</h3>
+              <div class="field"><span><small>Name</small><span class="txt">Sample Coin</span></span><span class="tok"><i class="y"></i>SAMPLE</span></div>
+              <div class="qrow"><span>Creator fee</span><b class="tnum">2.5%, locked at launch</b></div>
+              <div class="qrow"><span>Fees go to</span><b>Split, up to 20 wallets</b></div>
+              <div class="qrow"><span>Platform fee</span><b class="tnum">0.5%</b></div>
+              <div class="qrow"><span>Launch fee</span><b class="tnum">1 USDC</b></div>
+              <a class="btn btn-y" href="/app/#launch/new">Launch a token</a>
+            </div>
+            <div class="act">
+              <h3>The curve</h3>
+              <div class="qrow"><span>Raised</span><b class="tnum">10,000 of 25,000 USDC</b></div>
+              <div class="bar" aria-hidden="true"><i></i></div>
+              <ul>
+                <li><span>Opens at</span><span class="tnum">$7,812 market cap</span></li>
+                <li><span>Graduates at</span><span class="tnum">25,000 USDC raised</span></li>
+                <li><span>Then</span><span>its own pool opens</span></li>
+              </ul>
+            </div>
+          </div>
+          <div class="panels" id="mock-docs" role="tabpanel" aria-labelledby="tab-docs" hidden>
+            <div class="act">
+              <h3>Docs</h3>
+              <ul class="toc">
+                <li><span>Overview</span></li>
+                <li><span>How the curve works</span></li>
+                <li><span>Launching a token</span></li>
+                <li class="on"><span>Creator fees &amp; plugins</span><span>Reading</span></li>
+                <li><span>Graduation</span></li>
+                <li><span>Listing &amp; integration</span></li>
+              </ul>
+            </div>
+            <div class="swap">
+              <h3>Creator fees &amp; plugins</h3>
+              <p class="doc">A creator picks a fee from 0 to 10% at launch, on top of the 0.5% platform fee, and it is locked for good. It is charged in USDC on every buy and sell, and waits in the launchpad until anyone collects it to the destination the creator chose: their wallet, a split, holder rewards, Deepen pool, a combo or any address.</p>
+              <a class="btn btn-y" href="/app/#docs">Read the docs</a>
+            </div>
           </div>
         </div>
       </div>
@@ -827,6 +909,20 @@ var ins=[250,1000,75,4200,18.5],qi=0;
 function f2(x){return x.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}
 setInterval(function(){qi=(qi+1)%ins.length;var v=ins[qi],o=v*0.92592;
   document.getElementById('amt-in').textContent=f2(v);document.getElementById('amt-out').textContent=f2(o);document.getElementById('amt-min').textContent=f2(o*0.995)+' EURC'},3200);
+
+// preview tabs: the highlight follows the chosen view (click, or the arrow keys once a tab has focus)
+var mtabs=[].slice.call(document.querySelectorAll('#mock-tabs [role=tab]'));
+function showTab(t,focus){
+  mtabs.forEach(function(x){var on=x===t,p=document.getElementById(x.getAttribute('aria-controls'));
+    x.classList.toggle('on',on);x.setAttribute('aria-selected',on);x.tabIndex=on?0:-1;p.hidden=!on;
+    if(on){p.classList.remove('fade-swap');void p.offsetWidth;p.classList.add('fade-swap')}});
+  if(focus)t.focus();
+}
+mtabs.forEach(function(t,i){
+  t.addEventListener('click',function(){showTab(t)});
+  t.addEventListener('keydown',function(e){var d={ArrowDown:1,ArrowRight:1,ArrowUp:-1,ArrowLeft:-1}[e.key];if(!d)return;
+    e.preventDefault();showTab(mtabs[(i+d+mtabs.length)%mtabs.length],true)});
+});
 
 // contracts
 var C=[

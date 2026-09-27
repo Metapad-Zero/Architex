@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
 import { hashFor, type AppRoute } from '../../hooks/useHashRoute'
@@ -99,17 +99,32 @@ describe('landing page', () => {
     expect(forward('#pools', { ios: true })).toBe('/app/#pools')
   })
 
-  test('anyone who has used the app in this browser goes straight back to it', () => {
-    expect(forward('', { stored: ['architex.wallet.keystore'] })).toBe('/app/')
-    expect(forward('', { stored: ['wagmi.recentConnectorId'] })).toBe('/app/')
-    expect(forward('', { stored: ['architex.recent.5042'] })).toBe('/app/')
-    expect(forward('#pools', { stored: ['architex.lastPair'] })).toBe('/app/#pools')
+  test('everyone sees the landing at architex.fun, people who have used the app included', () => {
+    const used = ['architex.wallet.keystore', 'wagmi.recentConnectorId', 'architex.lastPair']
+    expect(forward('', { stored: used })).toBe(undefined)
+    expect(forward('#about', { stored: used })).toBe(undefined)
+    expect(forward('#pools', { stored: used })).toBe('/app/#pools')
   })
 
-  test('the landing stays for new visitors, its own settings, ?home, and outside the root', () => {
-    expect(forward('', { stored: ['architex.home.theme', 'something.else'] })).toBe(undefined)
-    expect(forward('', { stored: ['architex.wallet.keystore'], search: '?home' })).toBe(undefined)
-    expect(forward('#about', { stored: ['architex.wallet.keystore'], search: '?home' })).toBe(undefined)
-    expect(forward('', { stored: ['architex.wallet.keystore'], pathname: '/home/' })).toBe(undefined)
+  test('each preview tab opens its own panel, and one is chosen to start', () => {
+    const tabs = [...LANDING.matchAll(/<button type="button" role="tab" id="([^"]+)" aria-controls="([^"]+)" aria-selected="(true|false)"/g)]
+    expect(tabs.length).toBe(4)
+    expect(tabs.filter((t) => t[3] === 'true').length).toBe(1)
+    for (const [, tab, panel] of tabs) expect(LANDING).toContain(`id="${panel}" role="tabpanel" aria-labelledby="${tab}"`)
+  })
+
+  test('headings never skip a level on the way down', () => {
+    let last = 0
+    for (const [, level] of LANDING.matchAll(/<h([1-6])[\s>]/g)) {
+      expect(Number(level) - last <= 1).toBe(true)
+      last = Number(level)
+    }
+  })
+
+  test('addresses use Menlo where it is installed and the self-hosted look-alike everywhere else', () => {
+    expect(LANDING).toContain('.mono{font-family:Menlo,"DejaVu Sans Mono",monospace}')
+    const font = LANDING.match(/url\((\/fonts\/[^)]+\.woff2)\)/)?.[1] ?? ''
+    expect(existsSync(fileURLToPath(new URL(`../../../public${font}`, import.meta.url)))).toBe(true)
+    expect(existsSync(fileURLToPath(new URL('../../../public/fonts/dejavu-sans-mono-LICENSE.txt', import.meta.url)))).toBe(true)
   })
 })
