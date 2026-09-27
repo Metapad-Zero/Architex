@@ -50,7 +50,8 @@ setTimeout(function(){document.querySelectorAll('.rv').forEach(function(e){if(e.
   --inv-fg:#ffffff;
   --yellow:#ffd400;
   --amber:#f2a100;
-  --accent-text:#b37800;
+  --accent-text:#875900;
+  --heading-gold-1:#986100;--heading-gold-2:#ad7800;--heading-gold-3:#89651a;
   --cream:#fff6d6;
   --cream-line:rgba(245,164,0,.28);
   --cream-text:#7a5a00;
@@ -70,6 +71,7 @@ setTimeout(function(){document.querySelectorAll('.rv').forEach(function(e){if(e.
 @media (prefers-color-scheme:dark){
   :root:not([data-theme="light"]){
     color-scheme:dark;
+    --heading-gold-1:#f2a100;--heading-gold-2:#ffcc00;--heading-gold-3:#c29a2e;
     --bg:#0c0c0b;--ink:#f5f3ea;--ink-2:#d9d6cb;--muted:#9d9a90;--line:rgba(255,255,255,.08);--line-2:rgba(255,255,255,.16);
     --solid:#16160f;--glass:rgba(26,25,20,.72);--glass-b:rgba(255,255,255,.07);--header:rgba(12,12,11,.78);
     --inv-bg:#f5f3ea;--inv-fg:#0d0d0c;--accent-text:#ffcf3a;--cream:rgba(255,212,0,.1);--cream-line:rgba(255,212,0,.28);--cream-text:#ffdd66;
@@ -80,6 +82,7 @@ setTimeout(function(){document.querySelectorAll('.rv').forEach(function(e){if(e.
 }
 :root[data-theme="dark"]{
   color-scheme:dark;
+  --heading-gold-1:#f2a100;--heading-gold-2:#ffcc00;--heading-gold-3:#c29a2e;
   --bg:#0c0c0b;--ink:#f5f3ea;--ink-2:#d9d6cb;--muted:#9d9a90;--line:rgba(255,255,255,.08);--line-2:rgba(255,255,255,.16);
   --solid:#16160f;--glass:rgba(26,25,20,.72);--glass-b:rgba(255,255,255,.07);--header:rgba(12,12,11,.78);
   --inv-bg:#f5f3ea;--inv-fg:#0d0d0c;--accent-text:#ffcf3a;--cream:rgba(255,212,0,.1);--cream-line:rgba(255,212,0,.28);--cream-text:#ffdd66;
@@ -97,7 +100,7 @@ svg{display:block}
 @font-face{font-family:"DejaVu Sans Mono";src:local("DejaVu Sans Mono"),url(/fonts/dejavu-sans-mono-latin.woff2) format("woff2");font-display:swap;unicode-range:U+0020-007E,U+00A0-00FF,U+2013-2014,U+2018-201D,U+2022,U+2026,U+2190-2193}
 .mono{font-family:Menlo,"DejaVu Sans Mono",monospace}
 .tnum{font-variant-numeric:tabular-nums}
-:focus-visible{outline:2px solid var(--amber);outline-offset:3px;border-radius:6px}
+:focus-visible{outline:2px solid var(--accent-text);outline-offset:3px;border-radius:6px}
 
 .wash{position:fixed;inset:0;z-index:-1;pointer-events:none;overflow:hidden}
 .wash i{position:absolute;border-radius:50%;filter:blur(90px);opacity:.75}
@@ -137,7 +140,7 @@ header.scrolled{background:var(--header);backdrop-filter:saturate(1.4) blur(14px
 .pill .dot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 0 4px rgba(11,122,59,.16);animation:pulse 2.4s infinite}
 @keyframes pulse{50%{box-shadow:0 0 0 7px rgba(11,122,59,0)}}
 h1{font-size:clamp(46px,7.2vw,92px);line-height:.98;letter-spacing:-.045em;font-weight:800;margin:26px 0 22px}
-h1 .g{display:block;background:linear-gradient(95deg,#f2a100 0%,#ffcc00 45%,#c29a2e 100%);-webkit-background-clip:text;background-clip:text;color:transparent;padding-bottom:.06em}
+h1 .g{display:block;background:linear-gradient(95deg,var(--heading-gold-1) 0%,var(--heading-gold-2) 45%,var(--heading-gold-3) 100%);-webkit-background-clip:text;background-clip:text;color:transparent;padding-bottom:.06em}
 .lead{font-size:clamp(19px,2vw,23px);font-weight:600;letter-spacing:-.01em;margin:0 0 14px;max-width:520px}
 .sub{color:var(--muted);max-width:500px;margin:0 0 34px;font-size:16.5px}
 .cta-row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
@@ -166,7 +169,7 @@ section{padding:120px 0;position:relative;overflow-x:clip}
 .eyebrow{font-size:12.5px;font-weight:700;letter-spacing:.16em;text-transform:uppercase;color:var(--accent-text);display:flex;align-items:center;gap:10px;margin-bottom:18px}
 .eyebrow::before{content:"";width:22px;height:2px;background:var(--yellow)}
 h2{font-size:clamp(34px,4.6vw,56px);line-height:1.04;letter-spacing:-.035em;font-weight:800;margin:0 0 20px}
-h2 .g{background:linear-gradient(95deg,#f2a100,#e0b000);-webkit-background-clip:text;background-clip:text;color:transparent}
+h2 .g{background:linear-gradient(95deg,var(--heading-gold-1),var(--heading-gold-2));-webkit-background-clip:text;background-clip:text;color:transparent}
 .intro{color:var(--muted);font-size:18px;max-width:640px;margin:0}
 .center{text-align:center}.center .eyebrow{justify-content:center}.center .intro{margin:0 auto}
 .card{background:var(--glass);border:1px solid var(--glass-b);border-radius:var(--radius);box-shadow:var(--shadow);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
@@ -320,6 +323,8 @@ h2 .g{background:linear-gradient(95deg,#f2a100,#e0b000);-webkit-background-clip:
 .crow .nm{font-weight:700;font-size:14.5px}
 .crow .ad{font-size:12.5px;color:var(--muted);word-break:break-all}
 .crow .ops{display:flex;gap:6px}
+.copy-status{min-height:4.65em;margin:0;padding:4px 16px;font-size:13px;color:var(--ink-2)}
+.crow button.mini{min-width:72px;justify-content:center}
 .mini{height:32px;padding:0 12px;border-radius:999px;border:1px solid var(--line-2);background:var(--solid);font:600 12.5px "Public Sans",sans-serif;cursor:pointer;display:inline-flex;align-items:center;gap:6px;color:var(--ink)}
 .mini:hover{background:var(--cream)}
 .mini.ok{background:var(--inv-bg);color:var(--inv-fg);border-color:var(--inv-bg)}
@@ -347,7 +352,7 @@ footer{padding:50px 0 60px;border-top:1px solid var(--line)}
 .js .rv{opacity:0;transform:translateY(28px);transition:opacity .9s cubic-bezier(.2,.7,.2,1),transform .9s cubic-bezier(.2,.7,.2,1)}
 .js .rv.in{opacity:1;transform:none}
 .d1{transition-delay:.08s}.d2{transition-delay:.16s}.d3{transition-delay:.24s}.d4{transition-delay:.32s}
-@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}.js .rv{opacity:1;transform:none}}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}*{animation:none!important;transition:none!important}.js .rv{opacity:1;transform:none}}
 
 @media (max-width:980px){
   .links{display:none}
@@ -369,10 +374,17 @@ footer{padding:50px 0 60px;border-top:1px solid var(--line)}
 }
 @media (max-width:560px){
   .wrap{padding:0 16px}
-  .nav-r .btn{display:none}
+  .nav{gap:12px}
+  .nav .brand{gap:6px;font-size:13px;letter-spacing:.08em}
+  .nav .brand svg{width:26px;height:26px}
+  .nav-r{gap:6px}
+  .nav-r .btn{height:44px;padding:0 12px;font-size:13px}
+  .nav-r .icon-btn{width:44px;height:44px;flex-shrink:0}
+  .nav-r a.icon-btn{display:none}
   .feat-grid{grid-template-columns:1fr}
   .facts{grid-template-columns:1fr}
   .crow{grid-template-columns:1fr}
+  .crow .mini{height:44px;min-width:72px;justify-content:center}
   .preview,.main,.cmp{padding:16px}
   .side{padding:14px 16px 0}
   .final .box{padding:60px 22px}
@@ -481,24 +493,24 @@ footer{padding:50px 0 60px;border-top:1px solid var(--line)}
       <p class="intro rv d2">Trade, earn, create, or build on top. Pick one to see the numbers behind it.</p>
     </div>
     <div class="feat-grid" role="tablist" aria-label="Features">
-      <button class="card feat on rv" data-k="0" role="tab" aria-selected="true" aria-controls="pv">
+      <button class="card feat on rv" data-k="0" id="feature-0" role="tab" aria-selected="true" aria-controls="pv" tabindex="0">
         <div class="top"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#0d0d0c" stroke-width="2"><path d="M7 7h13l-4-4M17 17H4l4 4"/></svg></div><span class="n">01</span></div>
         <h3>Swap</h3><p>Exact-in or exact-out, single or multi-hop through USDC, with price impact shown before you sign.</p><span class="more">Previewing</span>
       </button>
-      <button class="card feat rv d1" data-k="1" role="tab" aria-selected="false" aria-controls="pv">
+      <button class="card feat rv d1" data-k="1" id="feature-1" role="tab" aria-selected="false" aria-controls="pv" tabindex="-1">
         <div class="top"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#0d0d0c" stroke-width="2"><path d="M4 19V9M10 19V5M16 19v-7M22 19H2"/></svg></div><span class="n">02</span></div>
         <h3>Pools</h3><p>Provide liquidity and keep the full 0.30% fee on every trade. Exit in a single permit transaction.</p><span class="more">Open preview</span>
       </button>
-      <button class="card feat rv d2" data-k="2" role="tab" aria-selected="false" aria-controls="pv">
+      <button class="card feat rv d2" data-k="2" id="feature-2" role="tab" aria-selected="false" aria-controls="pv" tabindex="-1">
         <div class="top"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#0d0d0c" stroke-width="2"><path d="M12 15c-3 0-5-2-5-2s1-7 5-11c4 4 5 11 5 11s-2 2-5 2zM9 17l-2 5M15 17l2 5M12 18v4"/></svg></div><span class="n">03</span></div>
         <h3>Launchpad</h3><p>Launch on the same fair bonding curve as everyone else. It graduates into its own pool automatically.</p><span class="more">Open preview</span>
       </button>
-      <button class="card feat rv d3" data-k="3" role="tab" aria-selected="false" aria-controls="pv">
+      <button class="card feat rv d3" data-k="3" id="feature-3" role="tab" aria-selected="false" aria-controls="pv" tabindex="-1">
         <div class="top"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#0d0d0c" stroke-width="2"><path d="M9 3v4M15 3v4M7 7h10v4a5 5 0 0 1-10 0V7zM12 16v5"/></svg></div><span class="n">04</span></div>
         <h3>Fee plugins</h3><p>Pick your creator fee and route it to a split, holder rewards, deeper liquidity, or your own contract.</p><span class="more">Open preview</span>
       </button>
     </div>
-    <div class="card preview rv" id="pv" role="tabpanel">
+    <div class="card preview rv" id="pv" role="tabpanel" aria-labelledby="feature-0" tabindex="0">
       <div>
         <div class="pv-head"><b id="pv-title"></b><span class="tag" id="pv-tag"></span></div>
         <p class="pv-sub" id="pv-sub"></p>
@@ -578,7 +590,7 @@ footer{padding:50px 0 60px;border-top:1px solid var(--line)}
               <a class="btn btn-y" href="/app/#swap">Swap</a>
             </div>
             <div class="act">
-              <h3>Recent activity</h3>
+              <h3>Sample activity</h3>
               <ul>
                 <li><span>Swapped 250 USDC for EURC</span><span>just now</span></li>
                 <li><span>Added liquidity to USDC / EURC</span><span>4m ago</span></li>
@@ -622,7 +634,7 @@ footer{padding:50px 0 60px;border-top:1px solid var(--line)}
               <div class="qrow"><span>Raised</span><b class="tnum">10,000 of 25,000 USDC</b></div>
               <div class="bar" aria-hidden="true"><i></i></div>
               <ul>
-                <li><span>Opens at</span><span class="tnum">$7,812 market cap</span></li>
+                <li><span>Opens at</span><span class="tnum">$6,250 market cap</span></li>
                 <li><span>Graduates at</span><span class="tnum">25,000 USDC raised</span></li>
                 <li><span>Then</span><span>its own pool opens</span></li>
               </ul>
@@ -821,21 +833,21 @@ document.getElementById('c-swap').innerHTML=stacked([
 ],4,'Of a 3 dollar fee on a 1,000 dollar swap: Uniswap v2 pays LPs 2.50 dollars and the protocol 0.50. Architex pays LPs all 3 dollars.');
 
 // Bonding curve: market cap vs USDC raised, from the contract constants
-var V0=8333.333333,T0=1066666667,K=V0*T0;
-function mcap(r){var v=V0+r;return v*v/K*1e9}
+var V0=8333.333333,T0=1066666667,K=V0*T0,CURVE_SUPPLY=800000000;
+function mcap(r){var v=V0+r;return v*v/K*CURVE_SUPPLY}
 function curveChart(){
-  var W=520,H=250,x0=58,y0=16,cw=W-x0-16,ch=H-y0-34,max=130000,b='',pts=[];
-  [0,25000,50000,75000,100000,125000].forEach(function(v){var y=y0+ch-ch*v/max;b+='<line class="grid" x1="'+x0+'" x2="'+(W-16)+'" y1="'+y+'" y2="'+y+'"/><text x="'+(x0-8)+'" y="'+(y+4)+'" text-anchor="end">$'+(v/1000)+'k</text>'});
+  var W=520,H=250,x0=58,y0=16,cw=W-x0-16,ch=H-y0-34,max=105000,b='',pts=[];
+  [0,25000,50000,75000,100000].forEach(function(v){var y=y0+ch-ch*v/max;b+='<line class="grid" x1="'+x0+'" x2="'+(W-16)+'" y1="'+y+'" y2="'+y+'"/><text x="'+(x0-8)+'" y="'+(y+4)+'" text-anchor="end">$'+(v/1000)+'k</text>'});
   [0,5000,10000,15000,20000,25000].forEach(function(r){var x=x0+cw*r/25000;b+='<text x="'+x+'" y="'+(H-12)+'" text-anchor="middle">'+(r/1000)+'k</text>'});
   for(var i=0;i<=50;i++){var r=25000*i/50;pts.push([x0+cw*r/25000,y0+ch-ch*mcap(r)/max])}
   var d='M'+pts.map(function(p){return p[0].toFixed(1)+','+p[1].toFixed(1)}).join(' L');
   b+='<path d="'+d+' L'+(x0+cw)+','+(y0+ch)+' L'+x0+','+(y0+ch)+' Z" fill="url(#gArea)"/>';
   b+='<path d="'+d+'" fill="none" stroke="#f2a100" stroke-width="3" stroke-linecap="round"/>';
   var s=pts[0],e=pts[pts.length-1];
-  b+='<circle cx="'+s[0]+'" cy="'+s[1]+'" r="5" fill="#ffd400" stroke="#f2a100" stroke-width="2"/><text class="lbl" x="'+(s[0]+10)+'" y="'+(s[1]-22)+'">Opens at $7,812</text>';
-  b+='<circle cx="'+e[0]+'" cy="'+e[1]+'" r="6" fill="#ffd400" stroke="#f2a100" stroke-width="2"/><text class="lbl" x="'+(e[0]-10)+'" y="'+(e[1]+22)+'" text-anchor="end" dy="-34">Graduates at $125,000</text>';
+  b+='<circle cx="'+s[0]+'" cy="'+s[1]+'" r="5" fill="#ffd400" stroke="#f2a100" stroke-width="2"/><text class="lbl" x="'+(s[0]+10)+'" y="'+(s[1]-22)+'">Opens at $6,250</text>';
+  b+='<circle cx="'+e[0]+'" cy="'+e[1]+'" r="6" fill="#ffd400" stroke="#f2a100" stroke-width="2"/><text class="lbl" x="'+(e[0]-10)+'" y="'+(e[1]+22)+'" text-anchor="end" dy="-34">Graduates at $100,000</text>';
   b+='<text x="'+(x0+cw/2)+'" y="'+(H)+'" text-anchor="middle">USDC raised on the curve</text>';
-  return svg(W,H,b,'Market cap rises from 7,812 dollars to 125,000 dollars as the curve raises 25,000 USDC.');
+  return svg(W,H,b,'Market cap, based on 800 million curve tokens, rises from 6,250 dollars to 100,000 dollars as the curve raises 25,000 USDC.');
 }
 
 // LP earnings vs volume: 0.30% vs 0.25%
@@ -876,7 +888,7 @@ var PV=[
     legend:[['var(--amber)','Architex, 0.30%'],['var(--bar-them)','Uniswap v2, 0.25%']],
     items:[['LP share','The full 0.30% on every trade'],['Protocol fee','Off on core pools'],['Exit','One transaction with permit']]},
   {t:'Launchpad',tag:'The curve',sub:'Every token launches on the same curve, hard-coded in the contract. Market cap as the curve fills.',chart:curveChart,
-    legend:[['var(--amber)','Market cap (1B supply)']],
+    legend:[['var(--amber)','Market cap (800M curve supply)']],
     items:[['Curve','800M tokens for 25,000 USDC'],['Graduation','25,000 USDC and 200M tokens open its pool at the curve\'s last price'],['Fees','0.5% platform, plus the creator fee'],['Cost','1 USDC to launch']]},
   {t:'Fee plugins',tag:'Per $1,000 traded',sub:'What a creator can earn on each $1,000 of trading. On Architex the creator picks the rate at launch.',chart:creatorChart,
     legend:[['#f2a100','Architex, 0 to 10% set by the creator'],['var(--bar-them)','pump.fun, 0.30% fixed']],
@@ -890,9 +902,19 @@ function draw(k){
   document.getElementById('pv-chart').innerHTML=p.chart();
   document.getElementById('pv-legend').innerHTML=p.legend.map(function(l){return '<span><i style="background:'+l[0]+'"></i>'+l[1]+'</span>'}).join('');
   document.getElementById('pv-list').innerHTML=p.items.map(function(it){return '<div class="pv-item fade-swap"><small>'+it[0]+'</small><span>'+it[1]+'</span></div>'}).join('');
-  document.querySelectorAll('.feat').forEach(function(f){var on=+f.dataset.k===k;f.classList.toggle('on',on);f.setAttribute('aria-selected',on);f.querySelector('.more').textContent=on?'Previewing':'Open preview'});
+  document.getElementById('pv').setAttribute('aria-labelledby','feature-'+k);
+  document.querySelectorAll('.feat').forEach(function(f){var on=+f.dataset.k===k;f.classList.toggle('on',on);f.setAttribute('aria-selected',on);f.tabIndex=on?0:-1;f.querySelector('.more').textContent=on?'Previewing':'Open preview'});
 }
-document.querySelectorAll('.feat').forEach(function(f){f.addEventListener('click',function(){draw(+f.dataset.k)})});
+function nextTabIndex(e,i,count){
+  var d={ArrowDown:1,ArrowRight:1,ArrowUp:-1,ArrowLeft:-1}[e.key];
+  if(!d&&e.key!=='Home'&&e.key!=='End')return null;
+  e.preventDefault();return e.key==='Home'?0:e.key==='End'?count-1:(i+d+count)%count;
+}
+var ftabs=[].slice.call(document.querySelectorAll('.feat'));
+ftabs.forEach(function(f,i){
+  f.addEventListener('click',function(){draw(i)});
+  f.addEventListener('keydown',function(e){var next=nextTabIndex(e,i,ftabs.length);if(next===null)return;draw(next);ftabs[next].focus()});
+});
 draw(0);
 
 // orbit
@@ -907,22 +929,29 @@ nodes.forEach(function(n,i){
 // sample swap mock
 var ins=[250,1000,75,4200,18.5],qi=0;
 function f2(x){return x.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}
-setInterval(function(){qi=(qi+1)%ins.length;var v=ins[qi],o=v*0.92592;
-  document.getElementById('amt-in').textContent=f2(v);document.getElementById('amt-out').textContent=f2(o);document.getElementById('amt-min').textContent=f2(o*0.995)+' EURC'},3200);
+var sampleTimer,motion=matchMedia('(prefers-reduced-motion: reduce)');
+function sampleMotion(){
+  clearInterval(sampleTimer);
+  if(motion.matches)return;
+  sampleTimer=setInterval(function(){qi=(qi+1)%ins.length;var v=ins[qi],o=v*0.92592;
+    document.getElementById('amt-in').textContent=f2(v);document.getElementById('amt-out').textContent=f2(o);document.getElementById('amt-min').textContent=f2(o*0.995)+' EURC'},3200);
+}
+motion.addEventListener('change',sampleMotion);sampleMotion();
 
 // preview tabs: the highlight follows the chosen view (click, or the arrow keys once a tab has focus)
 var mtabs=[].slice.call(document.querySelectorAll('#mock-tabs [role=tab]'));
 function showTab(t,focus){
   mtabs.forEach(function(x){var on=x===t,p=document.getElementById(x.getAttribute('aria-controls'));
     x.classList.toggle('on',on);x.setAttribute('aria-selected',on);x.tabIndex=on?0:-1;p.hidden=!on;
+    p.tabIndex=0;
     if(on){p.classList.remove('fade-swap');void p.offsetWidth;p.classList.add('fade-swap')}});
   if(focus)t.focus();
 }
 mtabs.forEach(function(t,i){
   t.addEventListener('click',function(){showTab(t)});
-  t.addEventListener('keydown',function(e){var d={ArrowDown:1,ArrowRight:1,ArrowUp:-1,ArrowLeft:-1}[e.key];if(!d)return;
-    e.preventDefault();showTab(mtabs[(i+d+mtabs.length)%mtabs.length],true)});
+  t.addEventListener('keydown',function(e){var next=nextTabIndex(e,i,mtabs.length);if(next!==null)showTab(mtabs[next],true)});
 });
+showTab(mtabs[0]);
 
 // contracts
 var C=[
@@ -938,10 +967,18 @@ var C=[
   ['Combo plugin','0x6f265D785191e7F13357940a2D4A94C35e54df9D']
 ];
 var ct=document.getElementById('ctable');
-ct.innerHTML=C.map(function(c){return '<div class="crow"><div><div class="nm">'+c[0]+'</div><div class="ad mono">'+c[1]+'</div></div><div class="ops"><button class="mini" type="button" data-a="'+c[1]+'">Copy</button><a class="mini" href="https://arc.etherscan.io/address/'+c[1]+'#code" target="_blank" rel="noopener">View ↗</a></div></div>'}).join('');
+ct.innerHTML=C.map(function(c){return '<div class="crow"><div><div class="nm">'+c[0]+'</div><div class="ad mono">'+c[1]+'</div></div><div class="ops"><button class="mini" type="button" data-a="'+c[1]+'" data-name="'+c[0]+'" aria-label="Copy '+c[0]+' address">Copy</button><a class="mini" aria-label="View '+c[0]+' contract" href="https://arc.etherscan.io/address/'+c[1]+'#code" target="_blank" rel="noopener">View ↗</a></div></div>'}).join('')+'<p class="copy-status" role="status" aria-live="polite" aria-atomic="true"></p>';
+var copyStatus=ct.querySelector('.copy-status');
 ct.addEventListener('click',function(e){var b=e.target.closest('button[data-a]');if(!b)return;
-  navigator.clipboard.writeText(b.dataset.a).then(function(){b.textContent='Copied';b.classList.add('ok')},function(){b.textContent='Select it'});
-  setTimeout(function(){b.textContent='Copy';b.classList.remove('ok')},1400)});
+  copyStatus.textContent='';b.disabled=true;
+  Promise.resolve().then(function(){return navigator.clipboard.writeText(b.dataset.a)}).then(function(){
+    b.textContent='Copied';b.classList.add('ok');copyStatus.textContent=b.dataset.name+' address copied.';
+  },function(){
+    var address=b.closest('.crow').querySelector('.ad'),range=document.createRange(),selection=window.getSelection();
+    range.selectNodeContents(address);if(selection){selection.removeAllRanges();selection.addRange(range)}
+    copyStatus.textContent='Could not copy '+b.dataset.name+' address. The address is selected; use your device’s Copy command.';
+  }).finally(function(){b.disabled=false;setTimeout(function(){b.textContent='Copy';b.classList.remove('ok')},2000)});
+});
 })();
 </script>
 </body>

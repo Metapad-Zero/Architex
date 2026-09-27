@@ -146,7 +146,9 @@ export function UpdatesSheet() {
               <div className="updates-specimen">
                 <UpdateFigure figure={item.figure} />
               </div>
-              <p className="mt-3 text-2xs text-g500">Example</p>
+              {(item.figure === 'fees' || item.figure === 'deepen-pool' || item.figure === 'launch') && (
+                <p className="mt-3 text-2xs text-g500">Sample values</p>
+              )}
             </div>
             <div className="updates-copy">
               <h2 id="updates-sheet-title" className="text-lg font-semibold leading-tight tracking-[-0.01em]">
@@ -166,8 +168,8 @@ export function UpdatesSheet() {
                 Architex updated
                 {items.length > 1 ? ` · ${index + 1} of ${items.length}` : ''}
               </p>
-              <button type="button" className="updates-later" onClick={close}>
-                Later
+              <button type="button" className="updates-dismiss" onClick={close}>
+                Dismiss
               </button>
             </div>
             <PrimaryButton className="w-full sm:w-auto sm:min-w-56" onClick={goNext}>
@@ -181,9 +183,9 @@ export function UpdatesSheet() {
 }
 
 function UpdateFigure({ figure }: { figure: UpdateFigure }) {
-  if (figure === 'fees') {
+  if (figure === 'fees' || figure === 'deepen-pool') {
     return (
-      <div className="flex items-center gap-6">
+      <div className="flex items-center gap-4 sm:gap-6">
         <FeeGauge bps={250} size="lg" showValue={false} decorative />
         <dl className="receipt-lines min-w-0 flex-1 border-t-0">
           <div>
@@ -192,7 +194,7 @@ function UpdateFigure({ figure }: { figure: UpdateFigure }) {
           </div>
           <div>
             <dt>Fees go to</dt>
-            <dd>Buyback &amp; burn</dd>
+            <dd>{figure === 'deepen-pool' ? 'Deepen pool' : 'Buyback & burn'}</dd>
           </div>
         </dl>
       </div>

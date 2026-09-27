@@ -65,6 +65,7 @@ export function AddLiquidityForm({ pair: fixedPair, pairs, tokens, balances, all
   const spendableB = tokenB ? spendableBalance(tokenB.address, balances.get(tokenB.address.toLowerCase()) ?? 0n) : 0n
   const shortA = parsedA > spendableA
   const shortB = parsedB > spendableB
+  const balancesAvailable = Boolean(tokenA && tokenB && balances.has(tokenA.address.toLowerCase()) && balances.has(tokenB.address.toLowerCase()))
   // Scaled by 1e18 so a token worth less than one raw unit of the other still shows its price.
   const initialPrice = !pair && tokenA && tokenB && parsedA > 0n && parsedB > 0n
     ? `1 ${tokenA.symbol} = ${formatAmount((parsedB * 10n ** BigInt(tokenA.decimals + 18)) / parsedA, tokenB.decimals + 18)} ${tokenB.symbol}`
@@ -100,18 +101,20 @@ export function AddLiquidityForm({ pair: fixedPair, pairs, tokens, balances, all
       ? activeChain.isTestnet ? 'Switch to Arc Testnet' : 'Switch to Arc'
       : parsedA === 0n || parsedB === 0n
         ? 'Enter amounts'
-        : shortA || shortB
-          ? `Not enough ${(shortA ? tokenA : tokenB)?.symbol ?? 'balance'}`
-          : allowanceA < parsedA
-          ? `Approve ${tokenA?.symbol ?? 'token'}`
-          : allowanceB < parsedB
-            ? `Approve ${tokenB?.symbol ?? 'token'}`
-            : pair ? 'Add liquidity' : 'Create a pool'
+        : !balancesAvailable
+          ? 'Balance unavailable'
+          : shortA || shortB
+            ? `Not enough ${(shortA ? tokenA : tokenB)?.symbol ?? 'balance'}`
+            : allowanceA < parsedA
+              ? `Approve ${tokenA?.symbol ?? 'token'}`
+              : allowanceB < parsedB
+                ? `Approve ${tokenB?.symbol ?? 'token'}`
+                : pair ? 'Add liquidity' : 'Create a pool'
 
   const submit = async () => {
     if (!account) return open()
     if (chainId !== activeChain.id) return void switchToArc()
-    if (!tokenA || !tokenB || parsedA === 0n || parsedB === 0n || shortA || shortB) return
+    if (!tokenA || !tokenB || !balancesAvailable || parsedA === 0n || parsedB === 0n || shortA || shortB) return
     if (allowanceA < parsedA) return void liquidity.approve(tokenA.address, parsedA, tokenA.symbol)
     if (allowanceB < parsedB) return void liquidity.approve(tokenB.address, parsedB, tokenB.symbol)
     await liquidity.addLiquidity({

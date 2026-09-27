@@ -44,7 +44,7 @@ function traderLabel(trade: LaunchTrade): string {
 }
 
 export function LaunchDetail({ token, onBack, side }: LaunchDetailProps) {
-  const { launch, version, token: launchToken, usdc, tokenBalance, usdcBalance, usdcAllowance, snipeHeld, isLoading, unknown, refetch } = useLaunch(token)
+  const { launch, version, token: launchToken, usdc, tokenBalance, usdcBalance, balancesAvailable, usdcAllowance, snipeHeld, isLoading, unknown, refetch } = useLaunch(token)
   const graduated = Boolean(launch?.graduated)
   const v14 = version === 'v14'
   const { trades, historyComplete, reachesCreation, isLoading: tradesLoading, error: tradesError } = useLaunchTrades(
@@ -222,6 +222,7 @@ export function LaunchDetail({ token, onBack, side }: LaunchDetailProps) {
             usdc={usdc}
             tokenBalance={tokenBalance}
             usdcBalance={usdcBalance}
+            balancesAvailable={balancesAvailable}
             usdcAllowance={usdcAllowance}
             block={block}
             initialSide={side}
