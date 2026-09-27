@@ -14,6 +14,7 @@ import {
   swapImpactLossUsdFromOutput,
 } from '../lib/impactGuard'
 import { useRecent } from '../lib/recent'
+import { swapOpening } from '../lib/swapOpening'
 import { findTokenByRef, formatSwapUrl, parseSwapUrl, readLastPair, tokenRef, writeLastPair } from '../lib/swapUrl'
 import type { Token } from '../lib/tokens'
 import { useAllowances } from '../hooks/useAllowances'
@@ -30,6 +31,7 @@ import { PrimaryButton } from './PrimaryButton'
 import { ReceiptLines } from './ReceiptLines'
 import { RecentLedger } from './RecentLedger'
 import { SettingsPopover } from './SettingsPopover'
+import { SwapComingSoon } from './SwapComingSoon'
 import type { PickerExtra } from './TokenSelect'
 import { TxStatus } from './TxStatus'
 import { useSwitchToArc } from '../hooks/useSwitchToArc'
@@ -59,7 +61,7 @@ export function SwapSheet() {
   const { address: account } = useAccount()
   const { open } = useConnectSheet()
   const switchToArc = useSwitchToArc()
-  const { pairs, refetch: refetchPairs } = usePairs()
+  const { pairs, isLoading: pairsLoading, refetch: refetchPairs } = usePairs()
   const { tokens } = useTokens(pairs)
   const { balances, refetch: refetchBalances } = useBalances(account, tokens)
   const { allowances, refetch: refetchAllowances } = useAllowances(account, tokens)
@@ -206,6 +208,15 @@ export function SwapSheet() {
     impactAcknowledgedKey,
   })
 
+  // A pair whose pool is under the swap-opening goal shows the goal in the sheet's place (lib/swapOpening.ts). While
+  // the pools load it shows the goal too, so the form never flashes up for a pair that turns out to be closed.
+  const opening = swapOpening(tokenIn?.address, tokenOut?.address, pairs, activeChain.usdc)
+  const comingSoon = isDeployed && (pairsLoading || (opening !== undefined && !opening.open))
+  const symbolOf = (address: Address) => findToken(tokens, address)?.symbol ?? '…'
+  const pairLabel = opening
+    ? `${symbolOf(opening.pool.token0)} / ${symbolOf(opening.pool.token1)}`
+    : tokenIn && tokenOut ? `${tokenIn.symbol} / ${tokenOut.symbol}` : 'The'
+
   // Changing a token keeps the amount the user typed; only the derived side is recomputed by the quote. Any edit
   // (a token, an amount, a flip) clears the price-impact acknowledgment: it is ticked again for the new trade.
   const selectIn = (token: Token) => {
@@ -242,6 +253,18 @@ export function SwapSheet() {
       return
     }
     await swap.execute()
+  }
+
+  if (comingSoon) {
+    return (
+      <div className="swap-column">
+        <h1 className="sr-only">Swap</h1>
+        <div className="swap-sheet">
+          <SwapComingSoon pool={opening?.pool} pairLabel={pairLabel} liquidityUsd={pairsLoading ? undefined : opening?.liquidityUsd} />
+        </div>
+        <RecentLedger entries={recent} />
+      </div>
+    )
   }
 
   return (
