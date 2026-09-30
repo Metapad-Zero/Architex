@@ -119,12 +119,14 @@ export async function forkEnvironment(options: { arcPort?: number; basePort?: nu
     await baseTest.setStorageAt({ address: PINNED.base.usdc, index: slot, value: pad(numberToHex(options.baseUsdc ?? 100_000_000n), { size: 32 }) })
     const chain = (name: 'arc' | 'base', url: string, infra: { executor: Address; transceiverStructs: Address }, finality: number): ChainConfig => ({
       chain: name, rpc: url, chainId: PINNED[name].chainId, wormholeChainId: PINNED[name].wormholeChainId, core: PINNED[name].core, usdc: PINNED[name].usdc,
-      executor: infra.executor, transceiverStructs: infra.transceiverStructs, finality, fromBlock: PINNED[name].block,
+      executor: infra.executor, transceiverStructs: infra.transceiverStructs, finality, fromBlock: PINNED[name].block + 1n, // everything this adapter executes is after the fork point; older logs would be fetched from the public RPC
       // Arc gas is native USDC (18 decimals). Base gas is ETH, priced conservatively at 5,000 USDC.
       usdcAtomsPerNative: name === 'arc' ? 1_000_000n : 5_000_000_000n,
       // Base's real priority fee is around 0.001 gwei; anvil suggests 1 gwei, which would misstate cost.
       priorityFeeWei: name === 'base' ? 1_000_000n : undefined,
       opStackL1Fee: name === 'base',
+      // A fixed Arc fee ceiling, as in the testnet plan, so worst-case reservations do not drift with anvil's base fee.
+      maxFeePerGasWei: name === 'arc' ? 60_000_000_000n : undefined,
       venue: name === 'arc' ? { kind: 'architex', factory: PINNED.arc.factory } : { kind: 'uniswap-v3', factory: PINNED.base.factory, fee: 3000, tickSpacing: 60 },
     })
     const config: EvmAdapterConfig = {

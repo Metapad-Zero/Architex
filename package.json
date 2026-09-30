@@ -18,6 +18,7 @@
     "equilibrium:evm-serve": "bun run server/equilibrium/evm/serve.ts",
     "equilibrium:evm-launch": "bun run scripts/equilibrium-evm-launch.ts",
     "equilibrium:infra": "bun run scripts/equilibrium-infra.ts",
+    "equilibrium:gate-challenge": "bun run server/equilibrium/evm/challenge.ts",
     "equilibrium:transfer": "bun run server/equilibrium/evm/transfers/cli.ts",
     "equilibrium:transfers-fork-test": "EQUILIBRIUM_FORK=1 bun test server/equilibrium/evm/transfers/__tests__/returns.fork.test.ts server/equilibrium/evm/transfers/__tests__/refill.fork.test.ts",
     "equilibrium:transfers-rehearse": "bun run server/equilibrium/evm/transfers/rehearse.ts",
