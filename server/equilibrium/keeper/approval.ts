@@ -20,6 +20,7 @@ export const KEEPER_FILES = [
   'server/equilibrium/keeper/contracts.ts', 'server/equilibrium/keeper/fees.ts', 'server/equilibrium/keeper/keeper.ts', 'server/equilibrium/keeper/policy.ts',
   'server/equilibrium/keeper/preview.ts', 'server/equilibrium/keeper/quotes.ts', 'server/equilibrium/keeper/run.ts',
   'server/equilibrium/keeper/store.ts', 'server/equilibrium/keeper/types.ts',
+  'server/equilibrium/keeper/maintenance.ts',
   'contracts/equilibrium/EquilibriumKeeper.sol',
   'scripts/equilibrium-keeper-bytecode.ts',
 ] as const

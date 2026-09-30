@@ -45,6 +45,19 @@ describe('keeper durable record', () => {
     expect(() => store.open('cycle-2', candidate, 2, 1)).toThrow(/Resolve them before opening another/)
   })
 
+  test('maintenance admitted through another connection blocks an already-quoted cycle until completion', () => {
+    const other = new KeeperStore(join(dir, 'keeper.sqlite'))
+    try {
+      other.db.transaction(() => other.db.query(`INSERT INTO keeper_maintenance
+        (id,binding,request,state,tokens,quote) VALUES('maintenance-1','binding','{}','pending','1','1')`).run()).immediate()
+      expect(store.maintenancePending()).toEqual(['maintenance-1'])
+      expect(() => store.open('quoted-before-maintenance', candidate, 1, 1)).toThrow(/Inventory maintenance is unfinished/)
+      expect(store.list()).toEqual([])
+      other.db.query("UPDATE keeper_maintenance SET state='complete' WHERE id='maintenance-1'").run()
+      expect(store.open('quoted-before-maintenance', candidate, 2, 1).state).toBe('open')
+    } finally { other.close() }
+  })
+
   test('a leg is planned once; re-planning it under a different id is refused', () => {
     store.open('cycle-1', candidate, 1, 1)
     const buy = plan('cycle-1', 'buy', 'arc')

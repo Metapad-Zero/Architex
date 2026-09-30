@@ -4,7 +4,7 @@
  * it cannot describe bounds the contracts do not actually carry.
  *
  * Separate from the launch release preview on purpose. Approving a launch does not authorize
- * trading, and approving the keeper does not authorize a launch, a deployment or a refill.
+ * trading. An explicit maintenance scope also needs the separate transfer approval.
  */
 import { formatUnits, type PublicClient } from 'viem'
 import { keeperApprovalDigest, keeperManifest } from './approval'
@@ -95,8 +95,9 @@ export function keeperPreview(config: KeeperConfig, facts: VaultFacts[], version
 
 Generated ${generatedAt} for keeper version \`${version}\`, mode **${config.mode}**.
 ${forkBanner}
-This authorizes **bounded keeper trading only**. It does not authorize a launch, a deployment, an
-issuance, a bridge transfer, an inventory refill, a public announcement or any change to the
+${config.maintenance ? `This authorizes **bounded keeper trading** and the maintenance scope below only when paired with
+the **separate transfer approval**. Keeper approval alone authorizes no bridge transfer or refill.` : `This authorizes **bounded keeper trading only**. It authorizes no bridge transfer or inventory refill.`}
+It does not authorize a launch, a deployment, an issuance, a public announcement or any change to the
 approved launch configuration. The launch release approval is a separate digest over separate files.
 
 ### Routes and contracts
@@ -148,8 +149,23 @@ Worst-case gas and reserved recovery cost for one cycle at current fees: **${usd
 | --- | --- | --- | --- | --- | --- | --- |
 ${inventory}
 
-Inventory refill and the Base-to-Arc return route are **not** part of this approval. When a chain's
-inventory is exhausted the keeper stops trading that direction and says so.
+${config.maintenance ? `### Separately approved inventory maintenance
+
+Launch identity: \`${config.maintenance.launch}\`.
+Source executors: Arc \`${config.maintenance.executors.arc}\`, Base \`${config.maintenance.executors.base}\`.
+Token route: Base executor inventory → authenticated NTT return → Arc keeper vault.
+USDC route: Arc executor inventory → authenticated CCTP refill → Base executor → Base keeper vault.
+Token caps: ${tokens(config.maintenance.maxTokenPerTransfer)} per transfer, ${tokens(config.maintenance.maxTokenTotal)} total.
+USDC caps: ${usdc(config.maintenance.maxQuotePerTransfer)} per transfer, ${usdc(config.maintenance.maxQuoteTotal)} total.
+
+This keeper scope permits that bounded maintenance only with the **separate transfer approval** for
+the exact adapter configuration, transfer settings, gas caps and code. It uses existing executor
+inventory. It never funds a vault from holder inventory or issues tokens. Open local/on-chain
+exposure refuses maintenance, and pending maintenance blocks trading until reconciliation finishes.
+Maintenance costs are counted separately from trading profit. Its approval preview lists both digests.
+Only zero-message-fee NTT and zero-fee CCTP maintenance is accepted; native protocol payments stay closed.
+` : `Inventory refill and the Base-to-Arc return route are **not** part of this approval.`}
+When inventory is exhausted the keeper stops trading that direction and names the separate route.
 
 ### What a run does, and what it reports
 

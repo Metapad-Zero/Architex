@@ -72,6 +72,7 @@ export function createKeeper(config: KeeperConfig, store: KeeperStore): KeeperHa
       return { chain, chainId: c.chainId, keeper: c.keeper, token: c.token, quote: c.quote, pool: c.pool, venue: c.venue, finality: c.finality, quoteAtomsPerNative: c.quoteAtomsPerNative.toString() }
     }),
     policy: config.policy,
+    maintenance: config.maintenance,
   }
   const version = `equilibrium-keeper-v1:${keccak256(toBytes(JSON.stringify(manifest))).slice(2, 18)}`
 
@@ -114,6 +115,7 @@ export function createKeeper(config: KeeperConfig, store: KeeperStore): KeeperHa
       at: now(), tokens: tokens.toString(), quotes, lag, stalled,
       loss: totals.loss, net: totals.net,
       unresolved: store.unresolved().map((cycle) => cycle.id),
+      maintenance: store.maintenancePending(),
     }
   }
 

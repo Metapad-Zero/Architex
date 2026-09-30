@@ -76,6 +76,17 @@ export interface KeeperConfig {
   receiptTimeoutMs?: number
   /** Required for testnet: the digest of the approved keeper preview. */
   approval?: Hex
+  /** Separately transfer-approved maintenance; absent closes the maintenance rail. */
+  maintenance?: KeeperMaintenancePolicy
+}
+
+export interface KeeperMaintenancePolicy {
+  launch: Hex
+  executors: Record<KeeperChain, Address>
+  maxTokenPerTransfer: string
+  maxTokenTotal: string
+  maxQuotePerTransfer: string
+  maxQuoteTotal: string
 }
 
 /** One chain's executable quote for one token quantity, plus what the vault can actually do. */
@@ -117,6 +128,8 @@ export interface KeeperSnapshot {
   net: string
   /** Cycles with a settled buy and no settled sale. */
   unresolved: string[]
+  /** Durable inventory maintenance blocks trades until all transfers/deposits settle. */
+  maintenance?: string[]
 }
 
 export interface CycleCandidate {

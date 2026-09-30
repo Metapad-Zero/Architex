@@ -33,7 +33,11 @@ export class KeeperStore {
         PRIMARY KEY (cycle, kind), FOREIGN KEY (cycle) REFERENCES keeper_cycles(id));
       CREATE TABLE IF NOT EXISTS keeper_sends (leg TEXT NOT NULL, chain TEXT NOT NULL, tx TEXT NOT NULL, sent_at INTEGER NOT NULL, PRIMARY KEY (leg, tx));
       CREATE TABLE IF NOT EXISTS keeper_snapshots (at INTEGER NOT NULL, cycle TEXT, body TEXT NOT NULL);
-      CREATE INDEX IF NOT EXISTS keeper_cycles_state ON keeper_cycles (state);`)
+      CREATE INDEX IF NOT EXISTS keeper_cycles_state ON keeper_cycles (state);
+      CREATE TABLE IF NOT EXISTS keeper_maintenance (
+        id TEXT PRIMARY KEY, binding TEXT NOT NULL, request TEXT NOT NULL,
+        state TEXT NOT NULL, tokens TEXT NOT NULL, quote TEXT NOT NULL,
+        token_transfer TEXT, quote_transfer TEXT);`)
   }
 
   private legs(cycle: string): LegRecord[] {
@@ -66,6 +70,7 @@ export class KeeperStore {
         return existing
       }
       const open = this.db.query<{ count: number }, []>(`SELECT COUNT(*) AS count FROM keeper_cycles WHERE state IN ('open','halted')`).get()!.count
+      if (this.maintenancePending().length) throw new KeeperError('unresolved_exposure', 'Inventory maintenance is unfinished; reconcile it before opening a cycle.')
       if (open >= maxOpen) throw new KeeperError('unresolved_exposure', `${open} cycle(s) are already open or halted; the limit is ${maxOpen}. Resolve them before opening another.`)
       this.db.query('INSERT INTO keeper_cycles(id,state,candidate,created_at,updated_at) VALUES(?,?,?,?,?)').run(id, 'open', JSON.stringify(candidate), now, now)
       return this.get(id)!
@@ -165,6 +170,11 @@ export class KeeperStore {
       if (value < 0n) loss += -value
     }
     return { loss: loss.toString(), net: net.toString(), closed: rows.length }
+  }
+
+  /** Maintenance and cycle admission use this same database so they cannot reserve over each other. */
+  maintenancePending(): string[] {
+    return this.db.query<{ id: string }, []>("SELECT id FROM keeper_maintenance WHERE state != 'complete' ORDER BY rowid").all().map((row) => row.id)
   }
 
   /** Every snapshot the keeper decided on, so a refusal can be re-derived from recorded numbers. */

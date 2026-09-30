@@ -92,6 +92,7 @@ function pair(snapshot: KeeperSnapshot, buy: KeeperChain, sell: KeeperChain, pol
  */
 export function decide(snapshot: KeeperSnapshot, policy: KeeperPolicy): KeeperDecision {
   const chains: KeeperChain[] = ['arc', 'base']
+  if (snapshot.maintenance?.length) return { candidate: null, reason: 'unresolved_exposure', detail: `Inventory maintenance is unfinished: ${snapshot.maintenance.join(', ')}. Reconcile it before opening a cycle.` }
   const halted = chains.filter((chain) => snapshot.quotes[chain].halted)
   if (halted.length) return { candidate: null, reason: 'halted', detail: `The keeper vault on ${halted.join(' and ')} is halted. Recover the open position, then resume.` }
   if (snapshot.unresolved.length) {

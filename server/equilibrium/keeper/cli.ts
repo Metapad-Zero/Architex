@@ -1,5 +1,5 @@
 /**
- * The keeper operator tool. Read-only by default; the two commands that send anything say so.
+ * The keeper operator tool. Commands that send require --yes and their separate approval gates.
  *
  *   bun run equilibrium:keeper verify   --config deployments/equilibrium-keeper-fork.json
  *   bun run equilibrium:keeper quote    --config <file> --tokens 25000000
@@ -9,6 +9,9 @@
  *   bun run equilibrium:keeper run      --config <file> --tokens 25000000 [--ticks 1] [--interval-ms 15000] --yes
  *   bun run equilibrium:keeper recover  --config <file> --cycle <id> --yes
  *   bun run equilibrium:keeper resume   --config <file> --yes
+ *   bun run equilibrium:keeper maintenance-preview --config <file> [--write <preview>]
+ *   bun run equilibrium:keeper maintain --config <file> --request-id <id> --tokens <atoms> --quote <atoms> --yes
+ *   bun run equilibrium:keeper maintenance-reconcile --config <file> --yes
  *
  * EQUILIBRIUM_OPERATOR_KEY signs. EQUILIBRIUM_KEEPER_DB names the durable record. In testnet mode
  * EQUILIBRIUM_KEEPER_APPROVAL must equal the digest this tool's `preview` prints.
@@ -21,6 +24,8 @@ import { keeperPreview, keeperPreviewDigest, vaultFacts } from './preview'
 import { KeeperStore } from './store'
 import { session } from './run'
 import { decide } from './policy'
+import { assertDurableStore, JobStore } from '../store'
+import { createMaintenance } from './maintenance'
 
 const argv = process.argv.slice(2)
 const command = argv[0]
@@ -34,7 +39,7 @@ const say = (value: unknown) => console.log(JSON.stringify(value, null, 2))
 
 const configPath = flag('config')
 if (!command || !configPath) {
-  console.error('Usage: equilibrium:keeper <verify|quote|status|preview|reconcile|run|recover|resume> --config <file> [...]')
+  console.error('Usage: equilibrium:keeper <verify|quote|status|preview|reconcile|run|recover|resume|maintain|maintenance-reconcile|maintenance-preview> --config <file> [...]')
   process.exit(2)
 }
 const configText = readFileSync(configPath, 'utf8')
@@ -64,11 +69,32 @@ try {
   } else if (command === 'status') {
     say({
       version: keeper.version, totals: store.totals(),
+      pendingMaintenance: store.maintenancePending(),
       unresolved: store.unresolved().map((cycle) => ({ id: cycle.id, state: cycle.state, note: cycle.note, legs: cycle.legs.map((leg) => ({ kind: leg.kind, chain: leg.chain, state: leg.state, result: leg.result })) })),
       // Traded, but the close attestation never landed: `reconcile` finishes these.
       unfinished: store.unfinished().map((cycle) => ({ id: cycle.id, state: cycle.state, note: cycle.note })),
       cycles: store.list(20).map((cycle) => ({ id: cycle.id, state: cycle.state, net: cycle.net, candidate: cycle.candidate, note: cycle.note })),
     })
+  } else if (['maintain', 'maintenance-reconcile', 'maintenance-preview'].includes(command)) {
+    const adapterPath = process.env.EQUILIBRIUM_EVM_CONFIG
+    const settingsPath = process.env.EQUILIBRIUM_TRANSFER_SETTINGS
+    if (!adapterPath || !settingsPath) throw new Error('Maintenance requires EQUILIBRIUM_EVM_CONFIG and EQUILIBRIUM_TRANSFER_SETTINGS.')
+    const jobs = new JobStore(assertDurableStore(process.env.EQUILIBRIUM_DB ?? './output/equilibrium/evm.sqlite'))
+    try {
+      const maintenance = createMaintenance({ keeperConfigText: configText, keeperPreview: readFileSync(PREVIEW_PATH, 'utf8'),
+        adapterConfigText: readFileSync(adapterPath, 'utf8'), transferSettingsText: readFileSync(settingsPath, 'utf8') }, store, (id) => jobs.get(id))
+      if (command === 'maintenance-preview') {
+        const preview = maintenance.preview()
+        if (flag('write')) writeFileSync(flag('write')!, preview)
+        console.log(preview)
+      } else {
+        assertMaySend()
+        const result = command === 'maintenance-reconcile' ? await maintenance.reconcile() : await maintenance.run({
+          requestId: flag('request-id') ?? '', tokens: flag('tokens') ?? '0', quote: flag('quote') ?? '0',
+        })
+        say({ result, totals: maintenance.totals() })
+      }
+    } finally { jobs.close() }
   } else if (command === 'reconcile') {
     // Sends, because finishing a cycle whose close never landed costs one attestation transaction.
     assertMaySend()

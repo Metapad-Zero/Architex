@@ -39,6 +39,15 @@ describe('keeper leg binding', () => {
     expect(() => assertKeeperApproved('fork', 'preview', 'config', undefined, ['https://sepolia.base.org'], manifest)).toThrow('local anvil forks only')
   })
 
+  test('maintenance code is keeper-approved and its shared transfer dependencies stay transfer-approved', async () => {
+    const { KEEPER_FILES } = await import('../approval')
+    const { TRANSFER_FILES } = await import('../../evm/transfers/config')
+    const { CODE_FILES } = await import('../../evm/approval')
+    expect(KEEPER_FILES).toContain('server/equilibrium/keeper/maintenance.ts')
+    expect(CODE_FILES.every((file) => (TRANSFER_FILES as readonly string[]).includes(file))).toBe(true)
+    expect((CODE_FILES as readonly string[]).includes('server/equilibrium/keeper/maintenance.ts')).toBe(false)
+  })
+
   test('every leg id field changes the id: chain, keeper, pool, size, limit, deadline and kind', () => {
     const base = legId(parts)
     const variants = [

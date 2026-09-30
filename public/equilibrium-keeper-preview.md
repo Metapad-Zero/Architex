@@ -1,22 +1,23 @@
 ## EQUILIBRIUM keeper approval preview
 
-Generated 2026-09-30T22:32:18Z for keeper version `equilibrium-keeper-v1:22b98c8fceaf8605`, mode **fork**.
+Generated 2026-09-30T23:39:00.784Z for keeper version `equilibrium-keeper-v1:73944f0f5a82440d`, mode **fork**.
 
 > **Fork rehearsal, not an approval request.** Every address below belongs to a local anvil fork
 > and every signer is a development key. A live preview is regenerated against deployed vaults with
 > `bun run equilibrium:keeper preview --config <testnet file> --write <path>`, and only that digest is
 > worth approving.
 
-This authorizes **bounded keeper trading only**. It does not authorize a launch, a deployment, an
-issuance, a bridge transfer, an inventory refill, a public announcement or any change to the
+This authorizes **bounded keeper trading** and the maintenance scope below only when paired with
+the **separate transfer approval**. Keeper approval alone authorizes no bridge transfer or refill.
+It does not authorize a launch, a deployment, an issuance, a public announcement or any change to the
 approved launch configuration. The launch release approval is a separate digest over separate files.
 
 ### Routes and contracts
 
 | Chain | Keeper vault | Pool | Token | Quote asset |
 | --- | --- | --- | --- | --- |
-| arc (chain id 5042002) | `0xf1a2ee3969061d6e36a210508c288b50c91c63c3` | `0x3fFF12004565035D4Cf9525eF7E8e3b37436E556` (architex-pair) | `0x1339e1782CE2F7a7f233e82De47c50faf6e5fFB4` | `0x3600000000000000000000000000000000000000` |
-| base (chain id 84532) | `0xf1a2ee3969061d6e36a210508c288b50c91c63c3` | `0x69222911Dd9207eeb2728310E2a363B1F3F0352F` (uniswap-v3-pool) | `0x7ac0E82C82503b9b648C52a25ed27A6eBd01E869` | `0x036CbD53842c5426634e7929541eC2318f3dCF7e` |
+| arc (chain id 5042002) | `0xf57971edebb18bfc75638465a10d623d90bd5e7e` | `0x40bbf67835462e0337e99aD9F796DF7a211D536C` (architex-pair) | `0x922159d26A6D96773861463BF7Af87c9Ed4B41f0` | `0x3600000000000000000000000000000000000000` |
+| base (chain id 84532) | `0x4720960b18ffe44b284eef86357ecfa6f935891e` | `0xF72e51FbE88d1614b6754cF8F099F1443eb10259` (uniswap-v3-pool) | `0x4D6f793D19029E85bB372a774Ac1d53133095627` | `0x036CbD53842c5426634e7929541eC2318f3dCF7e` |
 
 Keeper creation code `565b8e941a773295e8d4d9670229072ded0608bc7c700f36aa1c4ae2b56ffb85` built with solc 0.8.28+commit.7893614a.
 
@@ -32,8 +33,8 @@ immutable — changing one means deploying a new vault and a new approval.
 
 | Chain | Max tokens / leg | Max quote / leg | Session spend cap | Recovery reserve | Net drain cap | Max open cycles |
 | --- | --- | --- | --- | --- | --- | --- |
-| arc | 2000 EQL | 3000 USDC | 5000 USDC | 1500 USDC | 4000 USDC | 1 |
-| base | 2000 EQL | 3000 USDC | 5000 USDC | 1500 USDC | 4000 USDC | 1 |
+| arc | 200 EQL | 1 USDC | 5 USDC | 1 USDC | 5 USDC | 1 |
+| base | 200 EQL | 1 USDC | 5 USDC | 1 USDC | 5 USDC | 1 |
 
 A leg also carries its chain id, its pool address and a deadline, and the vault refuses a leg whose
 id has already run. A repeat, a replay on the wrong chain and a leg planned against a stale quote all
@@ -43,28 +44,43 @@ revert on the destination chain.
 
 | Bound | Value |
 | --- | --- |
-| Minimum edge to open a cycle | 1 USDC |
-| Execution buffer | 0.5 USDC |
-| Reserved recovery cost | 2 USDC |
-| Absolute per-leg gas ceiling | 1 USDC |
-| Session realized-loss cap | 200 USDC |
+| Minimum edge to open a cycle | 0.001 USDC |
+| Execution buffer | 0.001 USDC |
+| Reserved recovery cost | 0.01 USDC |
+| Absolute per-leg gas ceiling | 0.1 USDC |
+| Session realized-loss cap | 2 USDC |
 | Quote freshness | 600s and 20 blocks behind head |
 | Chain availability window | 3600s without a new block |
 | Leg validity | 600s |
 | Slippage allowance | 50 bps |
 | Cycles open at once | 1 |
 
-Worst-case gas and reserved recovery cost for one cycle at current fees: **2.022917 USDC**.
+Worst-case gas and reserved recovery cost for one cycle at current fees: **0.032847 USDC**.
 
 ### Current inventory and counters
 
 | Chain | Keeper tokens | Keeper quote | Spent | Received | Open cycles | State |
 | --- | --- | --- | --- | --- | --- | --- |
-| arc | 6000 EQL | 5979.862075 USDC | 3027.208503 USDC | 1007.070578 USDC | 0 | running |
-| base | 2000 EQL | 10383.295417 USDC | 0 USDC | 2383.295417 USDC | 0 | running |
+| arc | 400 EQL | 0.195501 USDC | 0 USDC | 0.195501 USDC | 0 | running |
+| base | 100 EQL | 2.897018 USDC | 0.208962 USDC | 0.10598 USDC | 0 | running |
 
-Inventory refill and the Base-to-Arc return route are **not** part of this approval. When a chain's
-inventory is exhausted the keeper stops trading that direction and says so.
+### Separately approved inventory maintenance
+
+Launch identity: `0x7caf9cd5c67436417fff688c36af750af1a61bdeb94fd63f264a9000383c7096`.
+Source executors: Arc `0x9c409262efa8e122e00b1c6efaf5e1135325b7ca`, Base `0xbf0fe883bbaa0565af4b02fa9d6a6a85c96a2924`.
+Token route: Base executor inventory → authenticated NTT return → Arc keeper vault.
+USDC route: Arc executor inventory → authenticated CCTP refill → Base executor → Base keeper vault.
+Token caps: 500 EQL per transfer, 500 EQL total.
+USDC caps: 3 USDC per transfer, 3 USDC total.
+
+This keeper scope permits that bounded maintenance only with the **separate transfer approval** for
+the exact adapter configuration, transfer settings, gas caps and code. It uses existing executor
+inventory. It never funds a vault from holder inventory or issues tokens. Open local/on-chain
+exposure refuses maintenance, and pending maintenance blocks trading until reconciliation finishes.
+Maintenance costs are counted separately from trading profit. Its approval preview lists both digests.
+Only zero-message-fee NTT and zero-fee CCTP maintenance is accepted; native protocol payments stay closed.
+
+When inventory is exhausted the keeper stops trading that direction and names the separate route.
 
 ### What a run does, and what it reports
 

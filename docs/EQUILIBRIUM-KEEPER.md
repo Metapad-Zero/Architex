@@ -1,10 +1,10 @@
 ## The bounded Arc–Base keeper: vaults, quotes, limits and recovery
 
-This adds the keeper the EQUILIBRIUM brief asks for and nothing else. It does not touch the launch
-adapter, the release gate, the launch configuration, the public client or the return/refill route:
-the keeper has its own contract, its own pinned code manifest, its own durable record, its own
-operator tool and its own approval. Approving a launch does not authorize trading, and approving the
-keeper authorizes neither a launch, a deployment, an issuance, a bridge transfer nor a refill.
+The keeper has its own contract, pinned code manifest, durable record, operator tool and approval.
+The frozen launch adapter, release gate, launch configuration and public client remain unchanged.
+Approving a launch does not authorize trading. Inventory maintenance requires an explicit keeper
+maintenance scope **and** the separate transfer approval; keeper approval alone authorizes no bridge
+transfer or refill. See [keeper maintenance](EQUILIBRIUM-KEEPER-MAINTENANCE.md) for the combined route.
 
 ### What a cycle is
 
@@ -18,8 +18,9 @@ One cycle is two legs on two chains, at the **same token quantity**:
 The two legs are **not atomic** and no message passes between the chains. Everything below follows
 from that. The keeper trades only inventory its own vaults already hold: it cannot mint, burn,
 bridge, rebase or redistribute, and it never touches a holder's balance or the pools' LP positions.
-When a chain's inventory runs out the keeper stops trading that direction and says so — refilling it
-is a separate authorized route (49TH-28), not something the keeper can do.
+When a chain's inventory runs out the keeper stops trading that direction and says so. Maintenance
+is a separate operator command using the reviewed return/refill route (49TH-28); the trading loop
+never invokes it automatically. Pending maintenance prevents new cycles in the shared durable record.
 
 ### `EquilibriumKeeper`: one vault per chain
 
@@ -145,13 +146,17 @@ bun run equilibrium:keeper preview  --config <file> [--write public/equilibrium-
 bun run equilibrium:keeper run      --config <file> --tokens 1000000000 [--ticks N] [--interval-ms N] --yes
 bun run equilibrium:keeper recover  --config <file> --cycle <id> --yes
 bun run equilibrium:keeper resume   --config <file> --yes
+bun run equilibrium:keeper maintenance-preview --config <file> [--write <preview>]
+bun run equilibrium:keeper maintain --config <file> --request-id <id> --tokens <atoms> --quote <atoms> --yes
+bun run equilibrium:keeper maintenance-reconcile --config <file> --yes
 ```
 
-`verify`, `quote`, `status` and `preview` are read-only. The four that send anything require
+`verify`, `quote`, `status`, `preview` and `maintenance-preview` are read-only. Sending commands require
 `--yes` and, off a fork, `EQUILIBRIUM_KEEPER_APPROVAL` equal to the digest over the exact preview,
 the exact configuration file and the keeper code manifest
 (`server/equilibrium/keeper/approval.ts`). A fork configuration must point at loopback RPCs. There is
-no live mode: `mode` is `fork` or `testnet`.
+no live mode: `mode` is `fork` or `testnet`. Maintenance additionally requires the exact transfer
+approval and the completed launch record, as described in the maintenance document.
 
 `bun run equilibrium:keeper-bytecode --check` compares `server/equilibrium/keeper/bytecode.json`
 against a fresh `FOUNDRY_PROFILE=equilibrium forge build`. That manifest is deliberately **separate**
@@ -228,15 +233,17 @@ about those figures.
 
 - **Not proven here**: anything live. Public Arc USDC precompile behaviour, real Base L1 data fees,
   and the behaviour of a funded keeper on a public chain are all outside a fork.
-- The Base-side token in the rehearsal is an `EquilibriumCanonical` standing in for the bridged
+- The Base-side token in the original keeper-only rehearsal is an `EquilibriumCanonical` standing in for the bridged
   representation, and Base USDC inventory is credited by storage write. Bridge supply conservation is
-  the launch adapter's scope; the keeper neither mints nor bridges.
+  the launch adapter's scope; the trading vault neither mints nor bridges. The combined maintenance
+  rehearsal uses the actual launch canonical/spoke and authenticated NTT/CCTP transfers, with its
+  distinct substitutions labelled in the maintenance evidence.
 - `attestClosed` is an operator attestation of a remote receipt, not a cryptographic proof. Closing
   the loop properly needs a message from the selling chain, which this scope does not add.
 - The operator key is hot and owns both vaults. Acceptable for a bounded testnet pilot only.
 - One runner process per operator key. Concurrent processes stay correct — the vaults decide — but
   can waste gas on nonce races.
-- No inventory refill, no Base-to-Arc return, no Solana or Robinhood leg: those routes stay closed
-  and the keeper refuses rather than improvising.
+- Maintenance supports Base-to-Arc token return and Arc-to-Base USDC refill only. Arc-to-Base token
+  refill, Solana and Robinhood remain closed in this keeper integration.
 - Cross-chain P&L and the realized-loss cap are enforced against the durable record, not on-chain: no
   single-chain contract can see both legs. The per-chain spend, drain and reserve caps are on-chain.

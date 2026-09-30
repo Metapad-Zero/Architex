@@ -1,5 +1,5 @@
 import type { Hex } from 'viem'
-import { KeeperError, type KeeperChainConfig, type KeeperConfig, type KeeperPolicy } from './types'
+import { KeeperError, type KeeperChainConfig, type KeeperConfig, type KeeperMaintenancePolicy, type KeeperPolicy } from './types'
 
 /** The on-disk form: no keys. The key comes from the environment of the process that signs. */
 export interface KeeperChainFile extends Omit<KeeperChainConfig, 'quoteAtomsPerNative' | 'fromBlock' | 'priorityFeeWei'> {
@@ -13,6 +13,7 @@ export interface KeeperFileConfig {
   base: KeeperChainFile
   policy: KeeperPolicy
   receiptTimeoutMs?: number
+  maintenance?: KeeperMaintenancePolicy
 }
 
 const chainFrom = (c: KeeperChainFile): KeeperChainConfig => ({
@@ -57,9 +58,9 @@ export function fromFile(file: KeeperFileConfig, env: Record<string, string | un
   }
   const approval = env.EQUILIBRIUM_KEEPER_APPROVAL
   if (file.mode !== 'fork' && !approval) throw new KeeperError('not_approved', 'A testnet keeper requires EQUILIBRIUM_KEEPER_APPROVAL over the approved keeper preview.')
-  return { mode: file.mode, operatorKey: operatorKey as Hex, arc: chainFrom(file.arc), base: chainFrom(file.base), policy: file.policy, receiptTimeoutMs: file.receiptTimeoutMs, approval: approval as Hex | undefined }
+  return { mode: file.mode, operatorKey: operatorKey as Hex, arc: chainFrom(file.arc), base: chainFrom(file.base), policy: file.policy, receiptTimeoutMs: file.receiptTimeoutMs, approval: approval as Hex | undefined, maintenance: file.maintenance }
 }
 
 export function toFile(config: KeeperConfig): KeeperFileConfig {
-  return { mode: config.mode, arc: chainTo(config.arc), base: chainTo(config.base), policy: config.policy, receiptTimeoutMs: config.receiptTimeoutMs }
+  return { mode: config.mode, arc: chainTo(config.arc), base: chainTo(config.base), policy: config.policy, receiptTimeoutMs: config.receiptTimeoutMs, maintenance: config.maintenance }
 }
