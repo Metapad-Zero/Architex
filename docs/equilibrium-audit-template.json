@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "mode": "testnet",
+  "issuance": "1000000000000",
+  "maxAgeSeconds": 1800,
+  "endpoints": [
+    {
+      "chain": "arc",
+      "rpc": "https://rpc.testnet.arc.io",
+      "owner": "",
+      "pauser": "",
+      "token": { "address": "", "codeHash": "" },
+      "manager": { "address": "", "codeHash": "", "implementationHash": "" },
+      "transceiver": { "address": "", "codeHash": "", "implementationHash": "" }
+    },
+    {
+      "chain": "base",
+      "rpc": "https://sepolia.base.org",
+      "owner": "",
+      "pauser": "",
+      "token": { "address": "", "codeHash": "" },
+      "manager": { "address": "", "codeHash": "", "implementationHash": "" },
+      "transceiver": { "address": "", "codeHash": "", "implementationHash": "" }
+    }
+  ]
+}

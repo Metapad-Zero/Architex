@@ -41,6 +41,8 @@ The default synthetic two-chain job quotes 27.2 synthetic USDC: 1 platform fee, 
 
 ### Evidence and economics
 
+The [read-only Arc/Base deployment audit](EQUILIBRIUM-AUDIT.md) checks pinned finalized supply, proxy implementations, authorities and peers against an approved manifest. It rejects missing deployments and unauthenticated backing gaps. Passing that two-chain snapshot never opens a route or proves payment, pools or the four-chain release.
+
 Free records exclude signatures/prepared bytes. PAYMENT-RESPONSE describes settlement only; partial fulfillment is 202. Supply is derived from recorded steps, marked incomplete while submitted operations are unresolved, and is not an independent onchain audit. Platform fee, execution fees, deployed quote principal and held remainder are separate. Pending costs may already be spent; timeout does not imply refund.
 
 The keeper's existing inventory, size, freshness, spending, loss and failed-leg limits are unchanged. Keeper net and whole-treasury holdings/open exposure remain distinct. Mainnet profitability, external paid demand, public finality, SVM execution and refills remain unproven. See [routes](EQUILIBRIUM-ROUTES.md) and [release preview](../public/equilibrium-release-preview.md).
