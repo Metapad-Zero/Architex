@@ -4,7 +4,7 @@ import type { ChainConfig, EvmAdapterConfig, PilotScope } from './types'
 import { localGuardian, wormholescan } from './vaa'
 
 /** The on-disk form: no keys. Keys come from the environment of the process that signs. */
-export interface ChainFile extends Omit<ChainConfig, 'usdcAtomsPerNative' | 'fromBlock' | 'priorityFeeWei'> { usdcAtomsPerNative: string; fromBlock: string; priorityFeeWei?: string }
+export interface ChainFile extends Omit<ChainConfig, 'usdcAtomsPerNative' | 'fromBlock' | 'priorityFeeWei' | 'maxFeePerGasWei'> { usdcAtomsPerNative: string; fromBlock: string; priorityFeeWei?: string; maxFeePerGasWei?: string }
 export interface EvmFileConfig {
   mode: 'fork' | 'testnet'
   arc: ChainFile
@@ -16,8 +16,8 @@ export interface EvmFileConfig {
   scope?: PilotScope
 }
 
-const chainFrom = (c: ChainFile): ChainConfig => ({ ...c, usdcAtomsPerNative: BigInt(c.usdcAtomsPerNative), fromBlock: BigInt(c.fromBlock), priorityFeeWei: c.priorityFeeWei === undefined ? undefined : BigInt(c.priorityFeeWei) })
-const chainTo = (c: ChainConfig): ChainFile => ({ ...c, usdcAtomsPerNative: c.usdcAtomsPerNative.toString(), fromBlock: c.fromBlock.toString(), priorityFeeWei: c.priorityFeeWei?.toString() })
+const chainFrom = (c: ChainFile): ChainConfig => ({ ...c, usdcAtomsPerNative: BigInt(c.usdcAtomsPerNative), fromBlock: BigInt(c.fromBlock), priorityFeeWei: c.priorityFeeWei === undefined ? undefined : BigInt(c.priorityFeeWei), maxFeePerGasWei: c.maxFeePerGasWei === undefined ? undefined : BigInt(c.maxFeePerGasWei) })
+const chainTo = (c: ChainConfig): ChainFile => ({ ...c, usdcAtomsPerNative: c.usdcAtomsPerNative.toString(), fromBlock: c.fromBlock.toString(), priorityFeeWei: c.priorityFeeWei?.toString(), maxFeePerGasWei: c.maxFeePerGasWei?.toString() })
 
 export function fromFile(file: EvmFileConfig, env: Record<string, string | undefined> = process.env): EvmAdapterConfig {
   const operatorKey = env.EQUILIBRIUM_OPERATOR_KEY

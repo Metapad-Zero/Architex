@@ -23,6 +23,8 @@ export interface ChainConfig {
   fromBlock: bigint
   /** Priority fee in wei. Unset lets the RPC suggest one; set it where the suggestion is unrealistic. */
   priorityFeeWei?: bigint
+  /** Fixed max fee per gas in wei. Makes every worst-case reservation deterministic; a base fee above it leaves the send pending. */
+  maxFeePerGasWei?: bigint
   /** OP Stack chain: bound the L1 data fee with GasPriceOracle.getL1FeeUpperBound before sending. */
   opStackL1Fee?: boolean
 }

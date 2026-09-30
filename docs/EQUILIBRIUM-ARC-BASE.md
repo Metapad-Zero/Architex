@@ -29,7 +29,7 @@ Every address a job creates is CREATE2-predicted from the job id and the two exe
 - Arc USDC runs as an EIP-3009 stand-in, because Arc's native USDC calls Arc precompiles `0x1800…00/01` that anvil lacks.
 - The Base executor's USDC quote inventory is written to storage.
 
-The 12 scenarios:
+The 16 scenarios:
 
 - A paid x402 launch runs through the HTTP service and returns 200. On-chain supply reconciles: 1,000,000 issued, 10,000 locked backing 10,000 on Base, both pools holding exact inventory, and the executors emptied.
 - A resend executes nothing.
@@ -41,6 +41,10 @@ The 12 scenarios:
 - Worker processes killed after the credit broadcast, before the debit broadcast, and after the Arc pool broadcast are all finished by `reconcile`, every effect exactly once.
 - Delayed Base finality stays pending and completes without re-execution.
 - The approved scope allows one paid launch and refuses a second before any charge. A gas cap below one send's worst case refuses before anything is sent.
+- A worker SIGKILLed right after sending, before any receipt accounting: its reservation stays at worst case, reconcile finishes the job, and committed gas equals every real receipt plus exactly that over-count.
+- Gas reservations are shared across processes: a dead worker's unsettled reservation makes a second process refuse, and two workers started together never commit past the cap.
+- Two worker processes racing for the one approved launch: exactly one payment executes.
+- Base receipts carrying a hex `l1Fee`, injected by an RPC proxy as OP Stack nodes return it, are accounted as numbers end to end.
 
 What forks do **not** prove: public Guardian attestation of this route, Arc's real USDC precompile path, and real Base L1 data fees.
 
