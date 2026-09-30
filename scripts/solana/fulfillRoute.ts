@@ -34,17 +34,18 @@
  * public route is opened, nothing is funded and nothing is broadcast to a public network.
  */
 import { type ChildProcess } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { Connection, Keypair, PublicKey, TransactionInstruction } from '@solana/web3.js'
 import { getAbiItem, type Abi, type Address, type Hex, type PublicClient } from 'viem'
 import {
   SOLANA_NTT, bytes32, decodeTransceiverMessage, encodeNttManagerMessage, leBytes,
-  managerMessageDigest, toHex, trimAmount, TOKEN_PROGRAM,
+  managerMessageDigest, nttAddresses, toHex, trimAmount, TOKEN_PROGRAM,
 } from '../../src/lib/equilibriumSolana'
 import { evmToWormholeFormat, type ObservedRoute } from '../../src/lib/equilibriumArcSolana'
 import {
-  inventoryHolder, operationOf, solanaSeed,
+  decodePlan, inventoryHolder, operationOf, solanaInventoryOwner,
   type CanonicalPlan, type CreditPlan, type DebitPlan, type InventoryPlan, type LegPlan,
   type PaymentPlan, type RoutePending, type SolanaRoute, type StepPlan,
 } from '../../server/equilibrium/solanaRoute'
@@ -127,6 +128,21 @@ const eventsAbi = [
 const coreBridgeAbi = [
   { type: 'function', name: 'nextSequence', inputs: [{ type: 'address' }], outputs: [{ type: 'uint64' }], stateMutability: 'view' },
 ] as const satisfies Abi
+
+/**
+ * The pinned spoke programs. Their addresses, and every PDA derived from them alone — the manager
+ * config, the transceiver emitter — are properties of the programs rather than of any one launch,
+ * which is what lets the Arc leg register its far peers before a mint exists.
+ */
+const SPOKE_MANAGER = new PublicKey(SOLANA_NTT.manager)
+const SPOKE_TRANSCEIVER = new PublicKey(SOLANA_NTT.transceiver)
+const SPOKE_CORE_BRIDGE = new PublicKey(SOLANA_NTT.coreBridge)
+const SPOKE_ADDRESSES = nttAddresses(SPOKE_MANAGER, SPOKE_TRANSCEIVER, SPOKE_CORE_BRIDGE)
+
+/** The mint keypair a prepared spoke leg holds the secret for. */
+function mintOf(plan: LegPlan): Keypair {
+  return Keypair.fromSeed(Uint8Array.from(Buffer.from(plan.mintSecret!.slice(2), 'hex')))
+}
 
 /* ------------------------------------------------------------------ SPL helpers */
 
@@ -317,10 +333,23 @@ export function fulfillmentRoute(infrastructure: RouteInfrastructure, options: {
     if (/^0x0+$/.test(leg.manager)) throw new Error('The Arc bridge leg has not been registered for this job')
     return leg
   }
-  /** The spoke deployment for this job: the pinned programs over this job's own derived mint. */
+  /**
+   * The spoke leg's persisted plan, which is where this job's mint secret lives.
+   *
+   * Read from the journal rather than recomputed: the secret is random, and that is the point. A mint
+   * address derived from the public job id would let anyone who had merely asked for a quote create
+   * the mint first and choose its authority.
+   */
+  const spokeLegPlan = (job: Job): LegPlan => {
+    const step = job.steps.find((candidate) => candidate.id === 'manager:solana')
+    if (!step?.prepared) throw new Error('The Solana leg has not been prepared, so this job has no mint yet')
+    const plan = decodePlan(step.prepared.operation, step.prepared.bytes)
+    if (plan.kind !== 'leg' || !plan.mintSecret) throw new Error('The Solana leg plan carries no mint secret')
+    return plan
+  }
+  /** The spoke deployment for this job: the pinned programs over this job's own mint. */
   const spokeOf = (job: Job): NttDeployment => new NttDeployment(
-    new PublicKey(SOLANA_NTT.manager), new PublicKey(SOLANA_NTT.transceiver), new PublicKey(SOLANA_NTT.coreBridge),
-    Keypair.fromSeed(solanaSeed(operationFor(job, 'manager:solana'), 'mint')).publicKey,
+    SPOKE_MANAGER, SPOKE_TRANSCEIVER, SPOKE_CORE_BRIDGE, mintOf(spokeLegPlan(job)).publicKey,
   )
   const accountExists = async (address: PublicKey): Promise<boolean> => (await live().getAccountInfo(address, 'confirmed')) !== null
 
@@ -396,8 +425,12 @@ export function fulfillmentRoute(infrastructure: RouteInfrastructure, options: {
         }
         case 'canonical':
           return { kind: 'canonical', identity: operation, name: job.request.canonical.name, symbol: job.request.canonical.symbol, custody: arc.account, issuance: job.request.canonical.issuance } satisfies CanonicalPlan
-        case 'manager':
-          return { kind: 'leg', chain: step.chain === 'solana' ? 'solana' : 'arc', operation } satisfies LegPlan
+        case 'manager': {
+          if (step.chain !== 'solana') return { kind: 'leg', chain: 'arc', operation } satisfies LegPlan
+          // Generated here and persisted with the plan before anything is submitted. A retry uses the
+          // persisted one: `planMatches` ignores this field so a fresh draw cannot replace it.
+          return { kind: 'leg', chain: 'solana', operation, mintSecret: toHex(randomBytes(32)) } satisfies LegPlan
+        }
         case 'debit': {
           const destination = destinationOf(job, step.chain)
           const leg = await arcLeg(job)
@@ -420,9 +453,7 @@ export function fulfillmentRoute(infrastructure: RouteInfrastructure, options: {
         case 'pool': {
           const destination = destinationOf(job, step.chain)
           const delivered = (BigInt(destination.amount) - BigInt(destination.poolTokens)).toString()
-          const holder = step.chain === 'solana'
-            ? Keypair.fromSeed(solanaSeed(operation, 'inventory')).publicKey.toBase58()
-            : inventoryHolder(operation)
+          const holder = step.chain === 'solana' ? solanaInventoryOwner(operation).toBase58() : inventoryHolder(operation)
           return { kind: 'inventory', chain: step.chain === 'solana' ? 'solana' : 'arc', tokens: destination.poolTokens, quote: destination.poolQuote, holder, recipient: destination.recipient, delivered } satisfies InventoryPlan
         }
         default:
@@ -606,12 +637,12 @@ export function fulfillmentRoute(infrastructure: RouteInfrastructure, options: {
             await call(arc, transceiver, transceiverContract, 'initialize')
             await call(arc, manager, managerContract, 'setTransceiver', [transceiver])
             await call(arc, manager, managerContract, 'setThreshold', [1])
-            // The spoke's manager program id and transceiver emitter PDA are both properties of the
-            // pinned programs, so the far peers can be registered before the spoke's own leg exists.
-            const spoke = spokeOf(job)
-            await call(arc, manager, managerContract, 'setPeer', [SOLANA_CHAIN, toHex(bytes32(spoke.manager)), DECIMALS, issuance])
+            // The spoke's manager program id and its transceiver emitter PDA are properties of the
+            // pinned programs, not of this launch, so the far peers are registered before the spoke's
+            // own leg exists — and before this job has a mint at all.
+            await call(arc, manager, managerContract, 'setPeer', [SOLANA_CHAIN, toHex(bytes32(SPOKE_MANAGER)), DECIMALS, issuance])
             await call(arc, manager, managerContract, 'setInboundLimit', [issuance, SOLANA_CHAIN])
-            await call(arc, transceiver, transceiverContract, 'setWormholePeer', [SOLANA_CHAIN, toHex(bytes32(spoke.at.emitter))])
+            await call(arc, transceiver, transceiverContract, 'setWormholePeer', [SOLANA_CHAIN, toHex(bytes32(SPOKE_ADDRESSES.emitter))])
             // Approve here rather than in the steps that spend, so the debit and each inventory
             // placement are one transaction whose receipt is the whole of their cost. An allowance is
             // not a transfer: it moves nothing and grants nothing the launch was not already going to do.
@@ -623,8 +654,8 @@ export function fulfillmentRoute(infrastructure: RouteInfrastructure, options: {
             await call(arc, infrastructure.registry, registryContract, 'registerLeg', [plan.operation, token, manager, transceiver, spent])
             return
           }
-          const spoke = spokeOf(job)
-          const mintKeypair = Keypair.fromSeed(solanaSeed(plan.operation, 'mint'))
+          const mintKeypair = mintOf(plan)
+          const spoke = new NttDeployment(SPOKE_MANAGER, SPOKE_TRANSCEIVER, SPOKE_CORE_BRIDGE, mintKeypair.publicKey)
           const issuance = BigInt(job.request.canonical.issuance)
           if (!await accountExists(spoke.mint)) {
             await send(live(), payer, [
@@ -655,6 +686,21 @@ export function fulfillmentRoute(infrastructure: RouteInfrastructure, options: {
         }
         case 'debit': {
           const leg = await arcLeg(job)
+          /**
+           * Re-read the sequence immediately before locking anything.
+           *
+           * The observation that authorized this submission found nothing published at the recorded
+           * sequence, but that answer is a moment old. If the emitter has moved on since, the
+           * transfer would lock at some later sequence that the recorded handle can never find, and
+           * the step would stick with an allocation locked and no way to observe it. The two answers
+           * also contradict each other, which is itself a reason to stop rather than to guess: on a
+           * single-operator route nothing else publishes from this emitter, so a disagreement here
+           * means the log scan and the counter disagree about the chain.
+           */
+          const sequence = await client.readContract({ address: ARC_TESTNET.coreBridge, abi: coreBridgeAbi, functionName: 'nextSequence', args: [leg.transceiver] })
+          if (sequence.toString() !== plan.expectedSequence) {
+            throw new Error(`The hub transceiver is at sequence ${sequence}, not the ${plan.expectedSequence} this debit recorded, yet nothing is published there. Reconcile this job by hand; do not lock a second allocation.`)
+          }
           // One call, already approved by the leg: its receipt is the whole of this step's cost, and
           // the sequence it publishes at is the handle the observation was given before it ran.
           await call(arc, leg.manager, managerContract, 'transfer', [BigInt(plan.amount), SOLANA_CHAIN, toHex(bytes32(new PublicKey(plan.custodian)))])
@@ -698,7 +744,7 @@ export function fulfillmentRoute(infrastructure: RouteInfrastructure, options: {
             return
           }
           const spoke = spokeOf(job)
-          const holder = Keypair.fromSeed(solanaSeed(operation, 'inventory')).publicKey
+          const holder = solanaInventoryOwner(operation)
           const recipient = new PublicKey(plan.recipient)
           const quoteMint = infrastructure.quoteMint.publicKey
           const from = associatedTokenAddress(spoke.mint, payer.publicKey)

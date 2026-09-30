@@ -19,8 +19,10 @@
  * chain read that is recorded inside it. It is persisted before anything is submitted, so a restart
  * re-derives the same plan, looks for the same effect, and finds either that effect or nothing.
  */
-import { keccak256, type Address, type Hex } from 'viem'
+import { PublicKey } from '@solana/web3.js'
+import type { Address, Hex } from 'viem'
 import { reconcileRoute, type ObservedRoute, type RouteReconciliation } from '../../src/lib/equilibriumArcSolana'
+import { SOLANA_NTT } from '../../src/lib/equilibriumSolana'
 import { hash } from './request'
 import { LaunchError, type Atoms, type EffectContext, type EffectResult, type Job, type LaunchRequest, type PaymentTerms, type Step, type StepKind } from './types'
 
@@ -42,16 +44,27 @@ export function inventoryHolder(operation: Hex): Address {
 }
 
 /**
- * The 32-byte seed for a Solana keypair a step owns: its mint, its outbox item, its inventory
- * holder. Derived from the operation and a label, so each is distinct and each is recoverable.
+ * Where a step places its inventory on Solana: an address off the ed25519 curve.
  *
- * A generated keypair would be lost with the process that generated it, and a lost mint address is
- * an unobservable issuance: the worker could not tell a mint it had already created from one it had
- * not, which is the precise condition under which a launch issues its supply twice.
+ * It has to be recoverable from the operation, because the balance it holds is how the observation
+ * decides whether the placement already happened. It must equally be an address nobody can sign
+ * for — including us. An earlier version derived an ed25519 keypair from the operation, which made
+ * the holder's signing key a public function of the job id: the 402 response returns that job id,
+ * so anyone who had merely asked for a quote could move the pool allocation afterwards.
+ *
+ * A program-derived address has no private key at all. Only the program it is derived from can act
+ * for it, through `invoke_signed`, and only for seeds that program declares — the pinned NTT manager
+ * declares `config`, `token_authority`, `peer`, `outbox_rate_limit` and friends, and nothing with
+ * this prefix. So there is no signature for this account, and the balance is still a public read.
  */
-export function solanaSeed(operation: Hex, label: string): Uint8Array {
-  return Buffer.from(keccak256(`0x${Buffer.from(`${operation}:${label}`, 'utf8').toString('hex')}`).slice(2), 'hex')
+export function solanaInventoryOwner(operation: Hex): PublicKey {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from(INVENTORY_SEED_PREFIX, 'utf8'), Buffer.from(operation.slice(2), 'hex')],
+    new PublicKey(SOLANA_NTT.manager),
+  )[0]
 }
+/** Not a seed the pinned manager program declares, which is what makes the address unsignable. */
+export const INVENTORY_SEED_PREFIX = 'equilibrium-inventory'
 
 /* ------------------------------------------------------------------ per-step plans */
 
@@ -87,6 +100,16 @@ export interface LegPlan {
   chain: 'arc' | 'solana'
   /** Registered on Arc / read from the manager config PDA on Solana once the leg is complete. */
   operation: Hex
+  /**
+   * The spoke mint's 32-byte secret, generated once when this step was prepared. Solana legs only.
+   *
+   * The mint address must be recoverable, or a restarted worker cannot tell a mint it has already
+   * created from one it has not — and that is the condition under which a launch issues twice. It
+   * must not be *predictable*, or anyone who saw the quote could create the mint first and choose
+   * its authority. A random secret persisted in the step's plan is both: the plan is written to the
+   * journal before anything is submitted, and `publicJob` never projects a step's prepared bytes.
+   */
+  mintSecret?: Hex
 }
 export interface DebitPlan {
   kind: 'debit'
@@ -154,6 +177,34 @@ export function decodePlan(operation: Hex, bytes: string): StepPlan {
   }
   if (decoded?.operation !== operation) throw new Error('Persisted step plan belongs to a different operation')
   return decoded.plan
+}
+
+/**
+ * Fields a plan RECORDS once rather than deriving: a chain read taken before submitting, or a secret
+ * generated when the step was prepared. Re-deriving a plan produces a different value for each of
+ * them, and the persisted one is always the authoritative one.
+ */
+const RECORDED_PLAN_FIELDS: Record<StepPlan['kind'], readonly string[]> = {
+  payment: [], canonical: [], credit: [], inventory: [],
+  leg: ['mintSecret'],
+  debit: ['expectedSequence'],
+}
+
+/**
+ * Whether a freshly derived plan is the same plan that was persisted, ignoring the recorded fields.
+ *
+ * This is what catches a route whose configuration moved between preparing a step and submitting it:
+ * the persisted bytes are what gets submitted, so if the route would now plan something else, the
+ * two disagree and the step must stop rather than send a different effect under a recorded operation.
+ */
+export function planMatches(derived: StepPlan, persisted: StepPlan): boolean {
+  if (derived.kind !== persisted.kind) return false
+  const strip = (plan: StepPlan) => {
+    const copy: Record<string, unknown> = { ...plan }
+    for (const field of RECORDED_PLAN_FIELDS[plan.kind]) delete copy[field]
+    return hash(copy)
+  }
+  return strip(derived) === strip(persisted)
 }
 
 /* ------------------------------------------------------------------ the route */

@@ -21,6 +21,8 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { randomBytes } from 'node:crypto'
+import { Keypair, PublicKey } from '@solana/web3.js'
 import { keccak256, toBytes, type Hex } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { encodePaymentSignatureHeader } from '@x402/core/http'
@@ -32,13 +34,18 @@ import { createLaunchService } from '../service'
 import { solanaAdapter } from '../solanaAdapter'
 import {
   assertRouteRequest, decodePlan, gateLedger, inventoryHolder, ledgerComparable, operationOf,
-  routePending, solanaSeed,
-  type DebitPlan, type RoutePending, type SolanaRoute, type StepPlan,
+  planMatches, routePending, solanaInventoryOwner,
+  type DebitPlan, type LegPlan, type RoutePending, type SolanaRoute, type StepPlan,
 } from '../solanaRoute'
 import { JobStore } from '../store'
 import type { EffectContext, EffectResult, Job, LaunchRequest, SignedPayment, StepKind } from '../types'
 
 /* ------------------------------------------------------------------ the request */
+
+/** A fresh 32-byte mint secret, drawn the way the route draws one. */
+function randomSecret(): Hex {
+  return `0x${Buffer.from(randomBytes(32)).toString('hex')}`
+}
 
 const payer = privateKeyToAccount('0x0000000000000000000000000000000000000000000000000000000000000123')
 const stranger = privateKeyToAccount('0x0000000000000000000000000000000000000000000000000000000000000456')
@@ -101,9 +108,16 @@ function state(): DoubleState {
   return { settled: new Map(), issued: new Map(), legs: new Map(), published: [], nextSequence: 7n, claims: new Map(), placements: new Map(), counts: {} }
 }
 
+/** The ed25519 keypair a persisted mint secret names, as the route reconstructs it. */
+function mintOf(plan: LegPlan): PublicKey {
+  return Keypair.fromSeed(Uint8Array.from(Buffer.from(plan.mintSecret!.slice(2), 'hex'))).publicKey
+}
+
 interface DoubleOptions {
   /** Publish the debit at a sequence other than the one the plan recorded. */
   stealSequence?: boolean
+  /** Advance the emitter between preparing the debit and submitting it. */
+  intrude?: boolean
   /** Credit more than the claim carries, so the two ledgers stop reconciling. */
   overMint?: bigint
 }
@@ -141,7 +155,9 @@ function double(recorded: DoubleState, options: DoubleOptions = {}): SolanaRoute
         case 'canonical':
           return Promise.resolve({ kind: 'canonical', identity: operation, name: job.request.canonical.name, symbol: job.request.canonical.symbol, custody: TERMS.payTo, issuance: job.request.canonical.issuance })
         case 'manager':
-          return Promise.resolve({ kind: 'leg', chain: step.chain === 'solana' ? 'solana' : 'arc', operation })
+          return Promise.resolve(step.chain === 'solana'
+            ? { kind: 'leg', chain: 'solana', operation, mintSecret: randomSecret() }
+            : { kind: 'leg', chain: 'arc', operation })
         case 'debit':
           return Promise.resolve({ kind: 'debit', amount: destination.amount, custodian: CUSTODIAN, beneficiary: destination.recipient, expectedSequence: recorded.nextSequence.toString() })
         case 'credit': {
@@ -151,7 +167,8 @@ function double(recorded: DoubleState, options: DoubleOptions = {}): SolanaRoute
         default:
           return Promise.resolve({
             kind: 'inventory', chain: step.chain === 'solana' ? 'solana' : 'arc', tokens: destination.poolTokens,
-            quote: destination.poolQuote, holder: step.chain === 'solana' ? BENEFICIARY : inventoryHolder(operation),
+            quote: destination.poolQuote,
+            holder: step.chain === 'solana' ? solanaInventoryOwner(operation).toBase58() : inventoryHolder(operation),
             recipient: destination.recipient, delivered: (BigInt(destination.amount) - BigInt(destination.poolTokens)).toString(),
           })
       }
@@ -172,7 +189,10 @@ function double(recorded: DoubleState, options: DoubleOptions = {}): SolanaRoute
         }
         case 'leg': {
           const leg = recorded.legs.get(plan.operation)
-          return Promise.resolve(leg ? done(`arc:leg:${plan.operation}`, { address: leg.manager }) : 'absent')
+          if (!leg) return Promise.resolve('absent')
+          // For the spoke, the artefact is this job's mint, named by the secret the plan persisted.
+          const address = plan.chain === 'solana' ? mintOf(plan).toBase58() : leg.manager
+          return Promise.resolve(done(`arc:leg:${plan.operation}`, { address }))
         }
         case 'debit': {
           const at = recorded.published.find((message) => message.sequence === BigInt(plan.expectedSequence))
@@ -203,6 +223,11 @@ function double(recorded: DoubleState, options: DoubleOptions = {}): SolanaRoute
 
     submit({ job, step }: EffectContext, plan: StepPlan): Promise<void> {
       const operation = operationOf(job, step)
+      // Something else publishes from the emitter in the window the fence exists to close.
+      if (options.intrude && plan.kind === 'debit' && !recorded.counts.intrusion) {
+        count('intrusion')
+        recorded.nextSequence += 1n
+      }
       switch (plan.kind) {
         case 'payment': {
           const key = `${plan.from}:${plan.nonce}`
@@ -231,6 +256,11 @@ function double(recorded: DoubleState, options: DoubleOptions = {}): SolanaRoute
           return Promise.resolve()
         }
         case 'debit': {
+          // The fence the route applies on chain: if the emitter moved on since the observation said
+          // nothing was published at the recorded sequence, locking again is exactly the wrong move.
+          if (recorded.nextSequence !== BigInt(plan.expectedSequence)) {
+            throw new Error(`The hub transceiver is at sequence ${recorded.nextSequence}, not the ${plan.expectedSequence} this debit recorded`)
+          }
           // NOT idempotent, exactly as the hub manager is not: every submission locks again and
           // publishes at whatever the next sequence happens to be.
           count('debit')
@@ -283,6 +313,14 @@ function journal(): string {
  * Accepts a thunk as well as a promise: the double throws synchronously where the chain reverts, so
  * a refusal from `submit` escapes before there is a promise to await.
  */
+/** The mint secret a job's prepared spoke leg holds, read the way the route reads it. */
+function spokeSecret(job: Job): Hex {
+  const step = job.steps.find((candidate) => candidate.id === 'manager:solana')!
+  const plan = decodePlan(step.prepared!.operation, step.prepared!.bytes)
+  if (plan.kind !== 'leg' || !plan.mintSecret) throw new Error('no mint secret on the spoke leg')
+  return plan.mintSecret
+}
+
 async function rejects(work: Promise<unknown> | (() => Promise<unknown>), message: string) {
   let failure: unknown
   try { await (typeof work === 'function' ? work() : work) } catch (cause) { failure = cause }
@@ -332,14 +370,44 @@ describe('route admission', () => {
 /* ------------------------------------------------------------------ derivations */
 
 describe('deterministic derivations', () => {
-  test('an inventory holder and a Solana seed are recoverable from the operation alone', () => {
+  test('the Arc inventory holder is recoverable from the operation alone', () => {
     const operation = keccak256(toBytes('operation'))
     expect(inventoryHolder(operation)).toBe(`0x${operation.slice(-40)}`)
     expect(inventoryHolder(operation)).toBe(inventoryHolder(operation))
-    expect(solanaSeed(operation, 'mint')).toHaveLength(32)
-    expect(Buffer.from(solanaSeed(operation, 'mint')).toString('hex')).toBe(Buffer.from(solanaSeed(operation, 'mint')).toString('hex'))
-    // Different labels must not collide: the mint and the inventory holder are different accounts.
-    expect(Buffer.from(solanaSeed(operation, 'mint')).toString('hex')).not.toBe(Buffer.from(solanaSeed(operation, 'inventory')).toString('hex'))
+  })
+
+  /**
+   * The finding this replaced: the Solana inventory owner used to be `Keypair.fromSeed` over
+   * `keccak256(operation:label)`. The 402 response returns the job id and the step ids are fixed
+   * strings, so that seed — and therefore a signing key for the pool allocation — was public to
+   * anyone who had asked for a quote.
+   */
+  test('the Solana inventory owner is recoverable but off the curve, so nobody holds a key for it', () => {
+    const operation = keccak256(toBytes('pool:solana'))
+    const owner = solanaInventoryOwner(operation)
+    expect(owner.toBase58()).toBe(solanaInventoryOwner(operation).toBase58())
+    // A program-derived address has no private key. This is the assertion the old derivation failed.
+    expect(PublicKey.isOnCurve(owner.toBytes())).toBe(false)
+    expect(owner.toBase58()).not.toBe(solanaInventoryOwner(keccak256(toBytes('other'))).toBase58())
+  })
+
+  test('the mint secret is unpredictable, and a plan that only differs by it still matches', () => {
+    const operation = keccak256(toBytes('manager:solana'))
+    const first: LegPlan = { kind: 'leg', chain: 'solana', operation, mintSecret: randomSecret() }
+    const second: LegPlan = { ...first, mintSecret: randomSecret() }
+    expect(second.mintSecret).not.toBe(first.mintSecret)
+    // A re-derivation draws a new secret. The persisted one has to win, not be read as a changed plan.
+    expect(planMatches(second, first)).toBe(true)
+    // Everything the job determines is still compared.
+    expect(planMatches({ ...second, operation: keccak256(toBytes('other')) }, first)).toBe(false)
+    expect(planMatches({ kind: 'leg', chain: 'arc', operation }, first)).toBe(false)
+  })
+
+  test('a debit plan still matches across a re-read of the sequence, but not a changed allocation', () => {
+    const persisted: DebitPlan = { kind: 'debit', amount: '100', custodian: CUSTODIAN, beneficiary: BENEFICIARY, expectedSequence: '7' }
+    expect(planMatches({ ...persisted, expectedSequence: '9' }, persisted)).toBe(true)
+    expect(planMatches({ ...persisted, amount: '101' }, persisted)).toBe(false)
+    expect(planMatches({ ...persisted, custodian: BENEFICIARY }, persisted)).toBe(false)
   })
 
   test('a step plan is bound to its operation and refuses to be read under another', () => {
@@ -348,6 +416,54 @@ describe('deterministic derivations', () => {
     expect(decodePlan(operation, bytes).kind).toBe('leg')
     expect(() => decodePlan(keccak256(toBytes('two')), bytes)).toThrow('belongs to a different operation')
     expect(() => decodePlan(operation, 'not json')).toThrow('not readable')
+  })
+})
+
+/* ------------------------------------------------------------------ the mint secret */
+
+describe('the spoke mint secret', () => {
+  test('never reaches the public job view', async () => {
+    const context = setup()
+    const job = await launch(context)
+    const secret = spokeSecret(job)
+    expect(secret).toMatch(/^0x[0-9a-f]{64}$/)
+
+    // The whole projection, not a field-by-field check: the secret must not appear anywhere in it,
+    // and neither must the prepared bytes that carry it.
+    const projected = JSON.stringify(publicJob(job))
+    expect(projected).not.toContain(secret.slice(2))
+    expect(projected).not.toContain('mintSecret')
+    // The same holds for the list view the service answers GET with.
+    const response = await context.service(new Request('http://x/equilibrium/jobs'))
+    expect(await response.text()).not.toContain(secret.slice(2))
+  })
+
+  test('is recovered from the journal by a restarted worker, which finds the same mint', async () => {
+    const path = journal()
+    const first = setup({ path })
+    const job = await launch(first)
+    const legStep = job.steps.find((step) => step.id === 'manager:solana')!
+    const mint = legStep.result!.address
+    expect(mint).toBeTruthy()
+    const effects = first.recorded
+    first.store.close()
+
+    // A restart: nothing survives but the journal file.
+    const resumed = setup({ path, recorded: effects })
+    const reloaded = resumed.store.get(job.id)!
+    const reloadedStep = reloaded.steps.find((step) => step.id === 'manager:solana')!
+    expect(spokeSecret(reloaded)).toBe(spokeSecret(job))
+    const observed = await resumed.route.observe(
+      { job: reloaded, step: reloadedStep },
+      decodePlan(reloadedStep.prepared!.operation, reloadedStep.prepared!.bytes),
+    )
+    expect(observed).not.toBe('absent')
+    expect((observed as EffectResult).address).toBe(mint)
+
+    // And a fresh derivation does draw a different secret, which is why the persisted one must win.
+    const drawn = await resumed.route.plan({ job: reloaded, step: reloadedStep })
+    expect((drawn as LegPlan).mintSecret).not.toBe(spokeSecret(reloaded))
+    resumed.store.close()
   })
 })
 
@@ -568,6 +684,19 @@ describe('interruption and restart', () => {
     expect(durable.steps.find((step) => step.id === 'debit:solana')!.state).toBe('prepared')
     await rejects(runJob(context.store, context.adapter, job.id, undefined, () => now * 1000), 'published at another sequence')
     expect(context.recorded.counts.debit).toBe(1)
+  })
+
+  test('a debit whose sequence was taken before it submitted locks nothing at all', async () => {
+    const context = setup({ route: { intrude: true } })
+    const job = quote(context.store, context.adapter, request(), now)
+    await rejects(runJob(context.store, context.adapter, job.id, await sign(job), () => now * 1000), 'not the 7 this debit recorded')
+    // The distinction from the stolen-sequence case: there the lock happened and the retry did not
+    // repeat it. Here the fence stops the lock before it happens, so there is no lock to reconcile.
+    expect(context.recorded.counts.debit).toBeUndefined()
+    expect(context.recorded.published).toHaveLength(0)
+    const durable = context.store.get(job.id)!
+    expect(durable.steps.find((step) => step.id === 'debit:solana')!.state).toBe('prepared')
+    expect(durable.sweep).toBe('blocked')
   })
 
   test('a second worker cannot claim a job another owns, and a stale one cannot record', () => {

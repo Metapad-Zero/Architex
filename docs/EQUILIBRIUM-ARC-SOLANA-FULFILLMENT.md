@@ -42,14 +42,38 @@ That is the whole design; the interesting part is that the chains do not all off
 | `manager:arc` | a locking NTT manager, its transceiver, the Solana peers and the launch's allowances | registered in `EquilibriumRouteRegistry` only once all of it is wired, so a half-built leg reads as absent and the contracts it left behind are referred to by nothing |
 | `pool:arc` | pool inventory and the rest of the Arc allocation | one `EquilibriumDistributor.place` call: both move together or neither does |
 | `manager:solana` | the derived mint, the burning manager config, the transceiver and the Arc peers | every account is a PDA or derived from the operation, and the observation requires the *last* one written, so an interrupted leg resumes from whichever part is missing |
-| `debit:solana` | the hub manager's `transfer` | **not idempotent.** The core-bridge sequence is read and persisted before submitting; an unpublished sequence means it never happened, and a different payload at that sequence fails the step closed rather than locking a second allocation |
+| `debit:solana` | the hub manager's `transfer` | **not idempotent.** The core-bridge sequence is read and persisted before submitting; an unpublished sequence means it never happened, and a different payload at that sequence fails the step closed rather than locking a second allocation. The sequence is re-read immediately before the transfer, so the window between the observation and the lock is closed too |
 | `credit:solana` | post the VAA, validate, redeem, release the mint | keyed by the NTT manager-message digest, which the spoke's own inbox item and replay guard use |
 | `pool:solana` | inventory and the rest of the Solana allocation | one Solana transaction, so it is atomic, and the holder's funded token account is only reachable together with the rest |
 
-The mint and each inventory holder are derived from the step's operation hash (`solanaSeed`,
-`inventoryHolder`) rather than generated. A generated mint would be lost with the process that
-generated it, and a lost mint address is an unobservable issuance — the precise condition under
-which a launch issues its supply twice.
+### Addresses that are recoverable but not predictable
+
+Every Solana address a step owns has to satisfy two things at once, and an earlier version of this
+code satisfied only the first.
+
+It must be **recoverable**, because the account is how the observation decides whether the effect
+already happened. A mint generated at random and held in memory is lost with the process that held
+it, and a lost mint address is an unobservable issuance — the precise condition under which a launch
+issues its supply twice.
+
+It must equally be **unpredictable or unsignable**, because the job id is public: the 402 response
+returns it and the step ids are fixed strings. The first version derived an ed25519 keypair from
+`keccak256(operation:label)`, which made the inventory holder's signing key a public function of the
+job id. Anyone who had merely asked for a quote could move the pool allocation after `pool:solana`
+succeeded.
+
+The two properties are met separately:
+
+- **The spoke mint** is a random 32-byte secret generated when `manager:solana` is prepared and
+  persisted inside that step's plan. The plan is written to the journal before anything is submitted,
+  so a restart reads the secret back and finds the same mint; `publicJob` never projects a step's
+  prepared bytes, so the secret does not reach any response, the job list or the harness record.
+  Because a re-derivation necessarily draws a different secret, `planMatches` excludes this field —
+  the persisted value is the authoritative one, exactly as it is for the debit's recorded sequence.
+- **Each inventory holder** is an address with no private key: on Solana a program-derived address
+  under an `equilibrium-inventory` seed the pinned NTT manager does not declare, so no program can
+  sign for it either; on Arc the last twenty bytes of the operation hash. Both are still a public
+  balance read, which is all the observation needs.
 
 ### The conservation gate
 

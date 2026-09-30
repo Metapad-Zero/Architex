@@ -18,7 +18,7 @@
  *    complete a step past the point where both ledgers exist is gated on the two of them
  *    reconciling, each read from its own chain.
  */
-import { assertRouteRequest, decodePlan, encodePlan, gateLedger, operationOf, type SolanaRoute, type StepPlan } from './solanaRoute'
+import { assertRouteRequest, decodePlan, encodePlan, gateLedger, operationOf, planMatches, type SolanaRoute, type StepPlan } from './solanaRoute'
 import { hash } from './request'
 import { LaunchError, type EffectContext, type EffectResult, type PreparedEffect, type PromotionalTokenAdapter, type Mode } from './types'
 
@@ -47,24 +47,14 @@ export function solanaAdapter(route: SolanaRoute, options: SolanaAdapterOptions 
    * The runner persists `prepared.bytes` before the first submission and hands the same bytes to
    * every retry. Re-deriving lets a changed route be caught: the persisted plan is what gets
    * submitted, and if the route would now plan something else then the two disagree and the step
-   * stops. The one field allowed to differ is a recorded chain read, which is why the comparison is
-   * on the fields the job determines rather than on the whole object.
+   * stops. `planMatches` ignores the fields a plan records once — a chain read, or a secret generated
+   * at prepare time — because a fresh derivation necessarily produces different ones, and the
+   * persisted value is what the effect was and will be bound to.
    */
   const reconcilePlan = async (context: EffectContext, persisted: StepPlan): Promise<StepPlan> => {
     const derived = await route.plan(context)
-    if (derived.kind !== persisted.kind) {
-      throw new Error(`Persisted ${persisted.kind} plan for ${context.step.id} no longer matches the route, which now plans ${derived.kind}`)
-    }
-    // A chain read recorded inside the plan is expected to be stale; everything the job determines
-    // is not. `expectedSequence` is the only such field, and the persisted one is authoritative.
-    if (persisted.kind === 'debit' && derived.kind === 'debit') {
-      if (persisted.amount !== derived.amount || persisted.custodian !== derived.custodian || persisted.beneficiary !== derived.beneficiary) {
-        throw new Error('Persisted debit plan does not match the bound allocation')
-      }
-      return persisted
-    }
-    if (hash(derived) !== hash(persisted)) {
-      throw new Error(`Persisted plan for ${context.step.id} differs from the plan this route derives now; reconcile against the original pinned configuration`)
+    if (!planMatches(derived, persisted)) {
+      throw new Error(`Persisted ${persisted.kind} plan for ${context.step.id} differs from the plan this route derives now; reconcile against the original pinned configuration`)
     }
     return persisted
   }
