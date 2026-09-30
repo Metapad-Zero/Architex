@@ -109,3 +109,13 @@
 /* A transaction hash has no break opportunity; wrap it rather than widening the grid track. */
 .eq-settlement-tx { overflow-wrap: anywhere; }
 @media (max-width: 767px) { .eq-integration .eq-tools-content { grid-template-columns: minmax(0, 1fr); } }
+.eq-read-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 24px; margin: 16px 0; }
+.eq-read-row > p { margin: 0; }
+.eq-read-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.eq-read-controls .eq-muted { margin: 0; }
+.eq-secondary { min-height: 44px; border: 1px solid var(--ink); border-radius: var(--radius); background: var(--paper); color: var(--ink); padding: 8px 16px; font-weight: 600; }
+.eq-secondary:hover:not(:disabled) { background: var(--ink); color: var(--paper); }
+.eq-secondary:disabled { color: var(--g500); border-color: var(--g300); cursor: progress; }
+/* The exact atoms sit under the readable amount: secondary detail, never the headline figure. */
+.eq-atoms { display: block; color: var(--g500); font-size: .75rem; }
+@media (max-width: 767px) { .eq-read-controls { width: 100%; justify-content: space-between; } }
