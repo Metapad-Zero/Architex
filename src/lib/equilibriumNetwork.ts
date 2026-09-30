@@ -26,7 +26,7 @@ export const NETWORKS: NetworkCandidate[] = [
   { chain: 'solana', name: 'Solana', authority: 'burning', venue: 'PumpSwap existing-mint pool',
     mainnet: { id: '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp', wormholeId: 1, rpc: 'https://api.mainnet-beta.solana.com', core: 'worm2ZoG2kUd4vFXhvjh93UUH596ayRfgQ2MgjNMTth', market: 'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA' },
     testnet: { id: 'EtWTRABZaYq6iMfeYKouRu166VU2xqa1', wormholeId: 1, rpc: 'https://api.devnet.solana.com', core: '3u8hJUVTA4jH1wYAyUur7FFZVQ8H635K3tSHHF4ssjQ5', market: 'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA' },
-    prerequisite: 'SVM manager program deployment, six-decimal SPL mint with manager PDA mint authority, actual devnet Arc↔Solana transfer and create_pool test. Wormhole Testnet maps to Solana devnet.' },
+    prerequisite: 'Pinned SVM programs build and pass a local validator rehearsal (docs/EQUILIBRIUM-SOLANA.md). Still needed: fresh program ids, a public SVM deployment, a deployed Arc peer, an actual devnet Arc/Solana transfer and a create_pool test. Wormhole Testnet maps to Solana devnet.' },
   { chain: 'robinhood', name: 'Robinhood Chain', authority: 'burning', venue: 'Uniswap v3',
     mainnet: { id: 4663, wormholeId: 72, rpc: 'https://rpc.mainnet.chain.robinhood.com', core: '0x141fBa8AD5D61bdaB45A047cF60b5Ad9784987FB', market: '0x1f7d7550b1b028f7571e69a784071f0205fd2efa' },
     testnet: { id: 46630, wormholeId: null, rpc: 'https://rpc.testnet.chain.robinhood.com', core: null, market: null },
