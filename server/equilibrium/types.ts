@@ -70,6 +70,13 @@ export interface Job {
   /** Present only once the authorization settled with finalized evidence. */
   settlement?: Settlement
   steps: Step[]
+  /**
+   * Whether the unattended sweep may claim this job. A failure that submitted nothing — an
+   * expired authorization, a route that closed before any effect went out — blocks it, so the
+   * sweep cannot reclaim the same doomed job every tick. Progress makes it eligible again, and
+   * an explicit client request always reaches the job directly regardless of this marker.
+   */
+  sweep: 'eligible' | 'blocked'
   state: 'awaiting_payment' | 'running' | 'partial' | 'complete'
   error?: string
   revision: number
@@ -81,6 +88,8 @@ export interface Job {
  * the same revision fencing, renewable leases and settled-authorization uniqueness.
  */
 export interface JobStorage {
+  /** The lease this store grants. Workers derive their heartbeat interval from it. */
+  readonly leaseMs: number
   get(id: string): Job | undefined
   insert(job: Job): Job
   claim(id: Hex, owner: string, now: number, duration?: number): Job
@@ -89,7 +98,7 @@ export interface JobStorage {
   save(job: Job, owner: string, now: number): void
   release(id: string, owner: string): void
   list(limit?: number): Job[]
-  /** Unleased jobs that are not terminal, so a restart can resume without a client request. */
+  /** Unleased, sweep-eligible jobs that are not terminal, so a restart resumes without a request. */
   resumable(now: number, limit?: number): Job[]
   /** Bind (chainId, asset, nonce) to this job before any settlement may be submitted. */
   reserveAuthorization(job: Job): void

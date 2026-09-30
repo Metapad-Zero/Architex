@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { Database } from 'bun:sqlite'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { JobStore, assertDurableStore } from '../store'
+import { JobStore, assertDurableStore, canonicalPath, durationMs } from '../store'
 import { localAdapter } from '../localAdapter'
 import { publicJob, quote, reconcile, runJob } from '../runner'
 import { createLaunchService } from '../service'
@@ -35,6 +35,15 @@ function delayed(adapter: PromotionalTokenAdapter, stepId: string, ms: number, b
     before?.(); await Bun.sleep(ms); return prepare(context)
   } }
 }
+/** Delay one step's broadcast, so the submission itself outlives a short lease. */
+function slowBroadcast(adapter: PromotionalTokenAdapter, stepId: string, ms: number, before?: () => void) {
+  const broadcast = adapter.broadcast.bind(adapter)
+  const sent: string[] = []
+  return { sent, adapter: { ...adapter, async broadcast(context: EffectContext, prepared: Parameters<typeof broadcast>[1]) {
+    if (context.step.id !== stepId) { sent.push(context.step.id); return broadcast(context, prepared) }
+    before?.(); await Bun.sleep(ms); sent.push(context.step.id); return broadcast(context, prepared)
+  } } as PromotionalTokenAdapter }
+}
 const effects = (store: JobStore) => store.db.query<{ count: number }, []>('SELECT COUNT(*) AS count FROM local_effects').get()!.count
 
 describe('durable host required for held authorizations', () => {
@@ -59,11 +68,6 @@ describe('lease survives a slow external call', () => {
     const result = await runJob(store, delayed(adapter, 'canonical:arc', 260), job.id, await sign(job), Date.now, undefined, { leaseMs: 80, heartbeatMs: 20 })
     expect(result.state).toBe('complete')
     expect(effects(store)).toBe(8)
-    store.close()
-  })
-  test('without renewal the same slow call cannot record its result', async () => {
-    const { store, adapter, job } = setup(database(), { leaseMs: 80 })
-    await rejects(runJob(store, delayed(adapter, 'canonical:arc', 260), job.id, await sign(job), Date.now, undefined, { leaseMs: 80, heartbeatMs: 10_000 }), 'lost its lease')
     store.close()
   })
   test('a worker whose lease was taken submits nothing further', async () => {
@@ -276,6 +280,122 @@ describe('the paid HTTP surface is idempotent and conflict-safe', () => {
     const free = await (await service(new Request(`http://localhost/equilibrium/jobs/${job.id}`))).text()
     expect(free).toContain('"settlement"')
     expect(free).not.toContain('signature'); expect(free).not.toContain('bytes')
+    store.close()
+  })
+})
+
+describe('the lease fences the irreversible calls', () => {
+  test('a broadcast slower than the lease keeps ownership even when a long heartbeat is asked for', async () => {
+    const { store, adapter, job } = setup(database(), { leaseMs: 80 })
+    const slow = slowBroadcast(adapter, 'canonical:arc', 220)
+    // A heartbeat longer than the lease must be clamped, not honoured.
+    const result = await runJob(store, slow.adapter, job.id, await sign(job), Date.now, undefined, { leaseMs: 80, heartbeatMs: 10_000 })
+    expect(result.state).toBe('complete')
+    expect(effects(store)).toBe(8)
+    expect(store.get(job.id)!.steps.find((s) => s.id === 'canonical:arc')!.state).toBe('complete')
+    store.close()
+  })
+  test('a worker whose lease lapsed never reaches broadcast', async () => {
+    const { store, adapter, job } = setup(database(), { leaseMs: 60 })
+    // Steal the lease while the previous step is still being prepared.
+    const thief = () => store.claim(job.id, 'other-worker', Date.now() + 60_000)
+    const slow = slowBroadcast(delayed(adapter, 'canonical:arc', 120, thief), 'canonical:arc', 200)
+    await rejects(runJob(store, slow.adapter, job.id, await sign(job), Date.now, undefined, { leaseMs: 60, heartbeatMs: 10_000 }), 'lost its lease')
+    expect(slow.sent).not.toContain('canonical:arc')
+    // Only the settled payment reached the journal.
+    expect(effects(store)).toBe(1)
+    store.close()
+  })
+  test('a lapsed lease cannot record a settlement', async () => {
+    const { store, adapter, job } = setup(database(), { leaseMs: 60 })
+    const observe = adapter.observe.bind(adapter)
+    let stolen = false
+    const racing: PromotionalTokenAdapter = { ...adapter, async observe(context: EffectContext, prepared) {
+      const result = await observe(context, prepared)
+      // Lose the lease after the payment effect is finalized but before it is recorded.
+      if (context.step.kind === 'payment' && typeof result === 'object' && !stolen) { stolen = true; store.claim(job.id, 'other-worker', Date.now() + 60_000) }
+      return result
+    } }
+    await rejects(runJob(store, racing, job.id, await sign(job), Date.now, undefined, { leaseMs: 60, heartbeatMs: 10_000 }), 'lost its lease')
+    expect(store.settlementOf(job.id)).toBeUndefined()
+    expect(store.get(job.id)!.settlement).toBeUndefined()
+    store.close()
+  })
+})
+
+describe('the durable-path guard sees through symlinks', () => {
+  test('a symlinked temporary directory is refused under either name', () => {
+    // On macOS /tmp is a symlink to /private/tmp; both spellings name the same discarded disk.
+    for (const path of ['/private/tmp/jobs.sqlite', '/private/var/tmp/jobs.sqlite', '/private/var/folders/ab/jobs.sqlite', '/private/var/task/jobs.sqlite']) {
+      expect(() => assertDurableStore(path, {})).toThrow('temporary path')
+    }
+    // Whatever this host actually uses for temporary files, by its real name and its alias.
+    const temporary = mkdtempSync(join(tmpdir(), 'equilibrium-guard-')); dirs.push(temporary)
+    expect(() => assertDurableStore(join(temporary, 'jobs.sqlite'), {})).toThrow('temporary path')
+    expect(() => assertDurableStore(join(realpathSync(temporary), 'jobs.sqlite'), {})).toThrow('temporary path')
+  })
+  test('canonicalPath resolves existing ancestors and keeps the missing tail', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'equilibrium-canon-')); dirs.push(dir)
+    expect(canonicalPath(join(dir, 'missing', 'jobs.sqlite'))).toBe(join(realpathSync(dir), 'missing', 'jobs.sqlite'))
+  })
+})
+
+describe('configuration durations are validated, not coerced', () => {
+  test('a non-numeric or non-positive duration is refused', () => {
+    for (const raw of ['nope', '0', '-1', '1.5', 'NaN', 'Infinity', '10s']) {
+      expect(() => durationMs('EQUILIBRIUM_RECONCILE_MS', raw, 30_000)).toThrow('positive whole number')
+    }
+    expect(durationMs('EQUILIBRIUM_RECONCILE_MS', undefined, 30_000)).toBe(30_000)
+    expect(durationMs('EQUILIBRIUM_RECONCILE_MS', '', 30_000)).toBe(30_000)
+    expect(durationMs('EQUILIBRIUM_LEASE_MS', '2000', 30_000)).toBe(2000)
+  })
+})
+
+describe('a terminal failure leaves the sweep', () => {
+  test('an expired authorization is not reclaimed every tick', async () => {
+    const { store, adapter, job } = setup()
+    await rejects(runJob(store, adapter, job.id, await sign(job), () => (now + 1000) * 1000), 'expired')
+    expect(store.get(job.id)!.sweep).toBe('blocked')
+    // The sweep must not keep claiming a job whose authorization can never settle.
+    expect(store.resumable((now + 2000) * 1000)).toEqual([])
+    expect(await reconcile(store, adapter, () => (now + 2000) * 1000)).toEqual([])
+    expect(effects(store)).toBe(0)
+    store.close()
+  })
+  test('a route that closes before any effect is submitted leaves the sweep after one attempt', async () => {
+    const { store, adapter, job } = setup()
+    const closed: PromotionalTokenAdapter = { ...adapter, prepare(context: EffectContext) {
+      if (context.step.id === 'pool:base') return Promise.reject(new Error('Venue adapter unavailable'))
+      return adapter.prepare(context)
+    } }
+    await rejects(runJob(store, closed, job.id, await sign(job), () => now * 1000), 'Venue adapter unavailable')
+    expect(store.get(job.id)!.sweep).toBe('blocked')
+    expect(await reconcile(store, closed, () => (now + 1000) * 1000)).toEqual([])
+    // An explicit request still reaches the job directly, and progress restores eligibility.
+    const recovered = await runJob(store, adapter, job.id, undefined, () => (now + 1000) * 1000)
+    expect(recovered.state).toBe('complete')
+    expect(store.get(job.id)!.sweep).toBe('eligible')
+    store.close()
+  })
+  test('pending evidence keeps being retried by the sweep', async () => {
+    const { store, job } = setup()
+    const pending = new Set(['pool:base'])
+    const adapter = localAdapter(store, { pending })
+    const partial = await runJob(store, adapter, job.id, await sign(job), () => now * 1000)
+    expect(partial.state).toBe('partial')
+    // Unresolved evidence is not a terminal failure: the sweep must come back for it.
+    expect(store.get(job.id)!.sweep).toBe('eligible')
+    expect(store.resumable((now + 1000) * 1000).map((j) => j.id)).toEqual([job.id])
+    expect(await reconcile(store, adapter, () => (now + 1000) * 1000)).toEqual([{ id: job.id, state: 'partial', error: partial.error }])
+    pending.clear()
+    expect((await reconcile(store, adapter, () => (now + 2000) * 1000))[0].state).toBe('complete')
+    store.close()
+  })
+  test('a crash that already submitted an effect stays in the sweep', async () => {
+    const { store, adapter, job } = setup()
+    await rejects(runJob(store, adapter, job.id, await sign(job), () => now * 1000, (step) => { if (step === 'manager:base') throw new Error('Process lost result') }), 'Process lost result')
+    expect(store.get(job.id)!.sweep).toBe('eligible')
+    expect((await reconcile(store, adapter, () => (now + 1000) * 1000))[0].state).toBe('complete')
     store.close()
   })
 })

@@ -68,5 +68,5 @@ export function createJob(request: LaunchRequest, adapter: PromotionalTokenAdapt
   const terms = { ...adapter.terms }
   // Domain, route plan, destinations, cap, expiry and payer are all bound to the EIP-3009 nonce.
   const id = hash({ version: 1, mode: adapter.mode, adapterVersion: adapter.version, request, terms, steps, total })
-  return { id, identity: identity(request), mode: adapter.mode, adapterVersion: adapter.version, request, terms, total, steps, state: 'awaiting_payment', revision: 0, createdAt: now }
+  return { id, identity: identity(request), mode: adapter.mode, adapterVersion: adapter.version, request, terms, total, steps, sweep: 'eligible', state: 'awaiting_payment', revision: 0, createdAt: now }
 }

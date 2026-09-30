@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { GHOST } from '../lib/format'
 import { readiness } from '../lib/equilibriumNetwork'
 import infrastructure from '../lib/equilibriumInfrastructure.json'
 
@@ -6,7 +7,8 @@ interface PublicJob {
   id: string; mode: 'local' | 'fork' | 'testnet' | 'live'; state: string
   payment: { settled: boolean; fulfillment: string }
   settlement: { amount: string; transaction: string; nonce: string; fulfillment: string } | null
-  funds: { paid: string; platformFee: string; feesSpent: string; quoteInventoryDeployed: string; unallocatedHeld: string; determinate: boolean; refundable: boolean; refundableAmount: string; unresolvedEffects: string[]; note: string }
+  // A record written by an older service may predate any of these, so every field is optional.
+  funds?: { paid?: string; platformFee?: string; feesSpent?: string; quoteInventoryDeployed?: string; unallocatedHeld?: string; determinate?: boolean; refundable?: boolean; refundableAmount?: string; unresolvedEffects?: string[]; note?: string }
   supply: { issuance: string; custody: string; remote: string; pending: string; reconciled: boolean; evidence: string }
   steps: { id: string; chain: string; state: string; result?: { address?: string; transaction: string } }[]
 }
@@ -49,13 +51,15 @@ export function EquilibriumIntegration({ offline = false }: { offline?: boolean 
           ? <><dl className="eq-ledger"><div><dt>Settled amount</dt><dd>{job.settlement.amount}</dd></div><div><dt>Authorization nonce</dt><dd>{job.settlement.nonce.slice(0, 12)}…</dd></div><div><dt>Launch fulfillment</dt><dd>{job.settlement.fulfillment}</dd></div></dl>
             <p className="eq-muted eq-settlement-tx">Settlement transaction {job.settlement.transaction}</p></>
           : <p>No settlement is recorded for this job.</p>}
-        <dl className="eq-ledger">
-          <div><dt>Platform fee</dt><dd>{job.funds.platformFee}</dd></div><div><dt>Execution fees spent</dt><dd>{job.funds.feesSpent}</dd></div>
-          <div><dt>Quote inventory deployed</dt><dd>{job.funds.quoteInventoryDeployed}</dd></div><div><dt>Unallocated held</dt><dd>{job.funds.unallocatedHeld}</dd></div>
-        </dl>
-        <p>{job.funds.note}</p>
-        {job.funds.unresolvedEffects.length > 0 && <p className="eq-muted">Outstanding operations: {job.funds.unresolvedEffects.join(', ')}. No refund can be decided until these resolve.</p>}
-        {job.funds.refundable && <p className="eq-muted">Determinate unspent remainder: {job.funds.refundableAmount}. This states what is unspent; no refund path is open.</p>}
+        {job.funds ? <>
+          <dl className="eq-ledger">
+            <div><dt>Platform fee</dt><dd>{job.funds.platformFee ?? GHOST}</dd></div><div><dt>Execution fees spent</dt><dd>{job.funds.feesSpent ?? GHOST}</dd></div>
+            <div><dt>Quote inventory deployed</dt><dd>{job.funds.quoteInventoryDeployed ?? GHOST}</dd></div><div><dt>Unallocated held</dt><dd>{job.funds.unallocatedHeld ?? GHOST}</dd></div>
+          </dl>
+          {job.funds.note && <p>{job.funds.note}</p>}
+          {(job.funds.unresolvedEffects?.length ?? 0) > 0 && <p className="eq-muted">Outstanding operations: {job.funds.unresolvedEffects!.join(', ')}. No refund can be decided until these resolve.</p>}
+          {job.funds.refundable && <p className="eq-muted">Determinate unspent remainder: {job.funds.refundableAmount}. This states what is unspent; no refund path is open.</p>}
+        </> : <p className="eq-muted">This record predates the fund accounting.</p>}
       </section>
       <section><h3>Fulfillment steps</h3><ol className="eq-job-steps">{job.steps.map((step) => <li key={step.id}><p>{step.id} · {step.state}</p>{step.result && <p className="eq-muted">{step.result.address ?? step.result.transaction}</p>}</li>)}</ol></section></div>
     </details>)}

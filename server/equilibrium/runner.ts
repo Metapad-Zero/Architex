@@ -45,8 +45,19 @@ function settlementOf(job: Job, step: Step, finalizedAt: number): Settlement {
 
 export async function runJob(store: JobStorage, adapter: PromotionalTokenAdapter, id: Job['id'], payment?: SignedPayment, now: () => number = Date.now, afterBroadcast?: (step: string) => void, options: { leaseMs?: number; heartbeatMs?: number } = {}): Promise<Job> {
   const owner = randomUUID()
-  const job = store.claim(id, owner, now(), options.leaseMs)
-  const beat = heartbeat(store, id, owner, now, options.heartbeatMs ?? 10_000)
+  const leaseMs = options.leaseMs ?? store.leaseMs
+  const job = store.claim(id, owner, now(), leaseMs)
+  // The heartbeat must fire at least twice within a lease. A requested interval longer than the
+  // lease would let a slow call outlive its ownership, so it is clamped rather than honoured.
+  const beat = heartbeat(store, id, owner, now, Math.max(1, Math.min(options.heartbeatMs ?? 10_000, Math.floor(leaseMs / 2))))
+  /**
+   * Whether the step being worked on put anything on the wire. Decides if the sweep may try
+   * again: a step that failed before submitting will fail the same way unattended, while one
+   * that failed after submitting leaves an effect a retry can observe and move past.
+   */
+  let stepSubmitted = false
+  /** Re-fence immediately before an irreversible external call. A lapsed lease must not reach it. */
+  const fence = () => { beat.check(); store.renew(id, owner, now(), leaseMs); beat.check() }
   try {
     if (job.mode !== adapter.mode) throw new LaunchError(409, 'mode_conflict', 'Adapter mode differs from the durable job.')
     if (job.adapterVersion !== adapter.version || hash(job.terms) !== hash(adapter.terms)) throw new LaunchError(409, 'adapter_conflict', 'Adapter version or payment configuration changed; reconcile with the original pinned configuration.')
@@ -64,6 +75,7 @@ export async function runJob(store: JobStorage, adapter: PromotionalTokenAdapter
     job.state = 'running'; delete job.error; store.save(job, owner, now())
     for (const step of job.steps) {
       if (step.state === 'complete') continue
+      stepSubmitted = false
       if (!step.prepared) {
         step.prepared = await adapter.prepare({ job, step })
         beat.check()
@@ -76,7 +88,9 @@ export async function runJob(store: JobStorage, adapter: PromotionalTokenAdapter
         // Renew/fence before sending. A lost worker cannot generate or send fresh bytes.
         store.save(job, owner, now())
         if (step.kind === 'payment' && now() / 1000 >= job.request.quote.expires) throw new LaunchError(409, 'quote_expired', 'Unsettled authorization expired; do not charge or begin issuance.')
+        fence()
         await adapter.broadcast({ job, step }, step.prepared)
+        stepSubmitted = true; job.sweep = 'eligible'
         afterBroadcast?.(step.id)
         observed = await adapter.observe({ job, step }, step.prepared)
         beat.check()
@@ -94,9 +108,9 @@ export async function runJob(store: JobStorage, adapter: PromotionalTokenAdapter
       if (['debit', 'credit'].includes(step.kind) && observed.amount !== destination.amount) throw new Error('Transfer receipt amount differs from the bound allocation')
       if (step.kind === 'manager' && !observed.address) throw new Error('Manager address is missing')
       if (step.kind === 'pool' && (!observed.address || observed.amount !== destination.poolTokens || observed.quoteAmount !== destination.poolQuote)) throw new Error('Pool receipt does not prove the bound token/quote inventory')
-      step.result = observed; step.state = 'complete'
+      step.result = observed; step.state = 'complete'; job.sweep = 'eligible'
       // Settlement is recorded against the reservation and readable on its own, before fulfillment.
-      if (step.kind === 'payment') job.settlement = store.recordSettlement(settlementOf(job, step, Math.floor(now() / 1000)), job.id)
+      if (step.kind === 'payment') { fence(); job.settlement = store.recordSettlement(settlementOf(job, step, Math.floor(now() / 1000)), job.id) }
       store.save(job, owner, now())
     }
     job.state = 'complete'; store.save(job, owner, now()); return job
@@ -105,6 +119,10 @@ export async function runJob(store: JobStorage, adapter: PromotionalTokenAdapter
       // A held authorization is never reported back as awaiting payment.
       job.state = job.payment || job.steps.some((s) => s.state !== 'planned') ? 'partial' : 'awaiting_payment'
       job.error = cause instanceof Error ? cause.message : 'Job needs reconciliation'
+      // Nothing went out on this attempt, so repeating it unattended would only repeat the
+      // failure. An expired authorization or a route that closed first stays out of the sweep
+      // until progress or an explicit request revisits the job.
+      if (!stepSubmitted) job.sweep = 'blocked'
       store.save(job, owner, now())
     } catch { /* The lease or revision is gone; the durable job keeps its last persisted state. */ }
     throw cause

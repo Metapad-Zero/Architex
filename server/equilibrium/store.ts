@@ -1,13 +1,36 @@
 import { Database } from 'bun:sqlite'
-import { chmodSync, mkdirSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
+import { chmodSync, mkdirSync, realpathSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { basename, dirname, join, resolve } from 'node:path'
 import type { Hex } from 'viem'
 import { LaunchError, type Job, type JobStorage, type Settlement } from './types'
 
-/** Paths a serverless or sandbox host discards between invocations. Never a production job store. */
-const EPHEMERAL = [/^\/tmp(\/|$)/, /^\/var\/tmp(\/|$)/, /^\/var\/task(\/|$)/, /^\/var\/folders(\/|$)/, /^\/dev\/shm(\/|$)/]
+/**
+ * Paths a serverless or sandbox host discards between invocations. Matched against the
+ * canonical path, so a symlinked temporary directory cannot slip past — on macOS `/tmp` is a
+ * symlink to `/private/tmp`, and both spellings must be refused.
+ */
+const EPHEMERAL = [/^(\/private)?\/tmp(\/|$)/, /^(\/private)?\/var\/tmp(\/|$)/, /^(\/private)?\/var\/task(\/|$)/, /^(\/private)?\/var\/folders(\/|$)/, /^\/dev\/shm(\/|$)/]
 /** Environment markers of a host whose local filesystem does not survive the next request. */
 const SERVERLESS = ['AWS_LAMBDA_FUNCTION_NAME', 'LAMBDA_TASK_ROOT', 'VERCEL', 'FUNCTIONS_WORKER_RUNTIME', 'K_SERVICE']
+
+/**
+ * Resolve every symlink that already exists on the path. The database file itself normally does
+ * not exist yet, so resolve the deepest existing ancestor and rejoin the remainder.
+ */
+export function canonicalPath(path: string): string {
+  const absolute = resolve(path)
+  const tail: string[] = []
+  let current = absolute
+  for (;;) {
+    try { return join(realpathSync(current), ...tail) } catch {
+      const parent = dirname(current)
+      if (parent === current) return absolute
+      tail.unshift(basename(current))
+      current = parent
+    }
+  }
+}
 
 /**
  * Refuse a job store that cannot outlive the request that wrote it. A prepared-but-unobserved
@@ -18,9 +41,24 @@ export function assertDurableStore(path: string, env: Record<string, string | un
   const marker = SERVERLESS.find((name) => env[name])
   if (marker) throw new LaunchError(503, 'ephemeral_host', `${marker} indicates a serverless host with no durable filesystem. Run the launch service on a durable host or a transactional shared database.`)
   if (path === ':memory:') throw new LaunchError(503, 'ephemeral_store', 'An in-memory store loses prepared effects on exit. Configure a durable file or shared database.')
-  const absolute = resolve(path)
-  if (EPHEMERAL.some((pattern) => pattern.test(absolute))) throw new LaunchError(503, 'ephemeral_store', `${absolute} is a temporary path the host may discard. Configure EQUILIBRIUM_DB on durable storage.`)
-  return absolute
+  const canonical = canonicalPath(path)
+  // Also refuse whatever this host actually uses for temporary files, whatever it is called.
+  const temporary = canonicalPath(tmpdir())
+  if (EPHEMERAL.some((pattern) => pattern.test(canonical)) || canonical === temporary || canonical.startsWith(temporary + '/')) {
+    throw new LaunchError(503, 'ephemeral_store', `${canonical} is a temporary path the host may discard. Configure EQUILIBRIUM_DB on durable storage.`)
+  }
+  return canonical
+}
+
+/**
+ * A duration that silently becomes NaN turns `setInterval` into a 1 ms loop and a lease into an
+ * already-expired one, so a malformed value is refused rather than coerced.
+ */
+export function durationMs(name: string, raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw === '') return fallback
+  const value = Number(raw)
+  if (!Number.isSafeInteger(value) || value <= 0) throw new LaunchError(503, 'invalid_configuration', `${name} must be a positive whole number of milliseconds; received ${JSON.stringify(raw)}.`)
+  return value
 }
 
 /** Single durable host only. Never use a serverless /tmp file as a production job store. */
@@ -46,13 +84,14 @@ export class JobStore implements JobStorage {
     const columns = new Set(this.db.query<{ name: string }, []>('PRAGMA table_info(jobs)').all().map((c) => c.name))
     if (!columns.has('state')) this.db.exec(`ALTER TABLE jobs ADD COLUMN state TEXT NOT NULL DEFAULT 'awaiting_payment'`)
     if (!columns.has('payable')) this.db.exec('ALTER TABLE jobs ADD COLUMN payable INTEGER NOT NULL DEFAULT 0')
-    if (!columns.has('state') || !columns.has('payable')) {
+    if (!columns.has('sweep')) this.db.exec('ALTER TABLE jobs ADD COLUMN sweep INTEGER NOT NULL DEFAULT 1')
+    if (!columns.has('state') || !columns.has('payable') || !columns.has('sweep')) {
       for (const row of this.db.query<{ id: string; data: string }, []>('SELECT id,data FROM jobs').all()) {
         const job = JSON.parse(row.data) as Job
-        this.db.query('UPDATE jobs SET state=?, payable=? WHERE id=?').run(job.state, job.payment ? 1 : 0, row.id)
+        this.db.query('UPDATE jobs SET state=?, payable=?, sweep=? WHERE id=?').run(job.state, job.payment ? 1 : 0, job.sweep === 'blocked' ? 0 : 1, row.id)
       }
     }
-    this.db.exec('CREATE INDEX IF NOT EXISTS jobs_resumable ON jobs (state, payable, until_ms)')
+    this.db.exec('CREATE INDEX IF NOT EXISTS jobs_resumable ON jobs (state, payable, sweep, until_ms)')
   }
   get(id: string): Job | undefined {
     const row = this.db.query<{ data: string }, [string, string]>('SELECT data FROM jobs WHERE id=? OR identity=?').get(id, id)
@@ -65,7 +104,7 @@ export class JobStore implements JobStorage {
         if (existing.id !== job.id) throw new LaunchError(409, 'identity_conflict', 'This payer/requestId is already bound to a different payload.')
         return existing
       }
-      this.db.query('INSERT INTO jobs(identity,id,data,revision,state,payable) VALUES(?,?,?,?,?,?)').run(job.identity, job.id, JSON.stringify(job), job.revision, job.state, job.payment ? 1 : 0)
+      this.db.query('INSERT INTO jobs(identity,id,data,revision,state,payable,sweep) VALUES(?,?,?,?,?,?,?)').run(job.identity, job.id, JSON.stringify(job), job.revision, job.state, job.payment ? 1 : 0, job.sweep === 'blocked' ? 0 : 1)
       return job
     }).immediate()
   }
@@ -84,8 +123,8 @@ export class JobStore implements JobStorage {
   }
   save(job: Job, owner: string, now: number): void {
     const next = { ...job, revision: job.revision + 1 }
-    const result = this.db.query('UPDATE jobs SET data=?, revision=?, until_ms=?, state=?, payable=? WHERE id=? AND revision=? AND lease=? AND until_ms>?')
-      .run(JSON.stringify(next), next.revision, now + this.leaseMs, next.state, next.payment ? 1 : 0, job.id, job.revision, owner, now)
+    const result = this.db.query('UPDATE jobs SET data=?, revision=?, until_ms=?, state=?, payable=?, sweep=? WHERE id=? AND revision=? AND lease=? AND until_ms>?')
+      .run(JSON.stringify(next), next.revision, now + this.leaseMs, next.state, next.payment ? 1 : 0, next.sweep === 'blocked' ? 0 : 1, job.id, job.revision, owner, now)
     if (!result.changes) throw new LaunchError(409, 'stale_worker', 'Worker lost its lease or revision. Reconcile with a new worker.')
     job.revision = next.revision
   }
@@ -93,10 +132,12 @@ export class JobStore implements JobStorage {
   list(limit = 20): Job[] { return this.db.query<{ data: string }, [number]>('SELECT data FROM jobs ORDER BY rowid DESC LIMIT ?').all(limit).map((r) => JSON.parse(r.data) as Job) }
   /**
    * Jobs a restart must finish: an authorization is already held, the launch is not complete and
-   * no live worker owns them. An unpaid quote is excluded — it has no effect to reconcile.
+   * no live worker owns them. An unpaid quote is excluded — it has no effect to reconcile — and
+   * so is a job whose last attempt submitted nothing, which the sweep would otherwise reclaim
+   * every tick for as long as the process runs.
    */
   resumable(now: number, limit = 20): Job[] {
-    return this.db.query<{ data: string }, [number, number]>(`SELECT data FROM jobs WHERE state!='complete' AND payable=1 AND until_ms<=? ORDER BY rowid LIMIT ?`)
+    return this.db.query<{ data: string }, [number, number]>(`SELECT data FROM jobs WHERE state!='complete' AND payable=1 AND sweep=1 AND until_ms<=? ORDER BY rowid LIMIT ?`)
       .all(now, limit).map((r) => JSON.parse(r.data) as Job)
   }
   /**
