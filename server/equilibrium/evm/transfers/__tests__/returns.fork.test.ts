@@ -76,7 +76,7 @@ async function settle(route: TransferRoute<ReturnRequest>, id: Hex) {
     await mineBase()
     t = await runTransfer(transfers, route, id)
   }
-  return t as Transfer<ReturnRequest>
+  return t
 }
 
 suite('EQUILIBRIUM Base→Arc return on pinned testnet forks', () => {

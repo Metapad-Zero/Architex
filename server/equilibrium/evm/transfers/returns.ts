@@ -217,7 +217,7 @@ export async function conservation(sender: ExecutorSender, config: Pick<EvmAdapt
   const L = layout(job, config)
   const [arcBlock, baseBlock] = await Promise.all([sender.finalizedBlock('arc'), sender.finalizedBlock('base')])
   const read = (chain: 'arc' | 'base', address: Address, functionName: 'totalSupply' | 'balanceOf', args: readonly [Address] | [] = [], blockNumber = chain === 'arc' ? arcBlock : baseBlock) =>
-    sender.clients[chain].readContract({ address, abi: erc20Abi, functionName, args: args as never, blockNumber }) as Promise<bigint>
+    sender.clients[chain].readContract({ address, abi: erc20Abi, functionName, args: args as never, blockNumber })
   const [issuance, custody, remote] = await Promise.all([read('arc', L.canonical, 'totalSupply'), read('arc', L.canonical, 'balanceOf', [L.hub.proxy]), read('base', L.spoke, 'totalSupply')])
   const expected = BigInt(job.request.canonical.issuance)
   return { arcBlock: arcBlock.toString(), baseBlock: baseBlock.toString(), issuance: issuance.toString(), custody: custody.toString(), remote: remote.toString(),

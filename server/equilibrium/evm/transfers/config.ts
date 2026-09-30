@@ -4,26 +4,50 @@ import { readFileSync } from 'node:fs'
 import type { Hex } from 'viem'
 import type { Job } from '../../types'
 import type { EvmAdapterConfig } from '../types'
+import { CCTP_TESTNET, iris, localAttester, type CctpChain } from './cctp'
 import { executorSender } from './executor'
+import { refillRoute } from './refill'
 import { returnRoute, type ReturnConfig } from './returns'
+import type { EvmChain } from './types'
 
 /** Transfer settings, kept apart from the launch configuration so the launch approval stays untouched. */
 export interface TransferSettings {
   returns: ReturnConfig
+  /** USDC quote refill. Absent means the refill rail is closed. */
+  refill?: {
+    /** Defaults to Circle's documented testnet deployment. */
+    cctp?: Record<EvmChain, CctpChain>
+    attestation: { kind: 'iris'; api: string } | { kind: 'local-attester' }
+    maxPerTransfer: string
+    maxTotal: string
+  }
   /** Cumulative operator gas for transfers, native wei per chain. Required outside forks. */
   operatorGas?: { arc: string; base: string }
 }
 
-export function transferRoutes(adapter: EvmAdapterConfig, settings: TransferSettings, db: Database, launchOf: (id: Hex) => Job | undefined) {
+export function transferRoutes(adapter: EvmAdapterConfig, settings: TransferSettings, db: Database, launchOf: (id: Hex) => Job | undefined, env: Record<string, string | undefined> = process.env) {
   if (adapter.mode !== 'fork' && !settings.operatorGas) throw new Error('A testnet transfer configuration must carry approved operator gas caps.')
   const sender = executorSender({ operatorKey: adapter.operatorKey, arc: adapter.arc, base: adapter.base, receiptTimeoutMs: adapter.receiptTimeoutMs, operatorGas: settings.operatorGas }, db)
-  return { sender, returns: returnRoute(adapter, settings.returns, sender, db, launchOf) }
+  let refill
+  if (settings.refill) {
+    const r = settings.refill
+    let attestation
+    if (r.attestation.kind === 'local-attester') {
+      // A local attester can only sign on a fork: Circle's attester set would reject it anyway.
+      if (adapter.mode !== 'fork') throw new Error('A local CCTP attester is fork-only.')
+      const key = env.EQUILIBRIUM_FORK_ATTESTER_KEY
+      if (!key) throw new Error('EQUILIBRIUM_FORK_ATTESTER_KEY is required for a fork attester.')
+      attestation = localAttester(key as Hex)
+    } else attestation = iris(r.attestation.api)
+    refill = refillRoute(adapter, { cctp: r.cctp ?? CCTP_TESTNET, attestation, maxPerTransfer: r.maxPerTransfer, maxTotal: r.maxTotal }, sender, db)
+  }
+  return { sender, returns: returnRoute(adapter, settings.returns, sender, db, launchOf), refill }
 }
 
 /** Every file on the transfer path. Changing any of them invalidates a transfer approval. */
 export const TRANSFER_FILES = [
-  'server/equilibrium/evm/transfers/config.ts', 'server/equilibrium/evm/transfers/executor.ts', 'server/equilibrium/evm/transfers/ntt.ts',
-  'server/equilibrium/evm/transfers/returns.ts', 'server/equilibrium/evm/transfers/runner.ts', 'server/equilibrium/evm/transfers/store.ts',
+  'server/equilibrium/evm/transfers/cctp.ts', 'server/equilibrium/evm/transfers/cli.ts', 'server/equilibrium/evm/transfers/config.ts', 'server/equilibrium/evm/transfers/executor.ts',
+  'server/equilibrium/evm/transfers/ntt.ts', 'server/equilibrium/evm/transfers/refill.ts', 'server/equilibrium/evm/transfers/returns.ts', 'server/equilibrium/evm/transfers/runner.ts', 'server/equilibrium/evm/transfers/store.ts',
   'server/equilibrium/evm/transfers/types.ts', 'server/equilibrium/evm/adapter.ts', 'server/equilibrium/evm/contracts.ts', 'server/equilibrium/evm/vaa.ts',
   'server/equilibrium/evm/bytecode.json', 'contracts/equilibrium/EquilibriumExecutor.sol',
 ] as const

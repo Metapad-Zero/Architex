@@ -44,6 +44,11 @@ export class TransferStore {
     if (!changed) throw new LaunchError(409, 'stale_worker', 'The transfer lease or revision changed; this worker stops without writing.')
     transfer.revision += 1
   }
+  /** Extend an owned lease without writing data. Throws once the lease is gone. */
+  renew(id: Hex, owner: string, now: number, duration = this.leaseMs) {
+    const changed = this.db.query('UPDATE evm_transfers SET until_ms=? WHERE id=? AND lease=? AND until_ms >= ?').run(now + duration, id, owner, now).changes
+    if (!changed) throw new LaunchError(409, 'stale_worker', 'The transfer lease was lost; this worker stops without sending.')
+  }
   release(id: string, owner: string) { this.db.query('UPDATE evm_transfers SET lease=NULL, until_ms=0 WHERE id=? AND lease=?').run(id, owner) }
   list(limit = 100): Transfer[] {
     return this.db.query<{ data: string }, [number]>('SELECT data FROM evm_transfers ORDER BY rowid DESC LIMIT ?').all(limit).map((r) => JSON.parse(r.data) as Transfer)

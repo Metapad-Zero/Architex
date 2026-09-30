@@ -29,7 +29,14 @@ export async function createTransfer<R>(store: TransferStore, route: TransferRou
 export async function runTransfer<R>(store: TransferStore, route: TransferRoute<R>, id: Hex, now: () => number = Date.now, afterBroadcast?: (step: string) => void): Promise<Transfer<R>> {
   const owner = randomUUID()
   const t = store.claim(id, owner, now()) as Transfer<R>
-  const save = () => store.save(t, owner, now())
+  // Keep the lease alive while a chain call is outstanding; a lost lease stops the worker before it sends.
+  let lost: Error | undefined
+  const beat = setInterval(() => {
+    try { store.renew(id, owner, now()) } catch (cause) { lost = cause instanceof Error ? cause : new LaunchError(409, 'stale_worker', 'Lease renewal failed.'); clearInterval(beat) }
+  }, Math.max(1, Math.floor(store.leaseMs / 3)))
+  beat.unref?.()
+  const check = () => { if (lost) throw lost }
+  const save = () => { check(); store.save(t, owner, now()) }
   try {
     if (t.kind !== route.kind || t.version !== route.version) throw new LaunchError(409, 'adapter_conflict', 'Route configuration changed; resume with the configuration the transfer was bound under.')
     if (t.state === 'complete') return t
@@ -45,6 +52,7 @@ export async function runTransfer<R>(store: TransferStore, route: TransferRoute<
       let observed = await route.observe(t, step, step.prepared)
       if (observed === 'absent') {
         save() // fence: a worker that lost the lease stops here, before sending
+        store.renew(id, owner, now())
         await route.broadcast(t, step, step.prepared)
         afterBroadcast?.(step.id)
         observed = await route.observe(t, step, step.prepared)
@@ -61,7 +69,7 @@ export async function runTransfer<R>(store: TransferStore, route: TransferRoute<
   } catch (cause) {
     try { t.state = 'partial'; t.error = cause instanceof Error ? cause.message : 'Transfer needs reconciliation'; save() } catch { /* lease or revision gone */ }
     throw cause
-  } finally { store.release(id, owner) }
+  } finally { clearInterval(beat); store.release(id, owner) }
 }
 
 /** Resume unfinished transfers of one route after a restart, without any client request. */
