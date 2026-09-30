@@ -90,9 +90,10 @@ export interface EvmAdapterOptions { afterSend?: (step: Step, tx: Hex) => void }
 export function l1FeeOf(receipt: TransactionReceipt): bigint {
   const value = (receipt as TransactionReceipt & { l1Fee?: unknown }).l1Fee
   if (value === undefined || value === null) return 0n
-  if (typeof value === 'bigint') return value
-  if (typeof value === 'number' || (typeof value === 'string' && /^(0x[0-9a-fA-F]+|[0-9]+)$/.test(value))) return BigInt(value)
-  throw new Error(`Unreadable l1Fee ${JSON.stringify(value)} on ${receipt.transactionHash}`)
+  if (typeof value === 'bigint' && value >= 0n) return value
+  if ((typeof value === 'number' && Number.isSafeInteger(value) && value >= 0)
+    || (typeof value === 'string' && /^(0x[0-9a-fA-F]+|[0-9]+)$/.test(value))) return BigInt(value)
+  throw new Error(`Unreadable l1Fee ${String(value)} on ${receipt.transactionHash}`)
 }
 export const weiOf = (receipt: TransactionReceipt) => receipt.gasUsed * receipt.effectiveGasPrice + l1FeeOf(receipt)
 
