@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { Database } from 'bun:sqlite'
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join, relative } from 'node:path'
 import { JobStore, assertDurableStore, canonicalPath, durationMs } from '../store'
 import { localAdapter } from '../localAdapter'
 import { publicJob, quote, reconcile, runJob } from '../runner'
@@ -20,6 +20,8 @@ const now = 1_800_000_000
 const dirs: string[] = []
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }) })
 function database() { const dir = mkdtempSync(join(tmpdir(), 'equilibrium-')); dirs.push(dir); return join(dir, 'jobs.sqlite') }
+/** Scratch space the durable-path guard accepts, for fixtures that must not sit in /tmp. */
+function durableRoot() { const root = join(process.cwd(), 'output', 'tests'); mkdirSync(root, { recursive: true }); return root }
 /** The synthetic two-chain fixture: 7.2 in step budgets plus 20 of quote inventory. */
 const TOTAL = '27200000'
 function setup(path = ':memory:', options: { leaseMs?: number } = {}) {
@@ -337,6 +339,72 @@ describe('the durable-path guard sees through symlinks', () => {
   test('canonicalPath resolves existing ancestors and keeps the missing tail', () => {
     const dir = mkdtempSync(join(tmpdir(), 'equilibrium-canon-')); dirs.push(dir)
     expect(canonicalPath(join(dir, 'missing', 'jobs.sqlite'))).toBe(join(realpathSync(dir), 'missing', 'jobs.sqlite'))
+  })
+  test('a symlink is followed even when its target does not exist yet', () => {
+    // realpathSync throws on a dangling symlink. Treating that as "nothing to resolve" accepted
+    // the link's own durable-looking name while the database landed on the temporary target.
+    const durable = mkdtempSync(join(durableRoot(), 'equilibrium-link-')); dirs.push(durable)
+    const temporary = join(realpathSync(tmpdir()), 'equilibrium-missing-target')
+    for (const [name, target, tail] of [
+      ['file.sqlite', join(temporary, 'jobs.sqlite'), ''],
+      ['store', temporary, 'jobs.sqlite'],
+    ] as const) {
+      const link = join(durable, name)
+      symlinkSync(target, link)
+      expect(existsSync(target)).toBe(false)
+      expect(canonicalPath(tail ? join(link, tail) : link)).toBe(tail ? join(target, tail) : target)
+      expect(() => assertDurableStore(tail ? join(link, tail) : link, {})).toThrow('temporary path')
+    }
+  })
+  test('a relative symlink and a chain of them are both followed to the temporary target', () => {
+    const durable = mkdtempSync(join(durableRoot(), 'equilibrium-chain-')); dirs.push(durable)
+    mkdirSync(join(durable, 'nested'))
+    // A relative target resolves against the link's own directory, not the process cwd.
+    const relativeTarget = join(realpathSync(tmpdir()), 'equilibrium-relative-target.sqlite')
+    const linked = join(durable, 'nested', 'relative.sqlite')
+    symlinkSync(relative(dirname(linked), relativeTarget), linked)
+    expect(canonicalPath(linked)).toBe(relativeTarget)
+    expect(() => assertDurableStore(linked, {})).toThrow('temporary path')
+    // first -> second -> a missing path inside the host temporary directory.
+    const temporary = join(realpathSync(tmpdir()), 'equilibrium-chain-target.sqlite')
+    symlinkSync(temporary, join(durable, 'second'))
+    symlinkSync(join(durable, 'second'), join(durable, 'first'))
+    expect(canonicalPath(join(durable, 'first'))).toBe(temporary)
+    expect(() => assertDurableStore(join(durable, 'first'), {})).toThrow('temporary path')
+  })
+  test('a symlink loop is refused instead of spinning', () => {
+    const durable = mkdtempSync(join(durableRoot(), 'equilibrium-loop-')); dirs.push(durable)
+    symlinkSync(join(durable, 'b'), join(durable, 'a'))
+    symlinkSync(join(durable, 'a'), join(durable, 'b'))
+    expect(() => canonicalPath(join(durable, 'a'))).toThrow('symlink loop')
+    expect(() => assertDurableStore(join(durable, 'a'), {})).toThrow('symlink loop')
+  })
+  test('a symlink onto durable storage is accepted and resolved to its real path', () => {
+    const durable = mkdtempSync(join(durableRoot(), 'equilibrium-ok-')); dirs.push(durable)
+    mkdirSync(join(durable, 'real'))
+    symlinkSync(join(durable, 'real'), join(durable, 'via-link'))
+    // The guard returns what it checked, so callers open the resolved path, not the link name.
+    expect(assertDurableStore(join(durable, 'via-link', 'jobs.sqlite'), {})).toBe(join(realpathSync(durable), 'real', 'jobs.sqlite'))
+  })
+})
+
+describe('startup refuses an ephemeral store before creating it', () => {
+  test('serve.ts exits on a dangling symlink and leaves no database behind', async () => {
+    const durable = mkdtempSync(join(durableRoot(), 'equilibrium-serve-')); dirs.push(durable)
+    // A fresh target each run: a stale -wal/-shm sibling would make the assertion below lie.
+    const target = join(realpathSync(tmpdir()), `equilibrium-serve-${process.pid}-${Date.now()}.sqlite`)
+    for (const suffix of ['', '-wal', '-shm']) rmSync(target + suffix, { force: true })
+    const link = join(durable, 'jobs.sqlite')
+    symlinkSync(target, link)
+    const child = Bun.spawn([process.execPath, 'run', 'server/equilibrium/serve.ts'],
+      { env: { ...process.env, EQUILIBRIUM_DB: link, EQUILIBRIUM_PORT: '4443' }, stdout: 'pipe', stderr: 'pipe' })
+    const [exit, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()])
+    expect(exit).toBe(1)
+    expect(stderr).toContain('temporary path the host may discard')
+    expect(stdout).not.toContain('Local integration rehearsal')
+    // The guard must run before anything opens the database, not after.
+    expect(existsSync(target)).toBe(false)
+    for (const suffix of ['', '-wal', '-shm']) expect(existsSync(target + suffix)).toBe(false)
   })
 })
 

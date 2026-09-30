@@ -1,0 +1,24 @@
+## Deployed Arc/Base supply audit
+
+`bun run equilibrium:audit <approved-manifest.json>` performs read-only RPC calls and emits JSON. Exit 0 means the specified two-chain quiescent snapshot and configuration pass; exit 1 means evidence is missing or inconsistent. It does not sign, broadcast, settle payments, open adapters or approve a release.
+
+Copy `docs/equilibrium-audit-template.json` and fill it from the approved deployment record. Empty addresses and hashes intentionally fail before any RPC call. No EQUILIBRIUM deployment exists in this repository yet. Use exact six-decimal issuance atoms, named owner/pauser addresses, token runtime hash, proxy runtime hashes and implementation runtime hashes. A token entry without `implementationHash` must not be an EIP-1967 proxy: a nonzero implementation slot fails the audit. A proxied token must add `implementationHash` for its approved implementation, so an upgrade behind an unchanged proxy shell fails. A nonzero EIP-1967 beacon slot on the token, manager or transceiver fails because this audit cannot pin a beacon's implementation. A token proxy with a non-EIP-1967 layout is not detectable here; pin only a non-proxy token artifact or an EIP-1967 proxy. Build hashes from the approved compiler artifacts with immutable values and deployment receipts; do not blindly copy an unknown RPC's code into the trusted manifest. Pin the manifest alongside the approved commit.
+
+The mode chooses the pinned Arc/Base mainnet or testnet IDs, Wormhole IDs and core addresses in `src/lib/equilibriumNetwork.ts`. An endpoint cannot turn a testnet report into a mainnet report by changing its URL. The current pilot checks one Wormhole transceiver, threshold one, consistency level zero and the same named owner/pauser on manager and transceiver. Other approved configurations need an explicit verifier change.
+
+For each network, the verifier requires a fresh finalized block and pins code, EIP-1967 implementation slots, contract calls and supply reads to that height. It checks the block hash again after reads. There is no fallback to latest. Missing historical state or finalized support fails. It compares token decimals, fixed issuance/spoke cap, mint authority, manager token/mode/chain, owners/pausers, pause state, enabled transceiver, threshold, peers, core and consistency setting.
+
+NTT stores peers in a `uint16` mapping that cannot be enumerated, and the owner can register more than one peer chain. The audit therefore reads `getPeer` on the manager and `getWormholePeer` on the transceiver for every ID in `WORMHOLE_PEER_INVENTORY` (`server/equilibrium/audit.ts`). The paired Arc/Base ID must hold the approved peer and six decimals. Every other ID must return a zero address and zero decimals. The inventory is every nonzero chain ID in Wormhole `sdk/vaa/structs.go` at `1e61c28f907f9e2d12275d4b6af96b13863c52b8`, plus retired IDs from the NTT-pinned `wormhole-solidity-sdk` `src/Chains.sol` at `b9e129e65d34827d92fceeed8c87d3ecdfc801d0`: 88 IDs in total. The JSON reports this under `peerCoverage`. A peer registered on a `uint16` ID outside that list is not read or detected. Wormhole Guardians only sign for chains they support, but that is not proven here. Update the inventory and its source commit when Wormhole adds a chain. The scan runs 16 chain IDs (32 calls) at a time per network. Every started read is collected before the audit returns.
+
+Canonical supply outside custody plus Base representations must equal issuance in a quiescent snapshot. If remote supply exceeds custody, the snapshot fails as unbacked. If custody exceeds remote supply, the audit fails rather than label the difference an authenticated pending claim: a delayed debit, return, surplus deposit or a differently timed snapshot requires separate evidence. It never mints or repairs balances.
+
+The JSON identifies block numbers/hashes, observation times, configuration checks and accounting gaps. `routeTested` and `paidLaunchOpen` always remain false. Matching RPC responses are evidence from the chosen providers, not independent Guardian verification. This audit does not prove a public round trip, pool liquidity/executable quotes, refill, x402 settlement, keeper limits, or Solana/Robinhood supply. Quiesce client traffic and the keeper during an acceptance audit, with the contracts in their approved unpaused configuration, and retain separate finalized transfer/payment/pool evidence. No global four-chain completion follows from its `verified` field.
+
+Reproduce failure and test checks:
+
+```bash
+bun test server/equilibrium/__tests__/audit.test.ts
+bun run equilibrium:audit docs/equilibrium-audit-template.json
+```
+
+The second command deliberately exits 1 while the deployment fields are empty. Supply configured deployment addresses only after the approved deployment exists; fabricated values are not a testnet proof.
