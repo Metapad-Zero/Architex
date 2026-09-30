@@ -1,0 +1,9 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "types": ["bun", "node"],
+    "tsBuildInfoFile": "../../node_modules/.tmp/tsconfig.equilibrium.tsbuildinfo"
+  },
+  "include": ["**/*.ts"],
+  "exclude": []
+}

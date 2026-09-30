@@ -7,12 +7,15 @@ const output = resolve('output/equilibrium')
 mkdirSync(output, { recursive: true })
 const entry = resolve(output, 'demo.tsx')
 const view = resolve('src/components/EquilibriumView.tsx')
-writeFileSync(entry, `import { createRoot } from 'react-dom/client'\nimport { EquilibriumView } from ${JSON.stringify(view)}\ncreateRoot(document.getElementById('root')!).render(<EquilibriumView />)\n`)
+writeFileSync(entry, `import { createRoot } from 'react-dom/client'\nimport { EquilibriumView } from ${JSON.stringify(view)}\ncreateRoot(document.getElementById('root')!).render(<EquilibriumView offline />)\n`)
 const result = spawnSync(process.execPath, ['build', entry, '--target', 'browser', '--minify', '--outdir', output], { stdio: 'inherit' })
 if (result.error) throw result.error
 if (result.status !== 0) throw new Error(`Standalone demo build failed (${result.status ?? 'unknown'}).`)
-const checklist = `data:text/markdown;base64,${readFileSync('public/equilibrium-readiness.md').toString('base64')}`
-const js = readFileSync(resolve(output, 'demo.js'), 'utf8').split('/equilibrium-readiness.md').join(checklist).replace(/<\/script/gi, '<\\/script')
+let js = readFileSync(resolve(output, 'demo.js'), 'utf8')
+for (const [file, type] of [['equilibrium-readiness.md', 'text/markdown'], ['equilibrium-release-preview.md', 'text/markdown'], ['equilibrium-infrastructure.json', 'application/json']]) {
+  js = js.split(`/${file}`).join(`data:${type};base64,${readFileSync(`public/${file}`).toString('base64')}`)
+}
+js = js.replace(/<\/script/gi, '<\\/script')
 const css = readFileSync(resolve(output, 'demo.css'), 'utf8')
 const tokens = readFileSync('src/index.css', 'utf8').split('@layer components')[0].replace(/@(?:import|tailwind)[^;]+;/g, '')
 const font = readFileSync('node_modules/@fontsource-variable/public-sans/files/public-sans-latin-wght-normal.woff2').toString('base64')

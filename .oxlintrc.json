@@ -1,6 +1,6 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "ignorePatterns": ["dist", "contracts/**", "node_modules", ".agents/**", "scripts/compass-deploy.ts", "scripts/compass-deploy-helpers.ts", "scripts/seed-pools.ts"],
+  "ignorePatterns": ["dist", "contracts/**", "lib/**", "node_modules", ".agents/**", "scripts/compass-deploy.ts", "scripts/compass-deploy-helpers.ts", "scripts/seed-pools.ts"],
   "plugins": ["typescript", "react"],
   "categories": {
     "correctness": "off",

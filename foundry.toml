@@ -28,6 +28,18 @@ fs_permissions = [{ access = "read", path = "./contracts-v14/test/fixtures" }]
 # `new X{salt: s}` to go through that deployer too, as it does in a broadcast.
 always_use_create_2_factory = true
 
+# Pinned NTT integration, isolated from the deployed DEX/v1.4 compilation profiles.
+[profile.equilibrium]
+src = "contracts/equilibrium"
+test = "contracts-equilibrium/test"
+out = "contracts-equilibrium/out"
+cache_path = "contracts-equilibrium/cache"
+remappings = [
+  "openzeppelin-contracts/=lib/ntt/evm/lib/openzeppelin-contracts/",
+  "wormhole-solidity-sdk/=lib/ntt/evm/lib/wormhole-solidity-sdk/src/",
+  "ntt/=lib/ntt/evm/src/"
+]
+
 [rpc_endpoints]
 ethereum = "https://ethereum-rpc.publicnode.com"
 sepolia = "https://ethereum-sepolia-rpc.publicnode.com"

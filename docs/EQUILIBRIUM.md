@@ -48,8 +48,8 @@ The live readiness checklist ships as `public/equilibrium-readiness.md`, linked 
 bun test src/lib/__tests__/equilibrium.test.ts
 bun run typecheck
 bun run lint
-bun test
+bun run test
 bun run build
 ```
 
-All transfer and action IDs on this page are simulation IDs. Production bridging, payment settlement, venue launches and funded deployment remain separate work requiring implementation and a concrete release approval.
+The simulation's transfer and action IDs remain simulation IDs. The additional integration record reads free job evidence and dated infrastructure observations with explicit local/fork/testnet/live labels. See [recoverable integration](EQUILIBRIUM-INTEGRATION.md), [route matrix](EQUILIBRIUM-ROUTES.md) and [release preview](../public/equilibrium-release-preview.md). Real settlement, public bridge transfers and funded deployment remain closed pending those prerequisites and approval.
