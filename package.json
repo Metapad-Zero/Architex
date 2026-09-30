@@ -15,6 +15,7 @@
     "equilibrium:solana:build": "bash scripts/solana/build-programs.sh",
     "equilibrium:solana": "bun run scripts/solana/rehearse.ts",
     "equilibrium:solana:preview": "bun run scripts/solana/deploy-preview.ts",
+    "equilibrium:arc-solana": "bun run scripts/solana/integrate.ts",
     "equilibrium:contracts": "FOUNDRY_PROFILE=equilibrium forge test -vv",
     "deploy:self": "bun run ./scripts/self-deploy.ts",
     "compass:deploy": "bun run ./scripts/compass-deploy.ts",
