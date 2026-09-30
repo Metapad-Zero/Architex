@@ -44,6 +44,8 @@ const routeOf = (kind: string): TransferRoute<unknown> => {
   return route
 }
 const now = () => Math.floor(Date.now() / 1000)
+// Before anything can send: each RPC is the approved chain and each executor is this operator's.
+if (['return', 'refill', 'run', 'sweep'].includes(command)) await routes.sender.verify()
 const print = (value: unknown) => console.log(JSON.stringify(value, null, 2))
 
 if (command === 'return' || command === 'refill') {

@@ -3,9 +3,10 @@ import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import type { Hex } from 'viem'
 import type { Job } from '../../types'
+import { CODE_FILES } from '../approval'
 import type { EvmAdapterConfig } from '../types'
 import { CCTP_TESTNET, iris, localAttester, type CctpChain } from './cctp'
-import { executorSender } from './executor'
+import { executorSender, type SenderOptions } from './executor'
 import { refillRoute } from './refill'
 import { returnRoute, type ReturnConfig } from './returns'
 import type { EvmChain } from './types'
@@ -25,9 +26,9 @@ export interface TransferSettings {
   operatorGas?: { arc: string; base: string }
 }
 
-export function transferRoutes(adapter: EvmAdapterConfig, settings: TransferSettings, db: Database, launchOf: (id: Hex) => Job | undefined, env: Record<string, string | undefined> = process.env) {
+export function transferRoutes(adapter: EvmAdapterConfig, settings: TransferSettings, db: Database, launchOf: (id: Hex) => Job | undefined, env: Record<string, string | undefined> = process.env, options: SenderOptions = {}) {
   if (adapter.mode !== 'fork' && !settings.operatorGas) throw new Error('A testnet transfer configuration must carry approved operator gas caps.')
-  const sender = executorSender({ operatorKey: adapter.operatorKey, arc: adapter.arc, base: adapter.base, receiptTimeoutMs: adapter.receiptTimeoutMs, operatorGas: settings.operatorGas }, db)
+  const sender = executorSender({ operatorKey: adapter.operatorKey, arc: adapter.arc, base: adapter.base, receiptTimeoutMs: adapter.receiptTimeoutMs, operatorGas: settings.operatorGas }, db, options)
   let refill
   if (settings.refill) {
     const r = settings.refill
@@ -44,12 +45,16 @@ export function transferRoutes(adapter: EvmAdapterConfig, settings: TransferSett
   return { sender, returns: returnRoute(adapter, settings.returns, sender, db, launchOf), refill }
 }
 
-/** Every file on the transfer path. Changing any of them invalidates a transfer approval. */
+/**
+ * Every file on the transfer path. Changing any of them invalidates a transfer approval. The whole
+ * launch manifest is included: transfers share its request hashing, store, config parser, types,
+ * adapter (fee parser, layout), contracts and bytecode, and over-binding only costs a re-approval.
+ */
 export const TRANSFER_FILES = [
   'server/equilibrium/evm/transfers/cctp.ts', 'server/equilibrium/evm/transfers/cli.ts', 'server/equilibrium/evm/transfers/config.ts', 'server/equilibrium/evm/transfers/executor.ts',
   'server/equilibrium/evm/transfers/ntt.ts', 'server/equilibrium/evm/transfers/refill.ts', 'server/equilibrium/evm/transfers/returns.ts', 'server/equilibrium/evm/transfers/runner.ts', 'server/equilibrium/evm/transfers/store.ts',
-  'server/equilibrium/evm/transfers/types.ts', 'server/equilibrium/evm/adapter.ts', 'server/equilibrium/evm/contracts.ts', 'server/equilibrium/evm/vaa.ts',
-  'server/equilibrium/evm/bytecode.json', 'contracts/equilibrium/EquilibriumExecutor.sol',
+  'server/equilibrium/evm/transfers/types.ts',
+  ...CODE_FILES,
 ] as const
 
 /**

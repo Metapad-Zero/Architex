@@ -1,10 +1,14 @@
 import { Database } from 'bun:sqlite'
+import { createHash } from 'node:crypto'
+import { appendFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { describe, expect, test } from 'bun:test'
 import { concat, encodePacked, keccak256, numberToHex, pad, recoverAddress, slice, type Hex } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { hash } from '../../../request'
 import { CCTP_TESTNET, STANDARD, assertAttestedFrom, bytes32, iris, localAttester, parseMessage } from '../cctp'
-import { transferApprovalDigest, transferRoutes } from '../config'
+import { TRANSFER_FILES, transferApprovalDigest, transferRoutes } from '../config'
+import { CODE_FILES } from '../../approval'
 import { managerDigest, parseTransfer } from '../ntt'
 import { createTransfer, runTransfer } from '../runner'
 import { TransferStore } from '../store'
@@ -133,5 +137,37 @@ describe('transfer records and routes', () => {
     expect(transferApprovalDigest('{"mode":"testnet"}', '{"returns":{}}')).toBe(a)
     expect(transferApprovalDigest('{"mode":"testnet"}', '{"returns":{"x":1}}')).not.toBe(a)
     expect(transferApprovalDigest('{"mode":"testnet "}', '{"returns":{}}')).not.toBe(a)
+  })
+
+  test('editing any shared send-path file invalidates a transfer approval', () => {
+    // Everything the launch approval binds is on the transfer path too: ids, request hashing, the store, config parsing, types, the adapter.
+    for (const file of CODE_FILES) expect(TRANSFER_FILES as readonly string[]).toContain(file)
+    for (const file of ['server/equilibrium/request.ts', 'server/equilibrium/evm/config.ts', 'server/equilibrium/store.ts', 'server/equilibrium/types.ts', 'server/equilibrium/evm/types.ts', 'server/equilibrium/evm/adapter.ts']) {
+      expect(TRANSFER_FILES as readonly string[]).toContain(file)
+    }
+    mkdirSync(join(process.cwd(), 'output'), { recursive: true })
+    const root = mkdtempSync(join(process.cwd(), 'output', 'approval-'))
+    try {
+      for (const file of TRANSFER_FILES) { mkdirSync(dirname(join(root, file)), { recursive: true }); cpSync(file, join(root, file)) }
+      const approved = transferApprovalDigest('{"mode":"testnet"}', '{"returns":{}}', root)
+      expect(approved).toBe(transferApprovalDigest('{"mode":"testnet"}', '{"returns":{}}'))
+      for (const file of ['server/equilibrium/request.ts', 'server/equilibrium/evm/config.ts', 'server/equilibrium/store.ts', 'server/equilibrium/evm/types.ts', 'server/equilibrium/evm/transfers/executor.ts']) {
+        const original = readFileSync(join(root, file))
+        appendFileSync(join(root, file), '\n// edited\n')
+        expect([file, transferApprovalDigest('{"mode":"testnet"}', '{"returns":{}}', root) === approved]).toEqual([file, false])
+        cpSync(file, join(root, file))
+        expect(readFileSync(join(root, file))).toEqual(original)
+      }
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+
+  test('the fork stand-in bundle is built without checkout-dependent remappings and carries its own hash', () => {
+    const bundle = JSON.parse(readFileSync('server/equilibrium/evm/transfers/fork-bytecode.json', 'utf8')) as { build: { autoDetectRemappings: boolean; remappings: string[] }; ForkUsdcCctp: { bytecode: string; sha256: string } }
+    expect(bundle.build.autoDetectRemappings).toBe(false)
+    // Metadata hashes these; an absolute path would make the bytecode depend on where the repository is checked out.
+    for (const r of bundle.build.remappings) expect(r).not.toMatch(/(^|[:=])\//)
+    expect(createHash('sha256').update(bundle.ForkUsdcCctp.bytecode).digest('hex')).toBe(bundle.ForkUsdcCctp.sha256)
+    // The CBOR metadata trailer is part of the bundle and of the check, not stripped.
+    expect(bundle.ForkUsdcCctp.bytecode).toMatch(/a264697066735822[0-9a-f]{68}64736f6c6343[0-9a-f]{6}0033$/)
   })
 })

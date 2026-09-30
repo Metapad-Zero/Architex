@@ -38,6 +38,16 @@ The routes add their own guards on top:
 - **Third-party relays.** Anyone may relay a VAA to the Arc hub. The return route detects a redemption made by someone else, records it as `third-party` with zero operator cost, and sends nothing.
 - **Front-running.** Refills name the destination executor as the only permitted caller, so nobody can front-run the mint.
 
+### Gas ledger and chain binding
+
+These follow PR #12's repaired sender (49TH-25, `add47bb`), in the transfer sender's own table (`evm_transfer_gas`) against its own cap (`operatorGas`).
+
+- **Chain binding.** Before anything is reserved or signed, the sender reads `eth_chainId` and refuses a chain id that differs from the approved configuration or from the chain id bound into the prepared plan (`wrong_chain`, "Nothing was sent"). The CLI also runs `verify()` before any command that can send: chain ids, and each executor owned by the operator.
+- **Numeric fees.** Receipt costs use PR #12's `weiOf`/`l1FeeOf`, which read an OP Stack `l1Fee` given as hex, decimal, number or bigint, and refuse anything else. Base RPCs return it as hex, and viem does not format it for a plain chain definition. Before this repair the hex was concatenated into the ledger.
+- **Reserve before signing.** The worst case (gas limit × max fee, plus Base's L1 fee upper bound) is checked against the cap and recorded in one IMMEDIATE SQLite transaction. Competing processes on one store serialize there, so the cap cannot be double-booked.
+- **Recorded before sending.** The transaction is signed locally. Its hash is written to the reservation and the broadcast journal before `eth_sendRawTransaction`. A process killed after the send is settled later from the receipt. A reservation whose transaction never mined stays at worst case: the ledger over-counts, never under-counts.
+- **Legacy rows.** A pre-repair spend row (`evm_transfer_spend`) is moved into the ledger at its finalized receipt's numeric cost; nothing is resubmitted. A malformed row whose receipt cannot be read stops sends on that chain (`gas_ledger`) until it can be.
+
 ### Conservation
 
 `conservation()` in `transfers/returns.ts` reads one launch at each chain's finalized block:
@@ -119,7 +129,7 @@ Measured gas at the pinned forks:
 **Fork-only substitutions.** These are in addition to fork.ts's:
 
 - Both MessageTransmitterV2 attester sets are replaced by one local key at threshold 1. `transfers/fork.ts` stands in for Iris. It fills exactly the fields Iris fills and signs `keccak256(message)` as the real attesters do.
-- Arc's USDC stand-in becomes `ForkUsdcCctp`: ForkUsdc plus `mint` returning true and `burn`, with the same storage layout. Circle's TokenMinterV2 needs both. The real Arc USDC mints and burns through Arc precompiles anvil lacks. The stand-in ships in its own bundle (`transfers/fork-bytecode.json`, `bun run equilibrium:transfer-bytecode --check`) so the launch bundle is untouched.
+- Arc's USDC stand-in becomes `ForkUsdcCctp`: ForkUsdc plus `mint` returning true and `burn`, with the same storage layout. Circle's TokenMinterV2 needs both. The real Arc USDC mints and burns through Arc precompiles anvil lacks. The stand-in ships in its own bundle (`transfers/fork-bytecode.json`) so the launch bundle is untouched. `bun run equilibrium:transfer-bytecode --check` builds it fresh and compares the whole creation code, CBOR metadata included. Foundry's auto-detected remappings for nested libraries carry the checkout's absolute path into the metadata, so this one build turns auto-detection off (every project remapping is relative) and writes to `output/forge-fork`. `foundry.toml` is not changed. The same bytes come out of any checkout with the locked `node_modules`.
 
 **What the forks do not prove:**
 
@@ -141,7 +151,9 @@ Outside forks it refuses to start unless `EQUILIBRIUM_TRANSFER_APPROVAL` equals 
 
 - the launch configuration
 - the settings file
-- the transfer code: `TRANSFER_FILES` in `transfers/config.ts`, which includes the adapter, contracts, VAA code, bytecode bundle and executor source
+- the transfer code: `TRANSFER_FILES` in `transfers/config.ts`, which is every transfer file plus the whole launch manifest (`CODE_FILES`): request hashing, the store, config parsing, types, the adapter, contracts and bytecode. Editing any of them changes the digest.
+
+The repair changed transfer code, so any digest computed before it is void. No transfer approval has been given.
 
 A testnet configuration without operator gas caps is refused, as is a fork-only attester. There is no live mode.
 
@@ -189,4 +201,5 @@ This approval is separate from 49TH-25's, which authorizes one launch and nothin
 - The operator key is hot, and through the executors it owns NTT admin and the transfer rails. Testnet only.
 - Refill reservations are never released. A refill that stops half way still counts against `maxTotal`, which errs toward spending less than approved.
 - One sender process per operator key: the transfer sender and the launch sender each serialize their own sends. Correctness rests on the executor, but two processes can waste gas on nonce races.
-- `bun run equilibrium:bytecode --check` fails in a fresh checkout here because only the trailing compiler metadata hash differs. All eight bundled contracts match a fresh build once the IPFS metadata hash is stripped. This is noted for the 49TH-25 review; the bundle was not regenerated.
+- `bun run equilibrium:bytecode --check` (the launch bundle) still fails in a fresh checkout for the absolute-remapping reason above. That remediation belongs to 49TH-25; the launch bundle was not regenerated.
+- `JobStore` (a launch-approval file) sets `journal_mode` before `busy_timeout`, so processes opening one store at the same instant can fail at startup with `SQLITE_BUSY`. This fails closed, with nothing sent. It is reported to 49TH-25, and the transfer race test opens its store with `busy_timeout` first.
