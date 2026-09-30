@@ -1,0 +1,100 @@
+## EQUILIBRIUM keeper approval preview
+
+Generated 2026-09-30T21:21:07Z for keeper version `equilibrium-keeper-v1:b33008f334b9342b`, mode **fork**.
+
+> **Fork rehearsal, not an approval request.** Every address below belongs to a local anvil fork
+> and every signer is a development key. A live preview is regenerated against deployed vaults with
+> `bun run equilibrium:keeper preview --config <testnet file> --write <path>`, and only that digest is
+> worth approving.
+
+This authorizes **bounded keeper trading only**. It does not authorize a launch, a deployment, an
+issuance, a bridge transfer, an inventory refill, a public announcement or any change to the
+approved launch configuration. The launch release approval is a separate digest over separate files.
+
+### Routes and contracts
+
+| Chain | Keeper vault | Pool | Token | Quote asset |
+| --- | --- | --- | --- | --- |
+| arc (chain id 5042002) | `0xf1a2ee3969061d6e36a210508c288b50c91c63c3` | `0x3fFF12004565035D4Cf9525eF7E8e3b37436E556` (architex-pair) | `0x1339e1782CE2F7a7f233e82De47c50faf6e5fFB4` | `0x3600000000000000000000000000000000000000` |
+| base (chain id 84532) | `0xf1a2ee3969061d6e36a210508c288b50c91c63c3` | `0x69222911Dd9207eeb2728310E2a363B1F3F0352F` (uniswap-v3-pool) | `0x7ac0E82C82503b9b648C52a25ed27A6eBd01E869` | `0x036CbD53842c5426634e7929541eC2318f3dCF7e` |
+
+Keeper creation code `6e7d42eeb77e38ceb31f91eeeb374b81a6e0f24302e3b2ee1ca3b99267f36c64` built with solc 0.8.28+commit.7893614a.
+
+### Signing and admin powers
+
+The operator key `0x500d75F1329cf98352c32Cf238c2192ca78faFFE` owns both vaults. Through them it may run legs,
+halt, resume, attest a remote sale and withdraw inventory. It has **no** power over the canonical
+issuance, the NTT managers, the pools' liquidity positions or any holder balance: the keeper trades
+only its own vault inventory and can neither mint, rebase nor redistribute. A vault's bounds are
+immutable — changing one means deploying a new vault and a new approval.
+
+### Bounds the contracts enforce
+
+| Chain | Max tokens / leg | Max quote / leg | Session spend cap | Recovery reserve | Net drain cap | Max open cycles |
+| --- | --- | --- | --- | --- | --- | --- |
+| arc | 2000 EQL | 3000 USDC | 4000 USDC | 1500 USDC | 4000 USDC | 1 |
+| base | 2000 EQL | 3000 USDC | 4000 USDC | 1500 USDC | 4000 USDC | 1 |
+
+A leg also carries its chain id, its pool address and a deadline, and the vault refuses a leg whose
+id has already run. A repeat, a replay on the wrong chain and a leg planned against a stale quote all
+revert on the destination chain.
+
+### Bounds the runner enforces against the durable record
+
+| Bound | Value |
+| --- | --- |
+| Minimum edge to open a cycle | 1 USDC |
+| Execution buffer | 0.5 USDC |
+| Reserved recovery cost | 2 USDC |
+| Absolute per-leg gas ceiling | 1 USDC |
+| Session realized-loss cap | 200 USDC |
+| Quote freshness | 600s and 20 blocks behind head |
+| Chain availability window | 3600s without a new block |
+| Leg validity | 600s |
+| Slippage allowance | 50 bps |
+| Cycles open at once | 1 |
+
+Worst-case gas and reserved recovery cost for one cycle at current fees: **2.023179 USDC**.
+
+### Current inventory and counters
+
+| Chain | Keeper tokens | Keeper quote | Spent | Received | Open cycles | State |
+| --- | --- | --- | --- | --- | --- | --- |
+| arc | 3000 EQL | 3988.947725 USDC | 2014.080425 USDC | 1003.02815 USDC | 0 | running |
+| base | 1000 EQL | 6194.019125 USDC | 0 USDC | 1194.019125 USDC | 0 | running |
+
+Inventory refill and the Base-to-Arc return route are **not** part of this approval. When a chain's
+inventory is exhausted the keeper stops trading that direction and says so.
+
+### What a run does, and what it reports
+
+Each cycle quotes both pools for the same token quantity through the vaults' own `probe`, buys on the
+cheaper chain and sells on the dearer one, inside every bound above. Keeper profit is reported
+separately from the combined pool and treasury outcome; keeper volume is not customer demand and the
+keeper's own payments are not revenue.
+
+### Verification steps
+
+1. `bun run scripts/equilibrium-keeper-bytecode.ts --check` — the pinned keeper code matches a fresh build.
+2. `bun run equilibrium:keeper preview --config <file>` — regenerates this preview and its digest from live reads.
+3. `bun run equilibrium:keeper verify --config <file>` — both vaults are owned by the operator and bound to these pools and bounds.
+4. `bun run equilibrium:keeper quote --config <file> --tokens <n>` — both pools quoted for the same quantity, with the decision and its reason.
+5. `EQUILIBRIUM_FORK=1 bun test server/equilibrium/keeper/__tests__/fork.test.ts` — the fork rehearsal.
+
+### Operating duration and stop conditions
+
+One session, ended by the operator. The keeper stops on its own when: a sale leg fails (both vaults
+halt and the position stays open until it is recovered), the realized-loss cap is reached, a chain is
+unavailable or its quotes are stale, inventory is exhausted, or a spend cap is reached.
+
+### Recovery and cleanup
+
+1. `bun run equilibrium:keeper status --config <file>` lists unresolved cycles from the durable record.
+2. `bun run equilibrium:keeper recover --config <file> --cycle <id>` unwinds the position on the market it
+   was bought on, inside the remaining loss budget. If the unwind would pass the cap it is refused and
+   the position stays open — the cap is never relaxed to close a position.
+3. `bun run equilibrium:keeper resume --config <file>` only succeeds once no cycle is open.
+4. Preserve the keeper record (and its WAL). Restarting with the same configuration re-observes every
+   planned leg before sending anything.
+5. To end the pilot: halt, resolve every open cycle, then withdraw both assets from each vault. The
+   vault refuses a withdrawal while a cycle is open or while it is halted.
