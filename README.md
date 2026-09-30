@@ -26,6 +26,8 @@ bun run typecheck && bun run lint && bun test && bun run build
 
 `VITE_ARC_NETWORK=testnet` (default) or `mainnet` selects the chain and deployment file.
 
+**EQUILIBRIUM showcase:** open `/#equilibrium` locally (`/app/#equilibrium` after building) to test one fixed supply across four simulated markets, bounded balancing, delayed bridge credits and failed-leg recovery. It runs without funds or a wallet. See [the implementation guide](docs/EQUILIBRIUM.md) and [live release requirements](public/equilibrium-readiness.md).
+
 **Phone wallets** connect through **WalletConnect on Reown's relay** (`src/lib/walletConnect.ts`): the "WalletConnect" row in the connect sheet opens Reown's QR modal (themed to match; deep links on mobile). The connector and its ~280 KB (gzip) provider/modal chunks load only when that row is used, or at startup for a browser whose last connection was WalletConnect, so the initial bundle is unaffected. The Reown project id is a public identifier with a default in source; override it with `VITE_REOWN_PROJECT_ID`, and add every production domain to the project's allowlist at dashboard.reown.com. Reown's email/social logins are deliberately not used: they only transact on chains served by Reown's Blockchain API, which does not include Arc.
 
 No wallet extension? The connect sheet offers a **browser wallet** with **browser sign-in** (`src/lib/keystore.ts`, `src/lib/localWallet.ts`):

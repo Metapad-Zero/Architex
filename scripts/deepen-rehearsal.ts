@@ -707,7 +707,7 @@ async function pluginClean(what: string, block: bigint) {
 const FEE_PLUGIN_ID = (() => {
   const a = parseInt(toFunctionSelector('onLaunch(address,address,bytes)').slice(2), 16)
   const b = parseInt(toFunctionSelector('onFees(address,uint256)').slice(2), 16)
-  return `0x${((a ^ b) >>> 0).toString(16).padStart(8, '0')}` as Hex
+  return `0x${((a ^ b) >>> 0).toString(16).padStart(8, '0')}`
 })()
 
 async function wiring() {
@@ -776,7 +776,7 @@ async function step(id: string, fn: () => Promise<void>, always = false) {
   save()
   if (!ok) {
     console.log(`\nstep ${id}: ${stepFailed.length} check(s) failed. Stopping; a re-run re-checks it without re-sending its transactions.`)
-    await summary()
+    summary()
     process.exit(1)
   }
 }
@@ -1192,8 +1192,8 @@ async function attack() {
     }
     note(`Settler at ${progress.settler}`)
     const B = maxOf(await latest(), head)
-    check('Settler wired to the deepen plugin', getAddress(await rd<string>(progress.settler as Address, ABI.settler, 'plugin', [], B)), DEEPEN)
-    check('Settler wired to the attack token', getAddress(await rd<string>(progress.settler as Address, ABI.settler, 'token', [], B)), token)
+    check('Settler wired to the deepen plugin', getAddress(await rd<string>(progress.settler, ABI.settler, 'plugin', [], B)), DEEPEN)
+    check('Settler wired to the attack token', getAddress(await rd<string>(progress.settler, ABI.settler, 'token', [], B)), token)
   })
 
   await step('attack', async () => {
@@ -1287,7 +1287,7 @@ interface Row {
   checks: number
   result: string
 }
-async function summary() {
+function summary() {
   const rows: Row[] = []
   const resultFor = (stepId: string) => (progress.results.find((r) => r.step === stepId)?.ok ?? false) ? 'pass' : progress.done[stepId] ? 'pass' : 'FAIL'
   for (const t of progress.txs) {
@@ -1331,7 +1331,7 @@ try {
   await wiring()
   if (!account || !me) {
     console.log('\nBURNER_KEY not set: read-only checks only.')
-    if (progress.txs.length) await summary()
+    if (progress.txs.length) summary()
     process.exit(failures ? 1 : 0)
   }
   progress.burner = me
@@ -1356,13 +1356,13 @@ try {
     await run(k, '2') // a pool run: the burn side plus the deepen side
   }
   await attack()
-  await summary()
+  summary()
   writeRecord()
   console.log(failures ? `\n${failures} check(s) FAILED` : '\nall checks passed')
   process.exit(failures ? 1 : 0)
 } catch (e) {
   console.log(`\nERROR: ${errorText(e).split('\n').slice(0, 6).join('\n')}`)
   save()
-  await summary().catch(() => undefined)
+  try { summary() } catch { /* Preserve the original failure if rendering its summary also fails. */ }
   process.exit(1)
 }

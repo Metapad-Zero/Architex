@@ -29,3 +29,5 @@ crytic-export/
 # v1.3 rehearsal progress (scripts/v13-rehearsal.ts): resumable scratch state, not a deployment record
 deployments/*.progress.json
 deployments/*.progress.json.tmp
+output/
+.playwright-cli/

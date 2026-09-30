@@ -8,6 +8,7 @@ export type AppRoute =
   | { view: 'launch'; token?: Address; side?: 'buy' | 'sell' }
   | { view: 'launch-new' }
   | { view: 'bridge' }
+  | { view: 'equilibrium' }
   | { view: 'docs'; section?: DocSection }
 
 export function hashFor(next: AppRoute): string {
@@ -15,6 +16,7 @@ export function hashFor(next: AppRoute): string {
   if (next.view === 'pools') return next.pair ? `#pools/${next.pair}` : '#pools'
   if (next.view === 'launch-new') return '#launch/new'
   if (next.view === 'bridge') return '#bridge'
+  if (next.view === 'equilibrium') return '#equilibrium'
   if (next.view === 'docs') return next.section && next.section !== DEFAULT_DOC_SECTION ? `#docs/${next.section}` : '#docs'
   return next.token ? `#launch/${next.token}${next.side === 'sell' ? '?side=sell' : ''}` : '#launch'
 }
@@ -31,6 +33,7 @@ function readRoute(): AppRoute {
   }
   if (hash === '#launch') return { view: 'launch' }
   if (hash === '#bridge' || hash.startsWith('#bridge?')) return { view: 'bridge' }
+  if (hash === '#equilibrium') return { view: 'equilibrium' }
   if (hash.startsWith('#docs/')) {
     const section = hash.slice('#docs/'.length)
     return { view: 'docs', section: isDocSection(section) ? section : DEFAULT_DOC_SECTION }
