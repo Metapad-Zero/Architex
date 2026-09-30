@@ -93,7 +93,8 @@ export function l1FeeOf(receipt: TransactionReceipt): bigint {
   if (typeof value === 'bigint' && value >= 0n) return value
   if ((typeof value === 'number' && Number.isSafeInteger(value) && value >= 0)
     || (typeof value === 'string' && /^(0x[0-9a-fA-F]+|[0-9]+)$/.test(value))) return BigInt(value)
-  throw new Error(`Unreadable l1Fee ${String(value)} on ${receipt.transactionHash}`)
+  const detail = typeof value === 'bigint' ? value.toString() : JSON.stringify(value)
+  throw new Error(`Unreadable l1Fee ${detail} on ${receipt.transactionHash}`)
 }
 export const weiOf = (receipt: TransactionReceipt) => receipt.gasUsed * receipt.effectiveGasPrice + l1FeeOf(receipt)
 
