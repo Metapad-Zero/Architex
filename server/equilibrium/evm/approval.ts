@@ -14,6 +14,8 @@ export const CODE_FILES = [
   'server/equilibrium/store.ts', 'server/equilibrium/types.ts',
   'contracts/equilibrium/EquilibriumExecutor.sol', 'contracts/equilibrium/EquilibriumToken.sol',
   'scripts/equilibrium-infra.ts',
+  // The payer-side signer: what the payer runs to authorize the one launch is part of what is approved.
+  'scripts/equilibrium-evm-launch.ts',
 ] as const
 
 export type Manifest = { file: string; sha256: string }[]

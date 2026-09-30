@@ -87,6 +87,8 @@ function configFor(p: Awaited<ReturnType<typeof predictions>>, fromBlocks: Recor
     const n = NETWORKS[name]
     return { chain: name, rpc: n.rpc, chainId: n.chainId, wormholeChainId: n.wormholeChainId, core: n.core as Address, executor: p[name].executor, transceiverStructs: p[name].library,
       usdc: n.usdc as Address, finality: 'finalized' as const, fromBlock: fromBlocks[name].toString(), opStackL1Fee: name === 'base',
+      // Arc testnet charges about 25 gwei; a fixed 60 gwei ceiling makes every worst case deterministic.
+      ...(name === 'arc' ? { maxFeePerGasWei: '60000000000' } : {}),
       // Arc gas is native USDC (18 decimals). Base ETH is charged at a deliberately high 5,000 USDC.
       usdcAtomsPerNative: name === 'arc' ? '1000000' : '5000000000',
       venue: name === 'arc' ? { kind: 'architex' as const, factory: n.factory as Address } : { kind: 'uniswap-v3' as const, factory: n.factory as Address, fee: 3000, tickSpacing: 60 } }

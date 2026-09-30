@@ -80,7 +80,27 @@ const destination = (request: LaunchRequest, chain: 'arc' | 'base') => request.d
  * execution of an operation, so a stale worker, a restart or a replayed transaction cannot
  * repeat an issuance, debit, credit or pool deposit. Results come from finalized receipts.
  */
-export function evmAdapter(config: EvmAdapterConfig, db: Database): PromotionalTokenAdapter & { verify(): Promise<void>; clients: Record<'arc' | 'base', PublicClient> } {
+/** Test seam: runs right after a transaction is handed to the RPC, before anything about it is recorded. */
+export interface EvmAdapterOptions { afterSend?: (step: Step, tx: Hex) => void }
+
+/**
+ * An OP Stack receipt's L1 fee as a bigint. viem leaves `l1Fee` as the raw hex string unless the
+ * chain uses the OP Stack formatter, and a string added to a bigint concatenates instead of adding.
+ */
+export function l1FeeOf(receipt: TransactionReceipt): bigint {
+  const value = (receipt as TransactionReceipt & { l1Fee?: unknown }).l1Fee
+  if (value === undefined || value === null) return 0n
+  if (typeof value === 'bigint' && value >= 0n) return value
+  if ((typeof value === 'number' && Number.isSafeInteger(value) && value >= 0)
+    || (typeof value === 'string' && /^(0x[0-9a-fA-F]+|[0-9]+)$/.test(value))) return BigInt(value)
+  const detail = typeof value === 'bigint' ? value.toString() : JSON.stringify(value)
+  throw new Error(`Unreadable l1Fee ${detail} on ${receipt.transactionHash}`)
+}
+export const weiOf = (receipt: TransactionReceipt) => receipt.gasUsed * receipt.effectiveGasPrice + l1FeeOf(receipt)
+
+export function evmAdapter(config: EvmAdapterConfig, db: Database, options: EvmAdapterOptions = {}): PromotionalTokenAdapter & {
+  verify(): Promise<void>; clients: Record<'arc' | 'base', PublicClient>; committed(chain: 'arc' | 'base'): bigint; settleGas(chain: 'arc' | 'base'): Promise<void>
+} {
   const account: PrivateKeyAccount = privateKeyToAccount(config.operatorKey)
   const chains = { arc: config.arc, base: config.base }
   const clients = {
@@ -93,12 +113,12 @@ export function evmAdapter(config: EvmAdapterConfig, db: Database): PromotionalT
   }
   db.exec(`CREATE TABLE IF NOT EXISTS evm_broadcasts (operation TEXT NOT NULL, chain TEXT NOT NULL, tx TEXT NOT NULL, sent_at INTEGER NOT NULL, PRIMARY KEY (operation, tx));
     CREATE TABLE IF NOT EXISTS evm_vaas (operation TEXT PRIMARY KEY, vaa TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS evm_spend (tx TEXT PRIMARY KEY, chain TEXT NOT NULL, wei TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS evm_payments (operation TEXT PRIMARY KEY, sent_at INTEGER NOT NULL);`)
+    CREATE TABLE IF NOT EXISTS evm_payments (operation TEXT PRIMARY KEY, sent_at INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS evm_gas (id INTEGER PRIMARY KEY AUTOINCREMENT, chain TEXT NOT NULL, operation TEXT NOT NULL, worst TEXT NOT NULL, tx TEXT, actual TEXT, reserved_at INTEGER NOT NULL);`)
   // One sender per chain in this process, so two jobs never race for the operator's nonce.
   const sending: Record<'arc' | 'base', Promise<unknown>> = { arc: Promise.resolve(), base: Promise.resolve() }
   const pinned = { mode: config.mode, ntt: NTT_COMMIT, code: Object.fromEntries(Object.entries(CODE).map(([k, v]) => [k, v.sha256])),
-    chains: [config.arc, config.base].map((c) => ({ ...c, rpc: undefined, fromBlock: undefined, priorityFeeWei: undefined, usdcAtomsPerNative: c.usdcAtomsPerNative.toString() })),
+    chains: [config.arc, config.base].map((c) => ({ ...c, rpc: undefined, fromBlock: undefined, priorityFeeWei: undefined, maxFeePerGasWei: c.maxFeePerGasWei?.toString(), usdcAtomsPerNative: c.usdcAtomsPerNative.toString() })),
     limits: { outbound: config.limits.outbound.toString(), inbound: config.limits.inbound.toString() }, budgets: config.budgets, vaa: config.vaa.kind, scope: config.scope ?? null }
   const version = `evm-arc-base-v1:${hash(pinned).slice(2, 18)}`
 
@@ -218,8 +238,7 @@ export function evmAdapter(config: EvmAdapterConfig, db: Database): PromotionalT
 
   async function result(p: Plan, step: Step, job: Job, receipt: TransactionReceipt): Promise<EffectResult | 'pending'> {
     const c = chains[p.chain]
-    const l1 = (receipt as TransactionReceipt & { l1Fee?: bigint }).l1Fee ?? 0n
-    const wei = receipt.gasUsed * receipt.effectiveGasPrice + l1
+    const wei = weiOf(receipt)
     const cost = ((wei * c.usdcAtomsPerNative + 10n ** 18n - 1n) / 10n ** 18n).toString()
     const base: EffectResult = { operation: p.operation, transaction: receipt.transactionHash, finalized: true, cost }
     const X = p.executor
@@ -257,30 +276,63 @@ export function evmAdapter(config: EvmAdapterConfig, db: Database): PromotionalT
 
   /** Explicit EIP-1559 fees, so the worst-case cost checked before sending is the one the tx may pay. */
   async function fees(chain: 'arc' | 'base') {
-    const tip = chains[chain].priorityFeeWei
+    const { priorityFeeWei: tip, maxFeePerGasWei: ceiling } = chains[chain]
+    let result: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }
     if (tip === undefined) {
       const { maxFeePerGas, maxPriorityFeePerGas } = await clients[chain].estimateFeesPerGas()
-      return { maxFeePerGas, maxPriorityFeePerGas }
+      result = { maxFeePerGas, maxPriorityFeePerGas }
+    } else {
+      const block = await clients[chain].getBlock()
+      result = { maxPriorityFeePerGas: tip, maxFeePerGas: (block.baseFeePerGas ?? 0n) * 2n + tip }
     }
-    const block = await clients[chain].getBlock()
-    return { maxPriorityFeePerGas: tip, maxFeePerGas: (block.baseFeePerGas ?? 0n) * 2n + tip }
+    if (ceiling === undefined) return result
+    return { maxFeePerGas: ceiling, maxPriorityFeePerGas: result.maxPriorityFeePerGas < ceiling ? result.maxPriorityFeePerGas : ceiling }
   }
-  const spent = (chain: 'arc' | 'base') => db.query<{ wei: string }, [string]>('SELECT wei FROM evm_spend WHERE chain=?').all(chain).reduce((n, r) => n + BigInt(r.wei), 0n)
+  /**
+   * Operator gas this store has committed on a chain: the actual cost of every settled send plus the
+   * worst case of every reservation not yet settled. A process that dies after sending leaves its
+   * reservation at worst case, so the cap can only ever over-count, never under-count.
+   */
+  const committed = (chain: 'arc' | 'base') => db.query<{ worst: string; actual: string | null }, [string]>('SELECT worst, actual FROM evm_gas WHERE chain=?').all(chain)
+    .reduce((n, r) => n + BigInt(r.actual ?? r.worst), 0n)
+  /** Replace worst case with the receipt's actual cost wherever the transaction is known and mined. */
+  async function settleGas(chain: 'arc' | 'base') {
+    for (const row of db.query<{ id: number; tx: string }, [string]>('SELECT id, tx FROM evm_gas WHERE chain=? AND tx IS NOT NULL AND actual IS NULL').all(chain)) {
+      const receipt = await clients[chain].getTransactionReceipt({ hash: row.tx as Hex }).catch(() => null)
+      if (receipt) db.query('UPDATE evm_gas SET actual=? WHERE id=?').run(weiOf(receipt).toString(), row.id)
+    }
+  }
   const toAtoms = (chain: 'arc' | 'base', wei: bigint) => (wei * chains[chain].usdcAtomsPerNative + 10n ** 18n - 1n) / 10n ** 18n
 
   /**
    * Refuse to send anything whose worst-case cost (gas limit x max fee, plus the OP Stack L1 fee
    * upper bound) could exceed the step budget or, with a scope, the approved cumulative operator gas.
    */
-  async function assertAffordable(chain: 'arc' | 'base', step: Step, gas: bigint, maxFeePerGas: bigint, data: Hex) {
+  async function worstCase(chain: 'arc' | 'base', step: Step, gas: bigint, maxFeePerGas: bigint, data: Hex): Promise<bigint> {
     let worst = gas * maxFeePerGas
     if (chains[chain].opStackL1Fee) {
       worst += await clients[chain].readContract({ address: GAS_PRICE_ORACLE, abi: gasPriceOracleAbi, functionName: 'getL1FeeUpperBound', args: [BigInt((data.length - 2) / 2 + 68)] })
     }
     if (toAtoms(chain, worst) > BigInt(step.budget)) throw new LaunchError(409, 'budget', `${step.id} could cost up to ${toAtoms(chain, worst)} USDC atoms, above its ${step.budget} budget. Nothing was sent.`)
-    const cap = config.scope?.operatorGas[chain]
-    if (cap !== undefined && spent(chain) + worst > BigInt(cap)) throw new LaunchError(409, 'gas_cap', `${chain} operator gas would exceed the approved ${cap} wei. Nothing was sent.`)
+    return worst
   }
+
+  /**
+   * One IMMEDIATE transaction takes the SQLite write lock, so every process sharing this store
+   * serializes here: the one-launch payment slot and the gas reservation are checked and taken
+   * together, or not at all. Returns the reservation id.
+   */
+  const reserve = (chain: 'arc' | 'base', operation: Hex, worst: bigint, payment: boolean) => db.transaction(() => {
+    const scope = config.scope
+    if (payment && scope) {
+      const paid = db.query<{ count: number }, [string]>('SELECT COUNT(*) AS count FROM evm_payments WHERE operation != ?').get(operation)!.count
+      if (paid >= scope.launches) throw new LaunchError(403, 'pilot_scope', 'The approved number of launches has already been paid. Nothing was sent.')
+      db.query('INSERT OR IGNORE INTO evm_payments(operation, sent_at) VALUES(?, ?)').run(operation, Date.now())
+    }
+    const cap = scope?.operatorGas[chain]
+    if (cap !== undefined && committed(chain) + worst > BigInt(cap)) throw new LaunchError(409, 'gas_cap', `${chain} operator gas would exceed the approved ${cap} wei. Nothing was sent.`)
+    return Number(db.query('INSERT INTO evm_gas(chain, operation, worst, reserved_at) VALUES(?,?,?,?)').run(chain, operation, worst.toString(), Date.now()).lastInsertRowid)
+  }).immediate()
 
   async function executed(p: Plan, blockNumber: bigint): Promise<Hex> {
     try {
@@ -297,6 +349,8 @@ export function evmAdapter(config: EvmAdapterConfig, db: Database): PromotionalT
     version,
     terms: { chainId: config.arc.chainId, asset: config.arc.usdc, payTo: config.arc.executor, name: 'USDC', version: '2' },
     clients,
+    committed,
+    settleGas,
     assertReady(request) {
       if (request.destinations.some((d) => d.chain !== 'arc' && d.chain !== 'base') || !destination(request, 'base')) {
         throw new LaunchError(503, 'route_closed', 'This adapter executes the Arc hub and Base spoke only. Solana and Robinhood remain closed.')
@@ -377,27 +431,29 @@ export function evmAdapter(config: EvmAdapterConfig, db: Database): PromotionalT
         const limit = (gas * 12n) / 10n
         const fee = await fees(p.chain)
         const data = encodeFunctionData({ abi: executorAbi, functionName: 'execute', args: executeArgs(p, prepared.digest) })
-        await assertAffordable(p.chain, step, limit, fee.maxFeePerGas, data)
-        if (step.kind === 'payment' && config.scope) {
-          // Serialized with every other send on this chain, so two jobs cannot both take the last slot.
-          const settled = db.query<{ count: number }, [string]>('SELECT COUNT(*) AS count FROM evm_payments WHERE operation != ?').get(p.operation)!.count
-          if (settled >= config.scope.launches) throw new LaunchError(403, 'pilot_scope', 'The approved number of launches has already been paid. Nothing was sent.')
-          db.query('INSERT OR IGNORE INTO evm_payments(operation, sent_at) VALUES(?, ?)').run(p.operation, Date.now())
-        }
+        const worst = await worstCase(p.chain, step, limit, fee.maxFeePerGas, data)
+        // Settle known receipts first so a finished send counts at its actual cost, then reserve.
+        await settleGas(p.chain)
+        const reservation = reserve(p.chain, p.operation, worst, step.kind === 'payment')
         let tx: Hex | undefined
         for (let attempt = 0; attempt < 3 && !tx; attempt++) {
           try { tx = await wallets[p.chain].writeContract({ account, chain: chainOf(chains[p.chain]), address: p.executor, abi: executorAbi, functionName: 'execute',
             args: executeArgs(p, prepared.digest), value: BigInt(p.value), gas: limit, ...fee }) } catch (cause) {
             // Another worker's execution landed between our simulation and our send: nothing to send.
             // Observe decides afterwards whether that execution is final, pending or was dropped.
-            if (String(cause).includes(OPERATION_DONE) || await client.readContract({ address: p.executor, abi: executorAbi, functionName: 'digestOf', args: [p.operation], blockTag: 'pending' }) === prepared.digest) return
+            // The rejection came from the fill step, before anything was signed, so the reservation is released.
+            if (String(cause).includes(OPERATION_DONE) || await client.readContract({ address: p.executor, abi: executorAbi, functionName: 'digestOf', args: [p.operation], blockTag: 'pending' }) === prepared.digest) {
+              db.query('DELETE FROM evm_gas WHERE id=? AND tx IS NULL').run(reservation)
+              return
+            }
             if (attempt === 2 || !/nonce|underpriced|already known/i.test(String(cause))) throw cause
           }
         }
+        options.afterSend?.(step, tx!)
+        db.query('UPDATE evm_gas SET tx=? WHERE id=?').run(tx!, reservation)
         db.query('INSERT OR IGNORE INTO evm_broadcasts(operation, chain, tx, sent_at) VALUES(?,?,?,?)').run(p.operation, p.chain, tx!, Date.now())
         const receipt = await client.waitForTransactionReceipt({ hash: tx!, timeout: config.receiptTimeoutMs ?? 120_000 })
-        const l1 = (receipt as TransactionReceipt & { l1Fee?: bigint }).l1Fee ?? 0n
-        db.query('INSERT OR IGNORE INTO evm_spend(tx, chain, wei) VALUES(?,?,?)').run(tx!, p.chain, (receipt.gasUsed * receipt.effectiveGasPrice + l1).toString())
+        db.query('UPDATE evm_gas SET actual=? WHERE id=?').run(weiOf(receipt).toString(), reservation)
         if (receipt.status !== 'success' && await executed(p, receipt.blockNumber) !== prepared.digest) throw new Error(`${step.id} execution reverted in ${tx}`)
       }
       const next = sending[p.chain].then(run, run)

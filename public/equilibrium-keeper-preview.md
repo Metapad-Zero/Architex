@@ -1,6 +1,6 @@
 ## EQUILIBRIUM keeper approval preview
 
-Generated 2026-09-30T21:44:02Z for keeper version `equilibrium-keeper-v1:f4aee225b16f1a48`, mode **fork**.
+Generated 2026-09-30T22:01:32Z for keeper version `equilibrium-keeper-v1:22b98c8fceaf8605`, mode **fork**.
 
 > **Fork rehearsal, not an approval request.** Every address below belongs to a local anvil fork
 > and every signer is a development key. A live preview is regenerated against deployed vaults with
@@ -18,7 +18,7 @@ approved launch configuration. The launch release approval is a separate digest 
 | arc (chain id 5042002) | `0xf1a2ee3969061d6e36a210508c288b50c91c63c3` | `0x3fFF12004565035D4Cf9525eF7E8e3b37436E556` (architex-pair) | `0x1339e1782CE2F7a7f233e82De47c50faf6e5fFB4` | `0x3600000000000000000000000000000000000000` |
 | base (chain id 84532) | `0xf1a2ee3969061d6e36a210508c288b50c91c63c3` | `0x69222911Dd9207eeb2728310E2a363B1F3F0352F` (uniswap-v3-pool) | `0x7ac0E82C82503b9b648C52a25ed27A6eBd01E869` | `0x036CbD53842c5426634e7929541eC2318f3dCF7e` |
 
-Keeper creation code `6e7d42eeb77e38ceb31f91eeeb374b81a6e0f24302e3b2ee1ca3b99267f36c64` built with solc 0.8.28+commit.7893614a.
+Keeper creation code `565b8e941a773295e8d4d9670229072ded0608bc7c700f36aa1c4ae2b56ffb85` built with solc 0.8.28+commit.7893614a.
 
 ### Signing and admin powers
 

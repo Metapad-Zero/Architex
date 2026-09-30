@@ -19,6 +19,16 @@ Each job step is one call, `EquilibriumExecutor.execute(operation, digest, calls
 
 Every address a job creates is CREATE2-predicted from the job id and the two executor addresses (`layout()` in `server/equilibrium/evm/adapter.ts`). That is how each side's peers are configured before the other side exists. NTT code is the pinned submodule built with NTT's own `prod` profile (solc 0.8.19, via-IR; NttManager is 24,067 bytes). `server/equilibrium/evm/bytecode.json` carries it with SHA-256s; `bun run equilibrium:bytecode --check` compares it to a fresh build.
 
+From a fresh checkout, reproduce the complete bundle with:
+
+```bash
+git submodule update --init --recursive
+bun install --frozen-lockfile
+bun run equilibrium:bytecode-build --check
+```
+
+The build command forces both compilers to rebuild. NTT keeps its pinned upstream `prod` configuration; `scripts/equilibrium-ntt-remappings.txt` supplies only global relative remappings with automatic discovery disabled. The local `equilibrium` profile also disables discovery. Foundry otherwise inserts checkout-absolute dependency contexts into solc metadata, changing the complete creation code across paths. Compiler metadata remains included. The check compares the entire JSON bundle verbatim, including complete creation-code strings, link placeholders, compiler versions, metadata hashes, source keccak256 hashes, recursive gitlink pins, lockfile and build-input hashes. It refuses stale sources, mismatched gitlinks and absolute remappings. Each entry's `sha256` hashes the complete literal creation-code string, including its `0x` prefix and any link placeholders. To intentionally regenerate after a reviewed source/build change, run the build command without `--check`; this changes the release approval digest and CREATE2 predictions.
+
 `observe` reads `digestOf` at the finalized block (Arc `finalized` tag; Base `finalized` tag on testnet). Executed-but-not-final or in-mempool is **pending**, never absent. Only proven absence lets the runner broadcast again, and a repeat broadcast is harmless anyway. The adapter version pins chains, executors, limits, budgets and code hashes, so a job cannot resume under a different configuration.
 
 ### Fork evidence
@@ -29,7 +39,7 @@ Every address a job creates is CREATE2-predicted from the job id and the two exe
 - Arc USDC runs as an EIP-3009 stand-in, because Arc's native USDC calls Arc precompiles `0x1800…00/01` that anvil lacks.
 - The Base executor's USDC quote inventory is written to storage.
 
-The 12 scenarios:
+The 16 scenarios:
 
 - A paid x402 launch runs through the HTTP service and returns 200. On-chain supply reconciles: 1,000,000 issued, 10,000 locked backing 10,000 on Base, both pools holding exact inventory, and the executors emptied.
 - A resend executes nothing.
@@ -41,6 +51,10 @@ The 12 scenarios:
 - Worker processes killed after the credit broadcast, before the debit broadcast, and after the Arc pool broadcast are all finished by `reconcile`, every effect exactly once.
 - Delayed Base finality stays pending and completes without re-execution.
 - The approved scope allows one paid launch and refuses a second before any charge. A gas cap below one send's worst case refuses before anything is sent.
+- A worker SIGKILLed right after sending, before any receipt accounting: its reservation stays at worst case, reconcile finishes the job, and committed gas equals every real receipt plus exactly that over-count.
+- Gas reservations are shared across processes: a dead worker's unsettled reservation makes a second process refuse, and two workers started together never commit past the cap.
+- Two worker processes racing for the one approved launch: exactly one payment executes.
+- Base receipts carrying a hex `l1Fee`, injected by an RPC proxy as OP Stack nodes return it, are accounted as numbers end to end.
 
 What forks do **not** prove: public Guardian attestation of this route, Arc's real USDC precompile path, and real Base L1 data fees.
 

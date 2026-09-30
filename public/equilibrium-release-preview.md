@@ -68,7 +68,7 @@ bun run equilibrium:export
 ```
 
 ```bash
-bun run equilibrium:fork-test                       # pinned Arc testnet + Base Sepolia forks, 12 scenarios
+bun run equilibrium:fork-test                       # pinned Arc testnet + Base Sepolia forks, 16 scenarios
 bun run equilibrium:bytecode --check                # deployed code matches a fresh pinned build
 bun run equilibrium:infra plan --operator <a> --payer <b> --recipient <c>   # read-only; writes the config once, prints the digest
 EQUILIBRIUM_APPROVAL=<digest> bun run equilibrium:infra deploy
@@ -92,7 +92,8 @@ The scope is enforced by the adapter, not by convention:
 - **One launch:** a second job cannot start, and a second payment cannot be sent, even concurrently.
 - **Only the named payer and recipient**, and only the exact allocation.
 - **A quoted total of at most 219 USDC.**
-- **Cumulative operator gas** within the launch caps, checked against worst-case cost before every send.
+- **Cumulative operator gas** within the launch caps. Before every send the adapter reserves the worst case (gas limit x a fixed max fee, 60 gwei on Arc, plus Base's L1 fee upper bound) in the same SQLite `BEGIN IMMEDIATE` transaction as the launch slot, so processes sharing the store serialize. The reservation is replaced by the receipt's actual cost only once the receipt is read; a process killed in between leaves it counted at worst case. The cap can over-count after a crash but never under-count.
+- **The payer-side signer** (`scripts/equilibrium-evm-launch.ts`) is in the code manifest, so the tool the payer runs is part of what is approved.
 
 Nothing broadcasts to a public chain without the approval. There is no live mode.
 
