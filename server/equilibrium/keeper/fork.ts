@@ -39,7 +39,7 @@ const ISSUANCE = 1_000_000_000_000n
 export const FORK_BOUNDS = {
   maxTokensPerLeg: 2_000_000_000n,
   maxQuotePerLeg: 3_000_000_000n,
-  spendCap: 4_000_000_000n,
+  spendCap: 5_000_000_000n,
   recoveryReserve: 1_500_000_000n,
   drainCap: 4_000_000_000n,
   maxOpenCycles: 1,
@@ -67,8 +67,8 @@ export const FORK_POOLS = {
   arc: { tokens: 500_000_000_000n, quote: 500_000_000_000n },
   base: { tokens: 500_000_000_000n, quote: 600_000_000_000n },
 } as const
-/** Keeper vault inventory on each chain. */
-export const FORK_INVENTORY = { tokens: 2_000_000_000n, quote: 5_000_000_000n } as const
+/** Keeper vault inventory on each chain: four cycles' worth, so the rehearsal never runs dry mid-suite. */
+export const FORK_INVENTORY = { tokens: 4_000_000_000n, quote: 8_000_000_000n } as const
 
 function clients(url: string, key: Hex = DEV.operator) {
   const account = privateKeyToAccount(key)

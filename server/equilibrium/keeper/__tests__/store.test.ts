@@ -74,6 +74,51 @@ describe('keeper durable record', () => {
     expect(store.unresolved()).toHaveLength(0)
   })
 
+  test('a settled sale whose cycle never closed is unfinished, and invisible to the other two lists', () => {
+    store.open('cycle-1', candidate, 1, 1)
+    store.settleLeg(store.planLeg(plan('cycle-1', 'buy', 'arc')).plan, result(), 2)
+    store.settleLeg(store.planLeg(plan('cycle-1', 'sell', 'base')).plan, result({ transaction: '0xsell', amountIn: '1000000000', amountOut: '1194000000' }), 3)
+    // The trade is done; the close attestation and the terminal state are not.
+    expect(store.get('cycle-1')!.state).toBe('open')
+    expect(store.unresolved()).toHaveLength(0)
+    expect(store.untouched()).toHaveLength(0)
+    expect(store.unfinished().map((cycle) => cycle.id)).toEqual(['cycle-1'])
+    // And it is what blocks the next cycle, so leaving it undetected strands the keeper.
+    expect(() => store.open('cycle-2', candidate, 4, 1)).toThrow(/Resolve them before opening another/)
+    store.setCycle('cycle-1', 'closed', 5, { net: '188000000' })
+    expect(store.unfinished()).toHaveLength(0)
+  })
+
+  test('a settled recovery whose cycle never left halted is unfinished too', () => {
+    store.open('cycle-1', candidate, 1, 1)
+    store.settleLeg(store.planLeg(plan('cycle-1', 'buy', 'arc')).plan, result(), 2)
+    store.setCycle('cycle-1', 'halted', 3, { note: 'sale failed' })
+    store.settleLeg(store.planLeg(plan('cycle-1', 'recover', 'arc')).plan, result({ transaction: '0xrec', amountIn: '1000000000', amountOut: '990000000' }), 4)
+    expect(store.unresolved()).toHaveLength(0)
+    expect(store.unfinished().map((cycle) => cycle.id)).toEqual(['cycle-1'])
+    store.setCycle('cycle-1', 'recovered', 5, { net: '-15000000' })
+    expect(store.unfinished()).toHaveLength(0)
+  })
+
+  test('a cycle still holding an open position is not unfinished: there is nothing to close yet', () => {
+    store.open('cycle-1', candidate, 1, 1)
+    store.settleLeg(store.planLeg(plan('cycle-1', 'buy', 'arc')).plan, result(), 2)
+    store.planLeg(plan('cycle-1', 'sell', 'base'))
+    expect(store.unfinished()).toHaveLength(0)
+    expect(store.unresolved().map((cycle) => cycle.id)).toEqual(['cycle-1'])
+  })
+
+  test('the unfinished shape survives the process, because that is the whole point of it', () => {
+    const path = join(dir, 'keeper.sqlite')
+    store.open('cycle-1', candidate, 1, 1)
+    store.settleLeg(store.planLeg(plan('cycle-1', 'buy', 'arc')).plan, result(), 2)
+    store.settleLeg(store.planLeg(plan('cycle-1', 'sell', 'base')).plan, result({ transaction: '0xsell', amountIn: '1000000000', amountOut: '1194000000' }), 3)
+    store.close()
+    const reopened = new KeeperStore(path)
+    try { expect(reopened.unfinished().map((cycle) => cycle.id)).toEqual(['cycle-1']) } finally { reopened.close() }
+    store = new KeeperStore(path)
+  })
+
   test('a recovery closes the exposure just as a sale does', () => {
     store.open('cycle-1', candidate, 1, 1)
     store.settleLeg(store.planLeg(plan('cycle-1', 'buy', 'arc')).plan, result(), 2)

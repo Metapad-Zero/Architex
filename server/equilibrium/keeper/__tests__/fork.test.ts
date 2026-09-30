@@ -74,6 +74,18 @@ async function rejects(promise: Promise<unknown>, pattern: RegExp) {
   expect((error as Error).message).toMatch(pattern)
 }
 
+/** Would a withdrawal be accepted right now, and if not, which bound refused it? */
+async function canWithdraw(chain: KeeperChain, asset: `0x${string}`, amount: bigint): Promise<{ ok: true } | { error?: string }> {
+  try {
+    await client(chain).simulateContract({ account: operator, address: env.config[chain].keeper, abi: keeperAbi, functionName: 'withdraw', args: [asset, operator.address, amount] })
+    return { ok: true }
+  } catch (cause) {
+    const revert = cause instanceof BaseError ? cause.walk((e) => e instanceof ContractFunctionRevertedError) : null
+    if (revert instanceof ContractFunctionRevertedError) return { error: revert.data?.errorName }
+    throw cause
+  }
+}
+
 /** Submit a leg straight to a vault and return the custom error it reverted with. */
 async function refusal(chain: KeeperChain, plan: LegPlan): Promise<{ name?: string; args?: readonly unknown[] }> {
   try {
@@ -170,6 +182,46 @@ suite('EQUILIBRIUM keeper on pinned testnet forks', () => {
     expect(await read.balance('arc', env.tokens.arc, env.pools.arc)).toBe(500_000_000_000n - TOKENS)
   })
 
+  test_('a close attestation that never lands leaves a finished trade the next reconcile completes', async () => {
+    const before = { arc: await inventory('arc'), base: await inventory('base') }
+    await rejects(keeper.runCycle(TOKENS, { id: 'fork-cycle-attest', failAttest: true }), /close attestation on the purchase vault did not land/)
+
+    // Both legs traded; only the close is outstanding. Nothing is at risk, but everything is blocked.
+    const stuck = store.get('fork-cycle-attest')!
+    expect(stuck.state).toBe('open')
+    expect(stuck.legs.map((leg) => `${leg.kind}=${leg.state}`)).toEqual(['buy=settled', 'sell=settled'])
+    expect(stuck.note).toContain('the next reconcile finishes it')
+    expect(store.unresolved()).toHaveLength(0)
+    expect(store.untouched()).toHaveLength(0)
+    expect(store.unfinished().map((cycle) => cycle.id)).toEqual(['fork-cycle-attest'])
+    // The purchase vault is the backstop: it still reports the position, so nothing may trade,
+    // resume or withdraw even though the record's own exposure list is empty.
+    expect((await vaultState('arc')).open).toBe(1)
+    expect(decide(await keeper.snapshot(TOKENS), env.config.policy).reason).toBe('unresolved_exposure')
+    const blocked: LegPlan = { ...stuck.legs[0].plan, cycle: 'fork-blocked', id: `0x${'9'.repeat(64)}`, deadline: 2_000_000_000 }
+    expect((await refusal('arc', blocked)).name).toBe('TooManyOpenCycles')
+    expect(await canWithdraw('arc', env.quotes.arc, 1n)).toEqual({ error: 'OpenExposure' })
+    await rejects(keeper.resume(), /Run reconcile first/)
+
+    // One reconcile attests it and closes it. No trade is repeated: inventory is untouched.
+    const touched = await keeper.reconcile()
+    expect(touched.map((cycle) => cycle.id)).toContain('fork-cycle-attest')
+    const closed = store.get('fork-cycle-attest')!
+    expect(closed.state).toBe('closed')
+    expect(BigInt(closed.net!)).toBeGreaterThan(0n)
+    expect(await inventory('arc')).toEqual({ tokens: before.arc.tokens + TOKENS, quote: before.arc.quote - BigInt(closed.legs[0].result!.amountIn) })
+    expect(await inventory('base')).toEqual({ tokens: before.base.tokens - TOKENS, quote: before.base.quote + BigInt(closed.legs[1].result!.amountOut) })
+    expect(await legRuns('arc', closed.legs[0].plan.id)).toBe(1)
+    expect(await legRuns('base', closed.legs[1].plan.id)).toBe(1)
+
+    // The vault is free again, a second reconcile is a no-op, and the keeper may trade.
+    expect((await vaultState('arc')).open).toBe(0)
+    expect(store.unfinished()).toHaveLength(0)
+    expect(await keeper.reconcile()).toHaveLength(0)
+    expect(await canWithdraw('arc', env.quotes.arc, 1n)).toEqual({ ok: true })
+    expect(decide(await keeper.snapshot(TOKENS), env.config.policy).reason).toBe('ok')
+  })
+
   test_('replaying a settled leg executes nothing, on the chain that ran it', async () => {
     const buy = legOf('fork-cycle-1', 'buy')
     const before = await inventory('arc')
@@ -219,6 +271,7 @@ suite('EQUILIBRIUM keeper on pinned testnet forks', () => {
   test_('the deliberate-failure rehearsal device is refused outside fork mode', async () => {
     const testnet = createKeeper({ ...env.config, mode: 'testnet', approval: `0x${'0'.repeat(64)}` }, store)
     await rejects(testnet.runCycle(TOKENS, { id: 'fork-never', failSell: true }), /fork rehearsal device/)
+    await rejects(testnet.runCycle(TOKENS, { id: 'fork-never', failAttest: true }), /fork rehearsal device/)
     expect(store.get('fork-never')).toBeUndefined()
   })
 
@@ -280,6 +333,24 @@ suite('EQUILIBRIUM keeper on pinned testnet forks', () => {
     expect(store.unresolved()).toHaveLength(0)
   })
 
+  test_('a recovery whose terminal state never got written is finished by reconcile too', async () => {
+    // The recovery transaction clears the position on-chain, then the terminal state is a local
+    // write. A stop in between leaves the chain clear and the record halted; rewind to exactly that.
+    const before = await inventory('arc')
+    store.setCycle('fork-cycle-2', 'halted', Math.floor(Date.now() / 1000), { note: 'Rewound: the recovered state was never written.' })
+    expect(store.unresolved()).toHaveLength(0)
+    expect(store.unfinished().map((cycle) => cycle.id)).toEqual(['fork-cycle-2'])
+
+    const touched = await keeper.reconcile()
+    expect(touched.map((cycle) => cycle.id)).toContain('fork-cycle-2')
+    expect(store.get('fork-cycle-2')!.state).toBe('recovered')
+    expect(BigInt(store.get('fork-cycle-2')!.net!)).toBeLessThan(0n)
+    // Nothing was re-traded: the recovery leg had already run and its id is bound.
+    expect(await inventory('arc')).toEqual(before)
+    expect(await legRuns('arc', legOf('fork-cycle-2', 'recover').plan.id)).toBe(1)
+    expect(store.unfinished()).toHaveLength(0)
+  })
+
   test_('the keeper trades again after recovery, and reports keeper profit separately from the loss', async () => {
     const totalsBefore = store.totals()
     const cycle = await keeper.runCycle(TOKENS, { id: 'fork-cycle-4' })
@@ -317,7 +388,7 @@ suite('EQUILIBRIUM keeper on pinned testnet forks', () => {
     const snapshot = await keeper.snapshot(TOKENS)
     const spent = BigInt(snapshot.quotes.arc.spentQuote)
     const need = BigInt(snapshot.quotes.arc.buyCost) + BigInt(snapshot.quotes.arc.legCost)
-    // Three purchases in, a fourth would pass the cap the vault was deployed with.
+    // Four purchases in, a fifth would pass the cap the vault was deployed with.
     expect(spent + need).toBeGreaterThan(BigInt(env.config.policy.spendCap))
     expect(decide(snapshot, env.config.policy).reason).toBe('spend_cap')
     await rejects(keeper.runCycle(TOKENS, { id: 'fork-cycle-6' }), /session spending cap/)

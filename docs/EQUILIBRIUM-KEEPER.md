@@ -107,8 +107,20 @@ not yet sold" from "nothing sent".
   market's current quote, using the capacity the vault reserved for exactly this. If the unwind would
   pass the remaining loss budget it is **refused**: the position stays open and the keeper stays
   halted. The cap is never relaxed to make a position go away.
+- **A cycle whose trade finished but whose close did not** is its own state, and the one that is
+  easiest to get wrong. Closing a cycle is two steps that cannot be one: the purchase vault's
+  attestation is a transaction on the purchase chain, and the terminal state is a local write. A throw
+  or a stopped process in between leaves both legs settled, the record still `open` (or `halted`, for
+  a recovery), and the purchase vault still reporting the position — so nothing may trade, resume or
+  withdraw, even though nothing is at risk. `store.unfinished()` is what sees that shape, and
+  `reconcile()` walks it **first**: it attests the close, writes the terminal state, and is safe to
+  run again, because `attestClosed` is a no-op once the vault reports nothing open. `runCycle` and
+  `recover` leave exactly that shape with a note saying so rather than reporting a completed trade the
+  vault still thinks is open. `bun run equilibrium:keeper reconcile --yes` is the operator's version of
+  the same call, and `status` lists unresolved and unfinished cycles separately.
 - **A cycle that sent nothing** is abandoned, because no money moved.
-- `resume()` only succeeds once no cycle is open, on either chain or in the record.
+- `resume()` only succeeds once no cycle is open, on either chain or in the record, and its error names
+  `reconcile` when the vault is the one still holding a position.
 
 Keeper profit is reported separately from the pool/treasury outcome. A recovered cycle's loss is not
 netted away by a later profitable cycle: `totals()` reports realized loss and net separately. The
@@ -120,13 +132,14 @@ keeper's own volume is not customer demand and its own payments are not revenue.
 bun run equilibrium:keeper verify   --config <file>
 bun run equilibrium:keeper quote    --config <file> --tokens 1000000000
 bun run equilibrium:keeper status   --config <file>
+bun run equilibrium:keeper reconcile --config <file> --yes
 bun run equilibrium:keeper preview  --config <file> [--write public/equilibrium-keeper-preview.md]
 bun run equilibrium:keeper run      --config <file> --tokens 1000000000 [--ticks N] [--interval-ms N] --yes
 bun run equilibrium:keeper recover  --config <file> --cycle <id> --yes
 bun run equilibrium:keeper resume   --config <file> --yes
 ```
 
-`verify`, `quote`, `status` and `preview` are read-only. The three that send anything require
+`verify`, `quote`, `status` and `preview` are read-only. The four that send anything require
 `--yes` and, off a fork, `EQUILIBRIUM_KEEPER_APPROVAL` equal to the digest over the exact preview,
 the exact configuration file and the keeper code manifest
 (`server/equilibrium/keeper/approval.ts`). A fork configuration must point at loopback RPCs. There is
@@ -144,7 +157,7 @@ configuration; the two file lists are disjoint, and a test asserts it.
 balance-delta swap and the real v3 callback ordering, driving every revert path above plus both
 happy-path round trips, and asserting a probe spends nothing.
 
-**Real venues on pinned forks** — `bun run equilibrium:keeper-fork-test`, 19 tests. Pinned anvil
+**Real venues on pinned forks** — `bun run equilibrium:keeper-fork-test`, 21 tests. Pinned anvil
 forks of Arc testnet (block 64,824,600) and Base Sepolia (block 47,513,000), with the deployed
 Architex factory and pair code, the deployed Uniswap v3 factory and pool code and the real Base
 Sepolia USDC. The Base pool is seeded through `EquilibriumExecutor`'s v3 mint callback, the same path
@@ -154,6 +167,10 @@ a launch's `pool:base` step uses. It proves:
 - a full cycle executing at **exactly** the quoted amounts, with vault inventory moving by those
   amounts and nothing else, and token supply untouched;
 - a repeat of a settled leg reverting with nothing moved, and the `LegRun` count staying at one;
+- a close attestation that never lands leaving both legs settled and the purchase vault still holding
+  the position — blocking a new cycle, `resume` and `withdraw` — and one `reconcile` attesting it,
+  closing it and freeing the vault without re-trading anything, with a second reconcile a no-op;
+- the same for a recovery whose terminal state was never written;
 - a leg planned for one chain refused by the other vault, in both directions — worth stating because
   in the rehearsal the two vaults happen to share an address, and the refusal still holds;
 - an expired leg and a misdirected leg refused on the destination chain;
@@ -168,24 +185,27 @@ a launch's `pool:base` step uses. It proves:
 - the deliberate-failure device refused outside fork mode.
 
 A partial cycle has to be produced on purpose to rehearse recovery, so `runCycle` takes a `failSell`
-option that abandons a settled purchase. It refuses to run unless `mode` is `fork`, and the operator
-tool never exposes it.
+option that abandons a settled purchase and a `failAttest` option that drops the close attestation.
+Both refuse to run unless `mode` is `fork`, and the operator tool never exposes either.
 
 **One reproducible rehearsal** — `bun run equilibrium:keeper-rehearse [--write-preview <path>]`
-starts the forks, deploys the vaults, seeds the venues, runs one complete cycle and one deliberately
-halted cycle with its recovery, exercises `equilibrium:keeper quote` against the live forks, and
-writes `output/equilibrium-keeper-evidence.json`, `output/equilibrium-keeper-fork.json` and the
-keeper approval preview. A representative run, 1,000 EQL per cycle:
+starts the forks, deploys the vaults, seeds the venues, runs three cases — one complete cycle, one
+whose close attestation is dropped and then finished by reconcile, and one deliberately halted cycle
+with its recovery — exercises `equilibrium:keeper quote` against the live forks, and writes
+`output/equilibrium-keeper-evidence.json`, `output/equilibrium-keeper-fork.json` and the keeper
+approval preview. A representative run, 1,000 EQL per cycle:
 
 | Fact | Value |
 | --- | --- |
 | Arc buy quote / executed | 1,005.019066 USDC / **1,005.019066 USDC** |
 | Base sell quote / executed | 1,194.019125 USDC / **1,194.019125 USDC** |
 | Closed cycle keeper net, gas included | +188.993474 USDC |
-| Halted cycle | purchase settled at 1,009.061359 USDC, no sale, both vaults halted |
-| Recovery | unwound 1,000 EQL on Arc for 1,003.028150 USDC |
-| Recovered cycle net | −6.034571 USDC, inside the 200 USDC loss cap |
-| Session totals | realized loss 6.034571 USDC, net +182.958791 USDC, 2 closed |
+| Dropped close attestation | both legs settled, record `open`, `unresolved()` empty, decision `unresolved_exposure` from the vault |
+| Finished by one reconcile | `closed`, net +180.209813 USDC; a second reconcile touched 0 cycles |
+| Halted cycle | purchase settled at 1,013.128078 USDC, no sale, both vaults halted |
+| Recovery | unwound 1,000 EQL on Arc for 1,007.070578 USDC |
+| Recovered cycle net | −6.058626 USDC, inside the 200 USDC loss cap |
+| Session totals | realized loss 6.058626 USDC, net +363.144661 USDC, 3 closed |
 
 Numbers move with the pinned blocks' fee levels; the assertions are about equalities and bounds, not
 about those figures.

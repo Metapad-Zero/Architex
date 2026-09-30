@@ -1,6 +1,6 @@
 ## EQUILIBRIUM keeper approval preview
 
-Generated 2026-09-30T21:21:07Z for keeper version `equilibrium-keeper-v1:b33008f334b9342b`, mode **fork**.
+Generated 2026-09-30T21:44:02Z for keeper version `equilibrium-keeper-v1:f4aee225b16f1a48`, mode **fork**.
 
 > **Fork rehearsal, not an approval request.** Every address below belongs to a local anvil fork
 > and every signer is a development key. A live preview is regenerated against deployed vaults with
@@ -32,8 +32,8 @@ immutable — changing one means deploying a new vault and a new approval.
 
 | Chain | Max tokens / leg | Max quote / leg | Session spend cap | Recovery reserve | Net drain cap | Max open cycles |
 | --- | --- | --- | --- | --- | --- | --- |
-| arc | 2000 EQL | 3000 USDC | 4000 USDC | 1500 USDC | 4000 USDC | 1 |
-| base | 2000 EQL | 3000 USDC | 4000 USDC | 1500 USDC | 4000 USDC | 1 |
+| arc | 2000 EQL | 3000 USDC | 5000 USDC | 1500 USDC | 4000 USDC | 1 |
+| base | 2000 EQL | 3000 USDC | 5000 USDC | 1500 USDC | 4000 USDC | 1 |
 
 A leg also carries its chain id, its pool address and a deadline, and the vault refuses a leg whose
 id has already run. A repeat, a replay on the wrong chain and a leg planned against a stale quote all
@@ -54,14 +54,14 @@ revert on the destination chain.
 | Slippage allowance | 50 bps |
 | Cycles open at once | 1 |
 
-Worst-case gas and reserved recovery cost for one cycle at current fees: **2.023179 USDC**.
+Worst-case gas and reserved recovery cost for one cycle at current fees: **2.022917 USDC**.
 
 ### Current inventory and counters
 
 | Chain | Keeper tokens | Keeper quote | Spent | Received | Open cycles | State |
 | --- | --- | --- | --- | --- | --- | --- |
-| arc | 3000 EQL | 3988.947725 USDC | 2014.080425 USDC | 1003.02815 USDC | 0 | running |
-| base | 1000 EQL | 6194.019125 USDC | 0 USDC | 1194.019125 USDC | 0 | running |
+| arc | 6000 EQL | 5979.862075 USDC | 3027.208503 USDC | 1007.070578 USDC | 0 | running |
+| base | 2000 EQL | 10383.295417 USDC | 0 USDC | 2383.295417 USDC | 0 | running |
 
 Inventory refill and the Base-to-Arc return route are **not** part of this approval. When a chain's
 inventory is exhausted the keeper stops trading that direction and says so.
@@ -78,6 +78,7 @@ keeper's own payments are not revenue.
 1. `bun run scripts/equilibrium-keeper-bytecode.ts --check` — the pinned keeper code matches a fresh build.
 2. `bun run equilibrium:keeper preview --config <file>` — regenerates this preview and its digest from live reads.
 3. `bun run equilibrium:keeper verify --config <file>` — both vaults are owned by the operator and bound to these pools and bounds.
+   `bun run equilibrium:keeper status --config <file>` — nothing unresolved and nothing unfinished before a session starts.
 4. `bun run equilibrium:keeper quote --config <file> --tokens <n>` — both pools quoted for the same quantity, with the decision and its reason.
 5. `EQUILIBRIUM_FORK=1 bun test server/equilibrium/keeper/__tests__/fork.test.ts` — the fork rehearsal.
 
@@ -89,12 +90,18 @@ unavailable or its quotes are stale, inventory is exhausted, or a spend cap is r
 
 ### Recovery and cleanup
 
-1. `bun run equilibrium:keeper status --config <file>` lists unresolved cycles from the durable record.
-2. `bun run equilibrium:keeper recover --config <file> --cycle <id>` unwinds the position on the market it
-   was bought on, inside the remaining loss budget. If the unwind would pass the cap it is refused and
-   the position stays open — the cap is never relaxed to close a position.
-3. `bun run equilibrium:keeper resume --config <file>` only succeeds once no cycle is open.
-4. Preserve the keeper record (and its WAL). Restarting with the same configuration re-observes every
-   planned leg before sending anything.
-5. To end the pilot: halt, resolve every open cycle, then withdraw both assets from each vault. The
-   vault refuses a withdrawal while a cycle is open or while it is halted.
+1. `bun run equilibrium:keeper status --config <file>` lists two things separately: **unresolved**
+   cycles, which still hold a position, and **unfinished** ones, whose trade completed but whose close
+   attestation on the purchase vault never landed.
+2. `bun run equilibrium:keeper reconcile --config <file> --yes` finishes the unfinished ones. It
+   observes before it sends, costs at most one attestation transaction per cycle, and is safe to run
+   again — run it first, before anything else, because an outstanding close blocks trading, resuming
+   and withdrawing while nothing is actually at risk.
+3. `bun run equilibrium:keeper recover --config <file> --cycle <id>` unwinds a position on the market
+   it was bought on, inside the remaining loss budget. If the unwind would pass the cap it is refused
+   and the position stays open — the cap is never relaxed to close a position.
+4. `bun run equilibrium:keeper resume --config <file>` only succeeds once no cycle is open.
+5. Preserve the keeper record (and its WAL). Restarting with the same configuration re-observes every
+   planned leg before sending anything, and finishes any outstanding close.
+6. To end the pilot: reconcile, halt, resolve every open cycle, then withdraw both assets from each
+   vault. The vault refuses a withdrawal while a cycle is open or while it is halted.

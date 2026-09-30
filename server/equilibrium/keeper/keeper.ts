@@ -40,8 +40,11 @@ export interface KeeperHandle {
   verify(): Promise<void>
   snapshot(tokens: bigint): Promise<KeeperSnapshot>
   consider(tokens: bigint): Promise<{ snapshot: KeeperSnapshot; decision: KeeperDecision }>
-  /** `failSell` deliberately abandons a settled purchase to rehearse recovery; fork mode only. */
-  runCycle(tokens: bigint, options?: { id?: string; failSell?: boolean }): Promise<CycleRecord>
+  /**
+   * `failSell` deliberately abandons a settled purchase to rehearse recovery, and `failAttest`
+   * deliberately drops the close attestation to rehearse finishing it. Fork mode only.
+   */
+  runCycle(tokens: bigint, options?: { id?: string; failSell?: boolean; failAttest?: boolean }): Promise<CycleRecord>
   recover(id: string): Promise<CycleRecord>
   reconcile(): Promise<CycleRecord[]>
   halt(reason: string): Promise<void>
@@ -277,7 +280,9 @@ export function createKeeper(config: KeeperConfig, store: KeeperStore): KeeperHa
         clients[chain].readContract({ address: chains[chain].keeper, abi: keeperAbi, functionName: 'halted' }),
         clients[chain].readContract({ address: chains[chain].keeper, abi: keeperAbi, functionName: 'openCycles' }),
       ])
-      if (Number(open) !== 0) throw new KeeperError('unresolved_exposure', `${chain} still reports ${open} open cycle(s); the vault refuses to resume over unresolved exposure.`)
+      if (Number(open) !== 0) {
+        throw new KeeperError('unresolved_exposure', `${chain} still reports ${open} open cycle(s); the vault refuses to resume over unresolved exposure. Run reconcile first: it finishes a cycle whose trade completed but whose close attestation did not land.`)
+      }
       if (halted) await vaultCall(chain, encodeFunctionData({ abi: keeperAbi, functionName: 'resume' }))
     }
     if (store.unresolved().length) throw new KeeperError('unresolved_exposure', 'The durable record still holds an unresolved cycle.')
@@ -306,11 +311,38 @@ export function createKeeper(config: KeeperConfig, store: KeeperStore): KeeperHa
     return net
   }
 
-  async function runCycle(tokens: bigint, options: { id?: string; failSell?: boolean } = {}): Promise<CycleRecord> {
+  /**
+   * Finish a cycle whose trade is done: attest the close on the purchase vault, then write the
+   * terminal state. Two steps that cannot be one — the attestation is a transaction on the purchase
+   * chain, the state is a local write — so this is written to be safe to call again at any point in
+   * between. `attestClosed` is a no-op once the vault reports nothing open, and `setCycle` is
+   * idempotent, so a throw anywhere here leaves a record the next reconcile finishes.
+   */
+  async function finish(cycle: CycleRecord): Promise<CycleRecord> {
+    const closer = cycle.legs.find((leg) => (leg.kind === 'sell' || leg.kind === 'recover') && leg.state === 'settled')
+    if (!closer) throw new KeeperError('leg_failed', `Cycle ${cycle.id} has no settled sale or recovery to close.`)
+    const buy = cycle.legs.find((leg) => leg.kind === 'buy')
+    if (buy) await attestClosed(buy.chain, cycle.id, closer.plan.id)
+    store.setCycle(cycle.id, closer.kind === 'sell' ? 'closed' : 'recovered', now(), { net: netOf(cycle).toString() })
+    return store.get(cycle.id)!
+  }
+
+  /**
+   * Leave a finished-but-unclosed cycle in the shape `store.unfinished()` looks for, with a note
+   * saying why, rather than reporting a completed trade the vault still thinks is open.
+   */
+  function noteUnclosed(cycle: CycleRecord, cause: unknown): string {
+    const detail = (cause instanceof Error ? cause.message : String(cause)).replace(/\.*$/, '')
+    const note = `Both legs settled, but the close attestation on the purchase vault did not land: ${detail}. The purchase vault still reports the position open; the next reconcile finishes it.`
+    store.setCycle(cycle.id, cycle.state, now(), { note })
+    return note
+  }
+
+  async function runCycle(tokens: bigint, options: { id?: string; failSell?: boolean; failAttest?: boolean } = {}): Promise<CycleRecord> {
     // `failSell` is the rehearsal device that produces a partial cycle on purpose. It abandons a
     // settled purchase, so it exists only where no real money is at stake.
-    if (options.failSell && config.mode !== 'fork') {
-      throw new KeeperError('invalid_configuration', 'A deliberately failed sale is a fork rehearsal device; it is refused outside fork mode.')
+    if ((options.failSell || options.failAttest) && config.mode !== 'fork') {
+      throw new KeeperError('invalid_configuration', 'A deliberately failed sale or close attestation is a fork rehearsal device; it is refused outside fork mode.')
     }
     const { snapshot: taken, decision } = await consider(tokens)
     if (!decision.candidate) throw new KeeperError(decision.reason, decision.detail)
@@ -342,11 +374,13 @@ export function createKeeper(config: KeeperConfig, store: KeeperStore): KeeperHa
       await halt(note)
       throw cause
     }
-    const sell = store.get(id)!.legs.find((leg) => leg.kind === 'sell')!
-    await attestClosed(candidate.buy, id, sell.plan.id)
-    const closed = store.get(id)!
-    store.setCycle(id, 'closed', now(), { net: netOf(closed).toString() })
-    return store.get(id)!
+    try {
+      // A deliberately thrown close attestation stands in for a lost RPC or a stopped process here.
+      if (options.failAttest) throw new KeeperError('leg_failed', 'Rehearsal: the close attestation was not sent.')
+      return await finish(store.get(id)!)
+    } catch (cause) {
+      throw new KeeperError('leg_failed', noteUnclosed(store.get(id)!, cause))
+    }
   }
 
   async function recover(id: string): Promise<CycleRecord> {
@@ -365,11 +399,14 @@ export function createKeeper(config: KeeperConfig, store: KeeperStore): KeeperHa
       throw new KeeperError('loss_cap', outcome.refused)
     }
     const quote = taken.quotes[buy.chain]
-    // The recovery leg spends the capacity the vault reserved for exactly this purpose.
+    // The recovery leg spends the capacity the vault reserved for exactly this purpose, and clears
+    // the position on the purchase vault itself, so `finish` only has the terminal state left to write.
     await runLeg(id, 'recover', buy.chain, tokens, BigInt(outcome.floor), quote.observedAt + config.policy.legTtlSeconds, BigInt(quote.legCost) + BigInt(config.policy.recoveryCost))
-    const recovered = store.get(id)!
-    store.setCycle(id, 'recovered', now(), { net: netOf(recovered).toString() })
-    return store.get(id)!
+    try {
+      return await finish(store.get(id)!)
+    } catch (cause) {
+      throw new KeeperError('leg_failed', noteUnclosed(store.get(id)!, cause))
+    }
   }
 
   /**
@@ -379,6 +416,10 @@ export function createKeeper(config: KeeperConfig, store: KeeperStore): KeeperHa
    */
   async function reconcile(): Promise<CycleRecord[]> {
     const touched: CycleRecord[] = []
+    // A trade that finished without its close: attest it and write the terminal state. This runs
+    // before anything else, because it is the only state that blocks trading, resuming and
+    // withdrawing while nothing is actually at risk.
+    for (const cycle of store.unfinished()) touched.push(await finish(cycle))
     for (const cycle of store.untouched()) {
       const planned = cycle.legs.filter((leg) => leg.state !== 'settled')
       let anything = false
@@ -398,12 +439,9 @@ export function createKeeper(config: KeeperConfig, store: KeeperStore): KeeperHa
         if (observed !== 'absent' && observed !== 'pending') store.settleLeg(sell.plan, observed, now())
       }
       const refreshed = store.get(cycle.id)!
-      const closer = refreshed.legs.find((leg) => (leg.kind === 'sell' || leg.kind === 'recover') && leg.state === 'settled')
       const buy = refreshed.legs.find((leg) => leg.kind === 'buy')!
-      if (closer) {
-        await attestClosed(buy.chain, refreshed.id, closer.plan.id)
-        store.setCycle(refreshed.id, closer.kind === 'sell' ? 'closed' : 'recovered', now(), { net: netOf(refreshed).toString() })
-        touched.push(store.get(refreshed.id)!)
+      if (refreshed.legs.some((leg) => (leg.kind === 'sell' || leg.kind === 'recover') && leg.state === 'settled')) {
+        touched.push(await finish(refreshed))
         continue
       }
       const note = `Cycle ${refreshed.id} settled its purchase on ${buy.chain} and has no settled sale. Recovery comes before any new cycle.`

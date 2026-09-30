@@ -134,6 +134,19 @@ export class KeeperStore {
       .filter((cycle) => cycle.legs.some((leg) => leg.kind === 'buy' && leg.state === 'settled')
         && !cycle.legs.some((leg) => (leg.kind === 'sell' || leg.kind === 'recover') && leg.state === 'settled'))
   }
+  /**
+   * Cycles whose trade finished but whose close did not: a settled sale or recovery, and a record
+   * still saying open or halted. Closing a cycle is two steps that cannot be one — the purchase
+   * vault's attestation is its own transaction on its own chain, and the terminal state is a local
+   * write — so a throw or a stopped process in between leaves exactly this shape. Without it the
+   * purchase vault keeps reporting the position open, and nothing can trade, resume or withdraw.
+   */
+  unfinished(): CycleRecord[] {
+    return this.db.query<CycleRow, []>(`SELECT * FROM keeper_cycles WHERE state IN ('open','halted') ORDER BY rowid`).all()
+      .map((row) => this.hydrate(row))
+      .filter((cycle) => cycle.legs.some((leg) => (leg.kind === 'sell' || leg.kind === 'recover') && leg.state === 'settled'))
+  }
+
   /** Cycles with nothing settled at all: safe to abandon, because no money moved. */
   untouched(): CycleRecord[] {
     return this.db.query<CycleRow, []>(`SELECT * FROM keeper_cycles WHERE state='open' ORDER BY rowid`).all()

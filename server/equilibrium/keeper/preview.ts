@@ -163,6 +163,7 @@ keeper's own payments are not revenue.
 1. \`bun run scripts/equilibrium-keeper-bytecode.ts --check\` — the pinned keeper code matches a fresh build.
 2. \`bun run equilibrium:keeper preview --config <file>\` — regenerates this preview and its digest from live reads.
 3. \`bun run equilibrium:keeper verify --config <file>\` — both vaults are owned by the operator and bound to these pools and bounds.
+   \`bun run equilibrium:keeper status --config <file>\` — nothing unresolved and nothing unfinished before a session starts.
 4. \`bun run equilibrium:keeper quote --config <file> --tokens <n>\` — both pools quoted for the same quantity, with the decision and its reason.
 5. \`EQUILIBRIUM_FORK=1 bun test server/equilibrium/keeper/__tests__/fork.test.ts\` — the fork rehearsal.
 
@@ -174,15 +175,21 @@ unavailable or its quotes are stale, inventory is exhausted, or a spend cap is r
 
 ### Recovery and cleanup
 
-1. \`bun run equilibrium:keeper status --config <file>\` lists unresolved cycles from the durable record.
-2. \`bun run equilibrium:keeper recover --config <file> --cycle <id>\` unwinds the position on the market it
-   was bought on, inside the remaining loss budget. If the unwind would pass the cap it is refused and
-   the position stays open — the cap is never relaxed to close a position.
-3. \`bun run equilibrium:keeper resume --config <file>\` only succeeds once no cycle is open.
-4. Preserve the keeper record (and its WAL). Restarting with the same configuration re-observes every
-   planned leg before sending anything.
-5. To end the pilot: halt, resolve every open cycle, then withdraw both assets from each vault. The
-   vault refuses a withdrawal while a cycle is open or while it is halted.
+1. \`bun run equilibrium:keeper status --config <file>\` lists two things separately: **unresolved**
+   cycles, which still hold a position, and **unfinished** ones, whose trade completed but whose close
+   attestation on the purchase vault never landed.
+2. \`bun run equilibrium:keeper reconcile --config <file> --yes\` finishes the unfinished ones. It
+   observes before it sends, costs at most one attestation transaction per cycle, and is safe to run
+   again — run it first, before anything else, because an outstanding close blocks trading, resuming
+   and withdrawing while nothing is actually at risk.
+3. \`bun run equilibrium:keeper recover --config <file> --cycle <id>\` unwinds a position on the market
+   it was bought on, inside the remaining loss budget. If the unwind would pass the cap it is refused
+   and the position stays open — the cap is never relaxed to close a position.
+4. \`bun run equilibrium:keeper resume --config <file>\` only succeeds once no cycle is open.
+5. Preserve the keeper record (and its WAL). Restarting with the same configuration re-observes every
+   planned leg before sending anything, and finishes any outstanding close.
+6. To end the pilot: reconcile, halt, resolve every open cycle, then withdraw both assets from each
+   vault. The vault refuses a withdrawal while a cycle is open or while it is halted.
 `
 }
 

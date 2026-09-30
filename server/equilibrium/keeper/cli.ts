@@ -4,6 +4,7 @@
  *   bun run equilibrium:keeper verify   --config deployments/equilibrium-keeper-fork.json
  *   bun run equilibrium:keeper quote    --config <file> --tokens 25000000
  *   bun run equilibrium:keeper status   --config <file>
+ *   bun run equilibrium:keeper reconcile --config <file> --yes
  *   bun run equilibrium:keeper preview  --config <file> [--write public/equilibrium-keeper-preview.md]
  *   bun run equilibrium:keeper run      --config <file> --tokens 25000000 [--ticks 1] [--interval-ms 15000] --yes
  *   bun run equilibrium:keeper recover  --config <file> --cycle <id> --yes
@@ -33,7 +34,7 @@ const say = (value: unknown) => console.log(JSON.stringify(value, null, 2))
 
 const configPath = flag('config')
 if (!command || !configPath) {
-  console.error('Usage: equilibrium:keeper <verify|quote|status|preview|run|recover|resume> --config <file> [...]')
+  console.error('Usage: equilibrium:keeper <verify|quote|status|preview|reconcile|run|recover|resume> --config <file> [...]')
   process.exit(2)
 }
 const configText = readFileSync(configPath, 'utf8')
@@ -64,8 +65,16 @@ try {
     say({
       version: keeper.version, totals: store.totals(),
       unresolved: store.unresolved().map((cycle) => ({ id: cycle.id, state: cycle.state, note: cycle.note, legs: cycle.legs.map((leg) => ({ kind: leg.kind, chain: leg.chain, state: leg.state, result: leg.result })) })),
+      // Traded, but the close attestation never landed: `reconcile` finishes these.
+      unfinished: store.unfinished().map((cycle) => ({ id: cycle.id, state: cycle.state, note: cycle.note })),
       cycles: store.list(20).map((cycle) => ({ id: cycle.id, state: cycle.state, net: cycle.net, candidate: cycle.candidate, note: cycle.note })),
     })
+  } else if (command === 'reconcile') {
+    // Sends, because finishing a cycle whose close never landed costs one attestation transaction.
+    assertMaySend()
+    await keeper.verify()
+    const touched = await keeper.reconcile()
+    say({ reconciled: touched.map((cycle) => ({ id: cycle.id, state: cycle.state, net: cycle.net, note: cycle.note })), unresolved: store.unresolved().map((c) => c.id), unfinished: store.unfinished().map((c) => c.id) })
   } else if (command === 'preview') {
     await keeper.verify()
     const facts = await vaultFacts(config, keeper.clients)

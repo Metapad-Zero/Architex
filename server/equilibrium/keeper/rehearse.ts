@@ -1,7 +1,8 @@
 /**
  * Reproducible keeper rehearsal on pinned forks of Arc testnet and Base Sepolia. Starts the forks,
- * deploys the vaults, seeds the real venues, runs one complete cycle and one deliberately halted
- * cycle with its recovery, then writes the evidence pack, the fork configuration and the keeper
+ * deploys the vaults, seeds the real venues, then runs three cases: one complete cycle, one whose
+ * close attestation is deliberately dropped and then finished by reconcile, and one deliberately
+ * halted cycle with its recovery. Writes the evidence pack, the fork configuration and the keeper
  * approval preview.
  *
  *   bun run equilibrium:keeper-rehearse [--write-preview public/equilibrium-keeper-preview.md]
@@ -37,6 +38,17 @@ try {
   console.log(`Same-quantity quotes for ${TOKENS} EQL atoms: arc buy ${quoted.quotes.arc.buyCost}, base sell ${quoted.quotes.base.sellProceeds}; ${decision.reason}`)
 
   const closed = await keeper.runCycle(TOKENS, { id: 'rehearsal-closed' })
+
+  // A trade that completed with its close attestation lost. Nothing is at risk, but until the close
+  // lands the purchase vault reports the position and nothing may trade, resume or withdraw.
+  let unclosedNote: string | null = null
+  try { await keeper.runCycle(TOKENS, { id: 'rehearsal-unclosed', failAttest: true }) }
+  catch (cause) { unclosedNote = cause instanceof Error ? cause.message : String(cause) }
+  const stuck = store.get('rehearsal-unclosed')!
+  const blockedWhileUnclosed = decide(await keeper.snapshot(TOKENS), env.config.policy)
+  const finishedByReconcile = (await keeper.reconcile()).map((cycle) => ({ id: cycle.id, state: cycle.state, net: cycle.net }))
+  const secondReconcile = (await keeper.reconcile()).length
+
   const halted = await keeper.runCycle(TOKENS, { id: 'rehearsal-halted', failSell: true })
   const refusedWhileHalted = decide(await keeper.snapshot(TOKENS), env.config.policy)
   const recovered = await keeper.recover('rehearsal-halted')
@@ -78,6 +90,14 @@ try {
       decision,
     },
     closedCycle: { state: closed.state, net: closed.net, buy: leg(closed, 'buy'), sell: leg(closed, 'sell'), candidate: closed.candidate },
+    unclosedThenReconciled: {
+      raisedBy: unclosedNote,
+      whileUnclosed: { state: stuck.state, legs: stuck.legs.map((item) => `${item.kind}=${item.state}`), unresolved: store.unresolved().length, decision: blockedWhileUnclosed },
+      finishedByReconcile,
+      secondReconcileTouched: secondReconcile,
+      finalState: store.get('rehearsal-unclosed')!.state,
+      net: store.get('rehearsal-unclosed')!.net,
+    },
     haltedCycle: { state: halted.state, note: halted.note, buy: leg(halted, 'buy'), refusedWhileHalted },
     recoveredCycle: { state: recovered.state, net: recovered.net, recover: leg(recovered, 'recover'), note: recovered.note },
     totals: store.totals(),
