@@ -106,4 +106,6 @@
 .eq-job-steps { list-style: none; padding: 0; margin: 0; }
 .eq-job-steps li { border-bottom: 1px solid var(--g300); padding: 12px 0; font-size: .875rem; overflow-wrap: anywhere; }
 .eq-job-steps p { margin: 0; }
-@media (max-width: 767px) { .eq-integration .eq-tools-content { grid-template-columns: 1fr; } }
+/* A transaction hash has no break opportunity; wrap it rather than widening the grid track. */
+.eq-settlement-tx { overflow-wrap: anywhere; }
+@media (max-width: 767px) { .eq-integration .eq-tools-content { grid-template-columns: minmax(0, 1fr); } }

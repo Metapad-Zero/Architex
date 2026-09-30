@@ -5,6 +5,8 @@ import infrastructure from '../lib/equilibriumInfrastructure.json'
 interface PublicJob {
   id: string; mode: 'local' | 'fork' | 'testnet' | 'live'; state: string
   payment: { settled: boolean; fulfillment: string }
+  settlement: { amount: string; transaction: string; nonce: string; fulfillment: string } | null
+  funds: { paid: string; platformFee: string; feesSpent: string; quoteInventoryDeployed: string; unallocatedHeld: string; determinate: boolean; refundable: boolean; refundableAmount: string; unresolvedEffects: string[]; note: string }
   supply: { issuance: string; custody: string; remote: string; pending: string; reconciled: boolean; evidence: string }
   steps: { id: string; chain: string; state: string; result?: { address?: string; transaction: string } }[]
 }
@@ -41,6 +43,20 @@ export function EquilibriumIntegration({ offline = false }: { offline?: boolean 
         <div><dt>Issued atoms</dt><dd>{job.supply.issuance}</dd></div><div><dt>Canonical custody</dt><dd>{job.supply.custody}</dd></div><div><dt>Remote atoms</dt><dd>{job.supply.remote}</dd></div><div><dt>Pending claim</dt><dd>{job.supply.pending}</dd></div>
       </dl><p>{job.supply.reconciled ? 'Recorded steps reconcile.' : 'Unresolved operations: reconcile external evidence before reporting supply.'}</p>
       <p>Payment {job.payment.settled ? 'settled' : 'unsettled'} · fulfillment {job.payment.fulfillment}. {job.mode === 'local' ? 'All payments and addresses in this record are synthetic.' : ''}</p></section>
+      {/* The charge is shown on its own: settling it never means the launch was fulfilled. */}
+      <section><h3>Settlement and funds</h3>
+        {job.settlement
+          ? <><dl className="eq-ledger"><div><dt>Settled amount</dt><dd>{job.settlement.amount}</dd></div><div><dt>Authorization nonce</dt><dd>{job.settlement.nonce.slice(0, 12)}…</dd></div><div><dt>Launch fulfillment</dt><dd>{job.settlement.fulfillment}</dd></div></dl>
+            <p className="eq-muted eq-settlement-tx">Settlement transaction {job.settlement.transaction}</p></>
+          : <p>No settlement is recorded for this job.</p>}
+        <dl className="eq-ledger">
+          <div><dt>Platform fee</dt><dd>{job.funds.platformFee}</dd></div><div><dt>Execution fees spent</dt><dd>{job.funds.feesSpent}</dd></div>
+          <div><dt>Quote inventory deployed</dt><dd>{job.funds.quoteInventoryDeployed}</dd></div><div><dt>Unallocated held</dt><dd>{job.funds.unallocatedHeld}</dd></div>
+        </dl>
+        <p>{job.funds.note}</p>
+        {job.funds.unresolvedEffects.length > 0 && <p className="eq-muted">Outstanding operations: {job.funds.unresolvedEffects.join(', ')}. No refund can be decided until these resolve.</p>}
+        {job.funds.refundable && <p className="eq-muted">Determinate unspent remainder: {job.funds.refundableAmount}. This states what is unspent; no refund path is open.</p>}
+      </section>
       <section><h3>Fulfillment steps</h3><ol className="eq-job-steps">{job.steps.map((step) => <li key={step.id}><p>{step.id} · {step.state}</p>{step.result && <p className="eq-muted">{step.result.address ?? step.result.transaction}</p>}</li>)}</ol></section></div>
     </details>)}
     <p><a href="/equilibrium-infrastructure.json" download>Download dated chain observations</a> · <a href="/equilibrium-release-preview.md" download>Download the release preview</a></p>
