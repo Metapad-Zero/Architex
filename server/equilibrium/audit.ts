@@ -14,13 +14,27 @@ export const AUDIT_ABI: Abi = parseAbi([
   'function nttManager() view returns (address)', 'function wormhole() view returns (address)',
   'function consistencyLevel() view returns (uint8)',
 ])
-const IMPLEMENTATION_SLOT = '0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc'
+export const EIP1967_SLOTS = {
+  implementation: '0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc',
+  beacon: '0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50',
+} as const
+export const PEER_INVENTORY_SOURCE = 'wormhole sdk/vaa/structs.go @ 1e61c28f907f9e2d12275d4b6af96b13863c52b8 plus retired IDs from NTT-pinned wormhole-solidity-sdk src/Chains.sol @ b9e129e65d34827d92fceeed8c87d3ecdfc801d0'
+/** Every nonzero Wormhole chain ID in the two pinned registries, fixed on 2026-09-30. The peer scan reads exactly these IDs; unlisted uint16 IDs are not read. */
+export const WORMHOLE_PEER_INVENTORY: readonly number[] = [
+  ...Array.from({ length: 26 }, (_, i) => i + 1), 28, 29, 30, 31, 32, 33, 34, 35, 38, 39, 40, 41, 42,
+  ...Array.from({ length: 30 }, (_, i) => i + 44), 3104, ...Array.from({ length: 10 }, (_, i) => i + 4000),
+  10002, 10003, 10004, 10005, 10006, 10007, 10009, 65000,
+]
+const PEER_SCAN_BATCH = 16
+const ZERO_WORD = /^0x0+$/
 type Chain = 'arc' | 'base'
 interface ContractPin { address: Address; codeHash: Hex }
 interface ProxyPin extends ContractPin { implementationHash: Hex }
+/** A token without implementationHash must not be an EIP-1967 proxy; a proxied token must pin its implementation. */
+interface TokenPin extends ContractPin { implementationHash?: Hex }
 export interface AuditEndpoint {
   chain: Chain; rpc: string; owner: Address; pauser: Address
-  token: ContractPin; manager: ProxyPin; transceiver: ProxyPin
+  token: TokenPin; manager: ProxyPin; transceiver: ProxyPin
 }
 export interface AuditManifest {
   schema: 1; mode: 'testnet' | 'live'; issuance: string; maxAgeSeconds: number
@@ -44,6 +58,7 @@ function pin(raw: unknown): ContractPin {
   return { address: address(p.address), codeHash: digest(p.codeHash) }
 }
 function proxy(raw: unknown): ProxyPin { return { ...pin(raw), implementationHash: digest(record(raw).implementationHash) } }
+function token(raw: unknown): TokenPin { return record(raw).implementationHash === undefined ? pin(raw) : proxy(raw) }
 /** Validate the complete manifest before contacting any endpoint. No env flag creates addresses or approval. */
 export function parseAuditManifest(raw: unknown): AuditManifest {
   const m = record(raw)
@@ -57,7 +72,7 @@ export function parseAuditManifest(raw: unknown): AuditManifest {
     if (typeof e.rpc !== 'string') throw new Error('RPC URL required')
     const url = new URL(e.rpc)
     if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) throw new Error('Use an HTTPS RPC without embedded credentials or query secrets')
-    return { chain: e.chain, rpc: e.rpc, owner: address(e.owner), pauser: address(e.pauser), token: pin(e.token), manager: proxy(e.manager), transceiver: proxy(e.transceiver) }
+    return { chain: e.chain, rpc: e.rpc, owner: address(e.owner), pauser: address(e.pauser), token: token(e.token), manager: proxy(e.manager), transceiver: proxy(e.transceiver) }
   }).sort((a, b) => Number(a.chain === 'base') - Number(b.chain === 'base'))
   if (endpoints[0].chain !== 'arc' || endpoints[1].chain !== 'base') throw new Error('Distinct Arc and Base endpoints are required')
   for (const e of endpoints) if (new Set([e.token.address, e.manager.address, e.transceiver.address]).size !== 3) throw new Error('Token, manager and transceiver must be distinct contracts')
@@ -90,7 +105,7 @@ async function completeReads(reads: Promise<void>[]): Promise<void> {
 }
 interface Observation {
   chain: Chain; chainId: number; blockNumber: Hex; blockHash: Hex; timestamp: number
-  supply: string; custody: string; authoritiesVerified: true; implementationsVerified: true
+  supply: string; custody: string; authoritiesVerified: true; implementationsVerified: true; peerChainIdsScanned: number
 }
 async function observeEndpoint(m: AuditManifest, e: AuditEndpoint, other: AuditEndpoint, reader: AuditReader, now: number): Promise<Observation> {
   const network = NETWORKS.find((n) => n.chain === e.chain)![m.mode === 'live' ? 'mainnet' : 'testnet']
@@ -107,12 +122,22 @@ async function observeEndpoint(m: AuditManifest, e: AuditEndpoint, other: AuditE
     if (bytes === '0x' || bytes.length % 2 !== 0) throw new Error('Deployed contract bytecode is missing')
     equal(keccak256(bytes), expected, 'Runtime bytecode hash')
   }
-  await completeReads([code(e.token.address, e.token.codeHash), ...[e.manager, e.transceiver].map(async (p) => {
+  const slot = async (at: Address, key: keyof typeof EIP1967_SLOTS) => {
+    const word = hex(await reader.request('eth_getStorageAt', [at, EIP1967_SLOTS[key], number]))
+    if (!/^0x0{24}[0-9a-f]{40}$/.test(word)) throw new Error(`Invalid EIP-1967 ${key} slot`)
+    return ZERO_WORD.test(word) ? null : address(`0x${word.slice(-40)}`)
+  }
+  await completeReads([e.token, e.manager, e.transceiver].map(async (p: TokenPin) => {
     await code(p.address, p.codeHash)
-    const slot = hex(await reader.request('eth_getStorageAt', [p.address, IMPLEMENTATION_SLOT, number]))
-    if (!/^0x0{24}[0-9a-f]{40}$/.test(slot)) throw new Error('Invalid EIP-1967 implementation slot')
-    await code(address(`0x${slot.slice(-40)}`), p.implementationHash)
-  })])
+    const [implementation, beacon] = await Promise.all([slot(p.address, 'implementation'), slot(p.address, 'beacon')])
+    if (beacon) throw new Error('EIP-1967 beacon proxies are not verifiable by this audit')
+    if (!p.implementationHash) {
+      if (implementation) throw new Error('Token is an EIP-1967 proxy without an approved implementation hash')
+      return
+    }
+    if (!implementation) throw new Error('Invalid EIP-1967 implementation slot')
+    await code(implementation, p.implementationHash)
+  }))
   const checks: [Address, string, unknown, unknown[]?][] = [
     [e.token.address, 'decimals', 6], [e.manager.address, 'token', e.token.address],
     [e.manager.address, 'mode', e.chain === 'arc' ? 0 : 1], [e.manager.address, 'chainId', network.wormholeId],
@@ -126,13 +151,24 @@ async function observeEndpoint(m: AuditManifest, e: AuditEndpoint, other: AuditE
   ]
   if (e.chain === 'base') checks.push([e.token.address, 'minter', e.manager.address])
   await completeReads(checks.map(async ([at, name, expected, args]) => equal(await call(at, name, args), expected, `${e.chain} ${name}`)))
+  // NTT peers are a uint16 mapping and cannot be enumerated: every other inventory ID must be empty on both manager and transceiver.
+  const unpaired = WORMHOLE_PEER_INVENTORY.filter((id) => id !== peerNetwork.wormholeId)
+  for (let i = 0; i < unpaired.length; i += PEER_SCAN_BATCH) await completeReads(unpaired.slice(i, i + PEER_SCAN_BATCH).flatMap((id) => [
+    call(e.manager.address, 'getPeer', [id]).then((result) => {
+      const [peer, decimals] = result as readonly [Hex, number]
+      if (!ZERO_WORD.test(peer) || decimals !== 0) throw new Error(`${e.chain} getPeer has an unapproved manager peer on Wormhole chain ${id}`)
+    }),
+    call(e.transceiver.address, 'getWormholePeer', [id]).then((peer) => {
+      if (!ZERO_WORD.test(peer as Hex)) throw new Error(`${e.chain} getWormholePeer has an unapproved transceiver peer on Wormhole chain ${id}`)
+    }),
+  ]))
   const supply = unsigned(await call(e.token.address, 'totalSupply'))
   const custody = e.chain === 'arc' ? unsigned(await call(e.token.address, 'balanceOf', [e.manager.address])) : 0n
   if (e.chain === 'arc' && supply !== BigInt(m.issuance)) throw new Error('Canonical issuance differs from the fixed approved supply')
   if (e.chain === 'base' && unsigned(await call(e.token.address, 'supplyCap')) !== BigInt(m.issuance)) throw new Error('Spoke supply cap differs from the canonical issuance')
   const sameBlock = record(await reader.request('eth_getBlockByNumber', [number, false]))
   equal(hex(sameBlock.hash), blockHash, 'Finalized block hash after reads')
-  return { chain: e.chain, chainId: Number(network.id), blockNumber: number, blockHash, timestamp, supply: supply.toString(), custody: custody.toString(), authoritiesVerified: true, implementationsVerified: true }
+  return { chain: e.chain, chainId: Number(network.id), blockNumber: number, blockHash, timestamp, supply: supply.toString(), custody: custody.toString(), authoritiesVerified: true, implementationsVerified: true, peerChainIdsScanned: WORMHOLE_PEER_INVENTORY.length }
 }
 /** RPC observations prove a pinned two-chain snapshot, not Guardian transfers, pools, payment or release approval. */
 export async function auditSupply(raw: unknown, readers: (e: AuditEndpoint) => AuditReader = (e) => rpcAuditReader(e.rpc), now = Math.floor(Date.now() / 1000)) {
@@ -151,5 +187,6 @@ export async function auditSupply(raw: unknown, readers: (e: AuditEndpoint) => A
   }
   return { schema: 1, observedAt: new Date(now * 1000).toISOString(), mode: manifest.mode, scope: 'Arc/Base quiescent supply and configuration only',
     verified: failures.length === 0 && observations.length === 2, paidLaunchOpen: false, routeTested: false, observations, accounting, failures,
+    peerCoverage: { source: PEER_INVENTORY_SOURCE, chainIds: WORMHOLE_PEER_INVENTORY.length, unlisted: 'Wormhole chain IDs outside the pinned inventory are not read; a peer registered on one is not detected by this audit.' },
     limitation: 'RPC evidence is not independent Guardian, public round-trip, market or payment proof. Solana and Robinhood are outside this audit. Route opening requires separate verified evidence and approval.' }
 }
