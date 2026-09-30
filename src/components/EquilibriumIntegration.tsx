@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { readiness } from '../lib/equilibriumNetwork'
-import infrastructure from '../../public/equilibrium-infrastructure.json'
+import infrastructure from '../lib/equilibriumInfrastructure.json'
 
 interface PublicJob {
   id: string; mode: 'local' | 'fork' | 'testnet' | 'live'; state: string

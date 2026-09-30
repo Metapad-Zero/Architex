@@ -47,5 +47,8 @@ const observations = await Promise.all(NETWORKS.flatMap((chain) => (['mainnet', 
   } catch (error) { return { chain: chain.chain, network, mode, rpc: n.rpc, state: 'unverified', error: error instanceof Error ? error.message : 'RPC error', routeTested: false } }
 })))
 const result = { observedAt: new Date().toISOString(), purpose: 'Read-only infrastructure evidence. Not a token deployment or bridge/pool route test.', bridge: BRIDGE, paidLaunchOpen: false, observations }
-writeFileSync('./public/equilibrium-infrastructure.json', JSON.stringify(result, null, 2) + '\n')
+const record = JSON.stringify(result, null, 2) + '\n'
+// Keep the bundled snapshot and public download identical; Vite forbids importing public assets.
+writeFileSync('./src/lib/equilibriumInfrastructure.json', record)
+writeFileSync('./public/equilibrium-infrastructure.json', record)
 console.log(JSON.stringify(result, null, 2))
