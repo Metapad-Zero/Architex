@@ -25,6 +25,20 @@ describe('keeper leg binding', () => {
     expect(readFileSync('server/equilibrium/evm/bytecode.json', 'utf8')).not.toContain('EquilibriumKeeper')
   })
 
+  test('receipt accounting is pinned by the separate keeper approval gate', async () => {
+    const { keeperManifest, keeperApprovalDigest, assertKeeperApproved } = await import('../approval')
+    const manifest = keeperManifest()
+    const feeFile = 'server/equilibrium/keeper/fees.ts'
+    const fee = manifest.find((entry) => entry.file === feeFile)!
+    expect(fee.sha256).toBe(createHash('sha256').update(readFileSync(feeFile)).digest('hex'))
+    const old = keeperApprovalDigest('preview', 'config', manifest.filter((entry) => entry.file !== feeFile))
+    const current = keeperApprovalDigest('preview', 'config', manifest)
+    expect(current).not.toBe(old)
+    expect(() => assertKeeperApproved('testnet', 'preview', 'config', old, [], manifest)).toThrow('without owner approval')
+    expect(() => assertKeeperApproved('testnet', 'preview', 'config', current, [], manifest)).not.toThrow()
+    expect(() => assertKeeperApproved('fork', 'preview', 'config', undefined, ['https://sepolia.base.org'], manifest)).toThrow('local anvil forks only')
+  })
+
   test('every leg id field changes the id: chain, keeper, pool, size, limit, deadline and kind', () => {
     const base = legId(parts)
     const variants = [

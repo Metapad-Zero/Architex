@@ -17,6 +17,7 @@ import {
 } from 'viem'
 import { privateKeyToAccount, type PrivateKeyAccount } from 'viem/accounts'
 import { cycleId, keeperAbi, legDigest, legId, legStruct, KEEPER_CODE } from './contracts'
+import { weiOf } from './fees'
 import { decide, decideRecovery, legBudget, legLimits } from './policy'
 import { keeperChain, keeperClients, legCost, legFees, LEG_GAS, quoteLag, readChainQuote, toQuoteAtoms } from './quotes'
 import type { KeeperStore } from './store'
@@ -139,8 +140,7 @@ export function createKeeper(config: KeeperConfig, store: KeeperStore): KeeperHa
   /** What the leg actually did, from its finalized receipt. Never from what the runner intended. */
   function legResult(chain: KeeperChain, plan: LegPlan, receipt: TransactionReceipt): LegResult {
     const c = chains[chain]
-    const l1 = (receipt as TransactionReceipt & { l1Fee?: bigint }).l1Fee ?? 0n
-    const cost = toQuoteAtoms(c, receipt.gasUsed * receipt.effectiveGasPrice + l1)
+    const cost = toQuoteAtoms(c, weiOf(receipt))
     const run = receipt.logs
       .filter((log) => log.address.toLowerCase() === c.keeper.toLowerCase())
       .flatMap((log) => {

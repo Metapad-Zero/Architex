@@ -1,6 +1,6 @@
 ## EQUILIBRIUM keeper approval preview
 
-Generated 2026-09-30T22:01:32Z for keeper version `equilibrium-keeper-v1:22b98c8fceaf8605`, mode **fork**.
+Generated 2026-09-30T22:32:18Z for keeper version `equilibrium-keeper-v1:22b98c8fceaf8605`, mode **fork**.
 
 > **Fork rehearsal, not an approval request.** Every address below belongs to a local anvil fork
 > and every signer is a development key. A live preview is regenerated against deployed vaults with
@@ -72,6 +72,11 @@ Each cycle quotes both pools for the same token quantity through the vaults' own
 cheaper chain and sells on the dearer one, inside every bound above. Keeper profit is reported
 separately from the combined pool and treasury outcome; keeper volume is not customer demand and the
 keeper's own payments are not revenue.
+
+Realized leg gas includes execution gas plus the receipt's L1 fee, counted once. Hex and decimal
+fees are parsed as exact wei; an absent fee contributes zero. An unreadable fee leaves the leg
+unsettled until reconciliation can read a valid receipt, without sending the trade again. This
+receipt accounting is pinned by the separate keeper approval manifest.
 
 ### Verification steps
 

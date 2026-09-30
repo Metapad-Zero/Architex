@@ -158,6 +158,11 @@ cheaper chain and sells on the dearer one, inside every bound above. Keeper prof
 separately from the combined pool and treasury outcome; keeper volume is not customer demand and the
 keeper's own payments are not revenue.
 
+Realized leg gas includes execution gas plus the receipt's L1 fee, counted once. Hex and decimal
+fees are parsed as exact wei; an absent fee contributes zero. An unreadable fee leaves the leg
+unsettled until reconciliation can read a valid receipt, without sending the trade again. This
+receipt accounting is pinned by the separate keeper approval manifest.
+
 ### Verification steps
 
 1. \`bun run scripts/equilibrium-keeper-bytecode.ts --check\` — the pinned keeper code matches a fresh build.

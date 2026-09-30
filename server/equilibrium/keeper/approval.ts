@@ -17,7 +17,7 @@ import { KeeperError } from './types'
 export const KEEPER_FILES = [
   'server/equilibrium/keeper/bytecode.json',
   'server/equilibrium/keeper/approval.ts', 'server/equilibrium/keeper/cli.ts', 'server/equilibrium/keeper/config.ts',
-  'server/equilibrium/keeper/contracts.ts', 'server/equilibrium/keeper/keeper.ts', 'server/equilibrium/keeper/policy.ts',
+  'server/equilibrium/keeper/contracts.ts', 'server/equilibrium/keeper/fees.ts', 'server/equilibrium/keeper/keeper.ts', 'server/equilibrium/keeper/policy.ts',
   'server/equilibrium/keeper/preview.ts', 'server/equilibrium/keeper/quotes.ts', 'server/equilibrium/keeper/run.ts',
   'server/equilibrium/keeper/store.ts', 'server/equilibrium/keeper/types.ts',
   'contracts/equilibrium/EquilibriumKeeper.sol',

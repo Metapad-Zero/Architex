@@ -14,10 +14,10 @@
  * about a live keeper. Fork substitutions are listed in fork.ts.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
-  BaseError, ContractFunctionRevertedError, createPublicClient, createWalletClient, http, type Hex,
+  BaseError, ContractFunctionRevertedError, createPublicClient, createTestClient, createWalletClient, http, type Hex,
 } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { DEV } from '../../evm/fork'
@@ -42,6 +42,7 @@ let dir: string
 let store: KeeperStore
 let keeper: KeeperHandle
 let read: ReturnType<typeof forkReader>
+const receiptEvidence: Record<string, unknown>[] = []
 
 const client = (chain: KeeperChain) => createPublicClient({ transport: http(env[chain].url) })
 const wallet = (chain: KeeperChain) => createWalletClient({ account: operator, transport: http(env[chain].url) })
@@ -140,6 +141,129 @@ suite('EQUILIBRIUM keeper on pinned testnet forks', () => {
     expect(BigInt(base.sellProceeds)).toBeGreaterThan(BigInt(arc.buyCost))
     expect({ arc: await inventory('arc'), base: await inventory('base') }).toEqual(before)
   })
+
+  for (const variant of [
+    { name: 'hex', value: '0x5af3107a4000', wei: 100_000_000_000_000n },
+    { name: 'decimal', value: '100000000000000', wei: 100_000_000_000_000n },
+    { name: 'absent', value: undefined, wei: 0n },
+  ]) {
+    test_(`a mined Base sale with ${variant.name} l1Fee settles once after a receipt-write crash and restart`, async () => {
+      const tests = {
+        arc: createTestClient({ mode: 'anvil', transport: http(env.arc.url) }),
+        base: createTestClient({ mode: 'anvil', transport: http(env.base.url) }),
+      }
+      const pins = { arc: await tests.arc.snapshot(), base: await tests.base.snapshot() }
+      const path = join(dir, `receipt-${variant.name}.sqlite`)
+      let record = new KeeperStore(path)
+      let fee: unknown = variant.value
+      // Forward every RPC to anvil; change only the extra l1Fee field on its real mined receipts.
+      // This exercises viem's default formatter and the keeper's actual observation/settlement path.
+      const proxy = Bun.serve({
+        hostname: '127.0.0.1', port: 0,
+        async fetch(request) {
+          const payload = await request.json() as { method: string }
+          const upstream = await fetch(env.base.url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) })
+          const response = await upstream.json() as { result?: Record<string, unknown> }
+          if (payload.method === 'eth_getTransactionReceipt' && response.result) {
+            if (fee === undefined) delete response.result.l1Fee
+            else response.result.l1Fee = fee
+          }
+          return Response.json(response)
+        },
+      })
+      try {
+        const config = { ...env.config, base: { ...env.config.base, rpc: `http://127.0.0.1:${proxy.port}` } }
+        let restarted = createKeeper(config, record)
+        const settle = record.settleLeg.bind(record)
+        record.settleLeg = (plan, result, at) => {
+          if (plan.kind === 'sell') throw new Error('Crash after the mined sale receipt, before its durable settlement write.')
+          settle(plan, result, at)
+        }
+        const id = `receipt-restart-${variant.name}`
+        await rejects(restarted.runCycle(TOKENS, { id }), /Crash after the mined sale receipt/)
+        const pending = record.get(id)!
+        const buy = pending.legs.find((leg) => leg.kind === 'buy')!
+        const sell = pending.legs.find((leg) => leg.kind === 'sell')!
+        expect([buy.chain, sell.chain]).toEqual(['arc', 'base'])
+        expect(buy.state).toBe('settled')
+        expect(sell.state).toBe('sent')
+        expect(sell.result).toBeNull()
+        expect(record.sendsFor(sell.plan.id)).toHaveLength(1)
+        const hash = record.sendsFor(sell.plan.id)[0] as Hex
+        const mined = await client('base').getTransactionReceipt({ hash })
+        expect(mined.status).toBe('success')
+        expect(await legRuns('base', sell.plan.id)).toBe(1)
+        expect((await vaultState('arc')).open).toBe(1)
+
+        // Close the actual SQLite connection and create a new keeper: no in-memory leg survives.
+        record.close()
+        record = new KeeperStore(path)
+        restarted = createKeeper(config, record)
+        const balances = { arc: await inventory('arc'), base: await inventory('base') }
+        const nonces = async () => ({
+          arc: await client('arc').getTransactionCount({ address: operator.address, blockTag: 'pending' }),
+          base: await client('base').getTransactionCount({ address: operator.address, blockTag: 'pending' }),
+        })
+        const before = await nonces()
+        const malformed: unknown[] = ['', ' ', ' 16', '16 ', '-1', '+16', '1.5', '1e3', '0x', '0xGG', '16wei', -1, 1.5, Number.MAX_SAFE_INTEGER + 1, true, false, {}, [], ['16']]
+        if (variant.name === 'hex') {
+          for (const bad of malformed) {
+            fee = bad
+            await rejects(restarted.reconcile(), /Unreadable l1Fee/)
+            expect(record.get(id)!.legs.find((leg) => leg.kind === 'sell')!.result).toBeNull()
+            expect(record.totals()).toEqual({ loss: '0', net: '0', closed: 0 })
+            expect((await vaultState('arc')).open).toBe(1)
+            expect(await nonces()).toEqual(before)
+          }
+        }
+        fee = variant.value
+        const touched = await restarted.reconcile()
+        expect(touched.map((cycle) => cycle.id)).toEqual([id])
+        const closed = record.get(id)!
+        const settled = closed.legs.find((leg) => leg.kind === 'sell')!
+        const expectedWei = mined.gasUsed * mined.effectiveGasPrice + variant.wei
+        const scale = 10n ** 18n
+        const expectedCost = (expectedWei * config.base.quoteAtomsPerNative + scale - 1n) / scale
+        expect(settled.state).toBe('settled')
+        expect(settled.result!.transaction).toBe(hash)
+        expect(settled.result!.cost).toBe(expectedCost.toString())
+        expect(closed.state).toBe('closed')
+        const expectedNet = BigInt(settled.result!.amountOut) - BigInt(buy.result!.amountIn) - BigInt(buy.result!.cost) - expectedCost
+        expect(closed.net).toBe(expectedNet.toString())
+        const totals = { loss: expectedNet < 0n ? (-expectedNet).toString() : '0', net: expectedNet.toString(), closed: 1 }
+        expect(record.totals()).toEqual(totals)
+        expect((await vaultState('arc')).open).toBe(0)
+        expect({ arc: await inventory('arc'), base: await inventory('base') }).toEqual(balances)
+        const after = await nonces()
+        expect(after).toEqual({ arc: before.arc + 1, base: before.base }) // Only the close attestation.
+
+        // A second fresh process reconciles nothing, sends nothing and accounts for nothing twice.
+        record.close()
+        record = new KeeperStore(path)
+        restarted = createKeeper(config, record)
+        expect(await restarted.reconcile()).toEqual([])
+        expect(await nonces()).toEqual(after)
+        expect(record.totals()).toEqual(totals)
+        expect(record.sendsFor(sell.plan.id)).toEqual([hash])
+        expect(await legRuns('arc', buy.plan.id)).toBe(1)
+        expect(await legRuns('base', sell.plan.id)).toBe(1)
+        expect({ arc: await inventory('arc'), base: await inventory('base') }).toEqual(balances)
+        receiptEvidence.push({
+          mode: 'fork', feeSource: 'injected RPC l1Fee only; all other receipt fields and execution from anvil',
+          variant: variant.name, transaction: hash, gasUsed: mined.gasUsed.toString(), effectiveGasPrice: mined.effectiveGasPrice.toString(),
+          l1FeeWei: variant.wei.toString(), fullGasWei: expectedWei.toString(), saleCostQuoteAtoms: expectedCost.toString(),
+          totals, purchaseVaultOpen: 0, firstReconcileNonces: { before, after }, secondReconcileTouched: 0,
+          secondReconcileNonces: await nonces(), tradeLogs: { buy: 1, sell: 1 }, rejectedMalformedFees: variant.name === 'hex' ? malformed.length : 0,
+        })
+        writeFileSync('output/equilibrium-keeper-receipt-evidence.json', JSON.stringify(receiptEvidence, null, 2) + '\n')
+      } finally {
+        record.close()
+        await proxy.stop(true)
+        await tests.arc.revert({ id: pins.arc })
+        await tests.base.revert({ id: pins.base })
+      }
+    })
+  }
 
   let firstBuyCost: bigint
   let firstProceeds: bigint

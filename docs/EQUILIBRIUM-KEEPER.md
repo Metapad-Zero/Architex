@@ -94,6 +94,14 @@ ceiling. Freshness is measured against each chain's own head, in blocks and in s
 rule holds on a fork, a testnet and a live chain; the leg's on-chain deadline is in that chain's own
 clock.
 
+Finalized leg costs are `gasUsed × effectiveGasPrice + l1Fee`, converted to quote atoms once.
+The keeper's separately approved `fees.ts` matches the frozen launch adapter's numeric rules:
+nonnegative bigint, safe integer, decimal string or hex string; absent or null fees contribute zero.
+Malformed or imprecise fees refuse settlement rather than inventing a zero cost. A mined sale then
+remains in the durable record for reconciliation after the receipt becomes readable; it is never
+sent again to repair accounting. The receipt parser belongs to the keeper approval manifest, so
+changing it requires a new keeper approval without changing the launch approval.
+
 ### The durable record and recovery
 
 `server/equilibrium/keeper/store.ts`, WAL and `synchronous=FULL`, on the same durable-path guard the
@@ -157,7 +165,7 @@ configuration; the two file lists are disjoint, and a test asserts it.
 balance-delta swap and the real v3 callback ordering, driving every revert path above plus both
 happy-path round trips, and asserting a probe spends nothing.
 
-**Real venues on pinned forks** — `bun run equilibrium:keeper-fork-test`, 21 tests. Pinned anvil
+**Real venues on pinned forks** — `bun run equilibrium:keeper-fork-test`, 24 tests. Pinned anvil
 forks of Arc testnet (block 64,824,600) and Base Sepolia (block 47,513,000), with the deployed
 Architex factory and pair code, the deployed Uniswap v3 factory and pool code and the real Base
 Sepolia USDC. The Base pool is seeded through `EquilibriumExecutor`'s v3 mint callback, the same path
@@ -166,6 +174,12 @@ a launch's `pool:base` step uses. It proves:
 - both pools quoted for the same quantity, spending nothing;
 - a full cycle executing at **exactly** the quoted amounts, with vault inventory moving by those
   amounts and nothing else, and token supply untouched;
+- a mined Base sale whose settlement write fails, followed by reopening SQLite and creating a new
+  keeper: hex, decimal and absent `l1Fee` receipts settle, full leg gas is counted once, the purchase
+  vault closes, and a second restart/reconcile changes neither totals nor either sender's nonce;
+  19 malformed RPC fee values refuse settlement and send nothing before a corrected receipt closes
+  the same sale. Only the `l1Fee` field is injected through a loopback RPC proxy; execution, hashes,
+  logs, gas used and gas price are the mined fork receipt's. This is no proof of real Base L1 fees;
 - a repeat of a settled leg reverting with nothing moved, and the `LegRun` count staying at one;
 - a close attestation that never lands leaving both legs settled and the purchase vault still holding
   the position — blocking a new cycle, `resume` and `withdraw` — and one `reconcile` attesting it,
