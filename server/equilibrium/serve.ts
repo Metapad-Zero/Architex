@@ -1,11 +1,25 @@
-import { JobStore } from './store'
+import { JobStore, assertDurableStore } from './store'
 import { localAdapter } from './localAdapter'
 import { createLaunchService } from './service'
-import { publicJob } from './runner'
+import { publicJob, reconcile } from './runner'
 import { readiness } from '../../src/lib/equilibriumNetwork'
 
-const store = new JobStore(process.env.EQUILIBRIUM_DB ?? './output/equilibrium/jobs.sqlite')
-const service = createLaunchService(store, localAdapter(store))
+// Refuse to hold authorizations and prepared effects on a host that discards them.
+const dbPath = assertDurableStore(process.env.EQUILIBRIUM_DB ?? './output/equilibrium/jobs.sqlite')
+const leaseMs = Number(process.env.EQUILIBRIUM_LEASE_MS ?? '30000')
+const sweepMs = Number(process.env.EQUILIBRIUM_RECONCILE_MS ?? '30000')
+const store = new JobStore(dbPath, { leaseMs })
+const adapter = localAdapter(store)
+const service = createLaunchService(store, adapter)
+const resumed = (results: Awaited<ReturnType<typeof reconcile>>) => { if (results.length) console.log(`Resumed ${results.length} interrupted job(s): ${JSON.stringify(results)}`) }
+/**
+ * A launch interrupted by a crash resumes from durable state without a client request. Booting is
+ * not enough on its own: a dead worker still holds its lease, so restarting inside that window
+ * finds nothing to do. Sweep on a timer as well, and let the lease fence the duplicate.
+ */
+resumed(await reconcile(store, adapter))
+const sweep = setInterval(() => { void reconcile(store, adapter).then(resumed).catch((cause: unknown) => console.error('Reconcile sweep failed:', cause)) }, sweepMs)
+sweep.unref?.()
 const server = Bun.serve({ hostname: '127.0.0.1', port: Number(process.env.EQUILIBRIUM_PORT ?? '4042'), maxRequestBodySize: 16_384,
   fetch(request) {
     const path = new URL(request.url).pathname
@@ -15,4 +29,4 @@ const server = Bun.serve({ hostname: '127.0.0.1', port: Number(process.env.EQUIL
   },
 })
 console.log(`Local integration rehearsal: ${server.url} (synthetic payments and addresses only)`)
-for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => { void server.stop(true); store.close(); process.exit(0) })
+for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => { clearInterval(sweep); void server.stop(true); store.close(); process.exit(0) })

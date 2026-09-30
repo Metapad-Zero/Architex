@@ -36,6 +36,8 @@ export function localAdapter(store: JobStore, options: { pending?: Set<string>; 
         }
         const destination = job.request.destinations.find((d) => d.chain === step.chain)!
         const result: EffectResult = { operation: prepared.operation, transaction: `local:${prepared.operation}`, finalized: true, cost: step.kind === 'payment' ? '0' : step.budget }
+        // Settlement moves the whole authorized total; the platform fee is captured from it.
+        if (step.kind === 'payment') result.amount = job.total
         if (['canonical', 'manager', 'pool'].includes(step.kind)) result.address = `local:${hash([job.id, step.id, 'address']).slice(2, 42)}`
         if (step.kind === 'canonical') {
           result.amount = job.request.canonical.issuance
