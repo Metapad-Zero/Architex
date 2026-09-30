@@ -30,6 +30,7 @@ always_use_create_2_factory = true
 
 # Pinned NTT integration, isolated from the deployed DEX/v1.4 compilation profiles.
 [profile.equilibrium]
+auto_detect_remappings = false
 src = "contracts/equilibrium"
 test = "contracts-equilibrium/test"
 out = "contracts-equilibrium/out"
