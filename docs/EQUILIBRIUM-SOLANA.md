@@ -6,6 +6,10 @@ on devnet or mainnet-beta, nothing was funded, signed for a public cluster or br
 public route is open.** It is the SVM counterpart of `contracts-equilibrium/test/NttRehearsal.t.sol`
 and carries the same caveat.
 
+The hub side of this rehearsal is modelled. Where that matters below, the observed version is in
+[the Arc–Solana integration rehearsal](EQUILIBRIUM-ARC-SOLANA.md), which runs an Arc fork and this
+validator side by side and exchanges their real published bytes.
+
 ### Pins
 
 | Piece | Pin |
@@ -43,7 +47,8 @@ this is not a route proof.** A real transfer needs the live Guardian set to obse
    with zero supply and no freeze authority, then its mint authority is handed to the manager's
    `token_authority` PDA before `initialize`. The program checks that constraint itself in burning
    mode (`InvalidMintAuthority`). The rehearsal satisfies that constraint; it does not run the
-   negative case, so that refusal is read from the pinned source rather than executed here.
+   negative case, so that refusal is read from the pinned source rather than executed here. The
+   [integration rehearsal](EQUILIBRIUM-ARC-SOLANA.md) executes it.
 2. **Burning manager and peers.** `initialize` in burning mode on Wormhole chain 1, one registered
    transceiver, threshold 1, an Arc peer at chain 71 registered on both the manager and the
    transceiver. The written config is read back and asserted, including that the deployer is the
@@ -140,8 +145,10 @@ deployment records.
   for both, before anything is funded.
 - **A devnet rehearsal.** Wormhole's SVM guide uses Solana devnet, not Solana testnet, for NTT token
   creation. A public rehearsal goes there first.
-- **An observed hub side.** Until an Arc locking manager exists, hub custody cannot be read and the
-  cross-chain half of supply conservation stays modelled.
+- **An observed hub side on a public chain.** Against an Arc *fork* running the real pinned locking
+  manager, hub custody is now read rather than derived; see
+  [the integration rehearsal](EQUILIBRIUM-ARC-SOLANA.md). A deployed Arc hub is still missing, so
+  the cross-chain half of supply conservation stays fork evidence.
 - **Quote inventory.** NTT moves the canonical token only. USDC for the pool and SOL for gas have to
   be pre-positioned; SVM CCTP is a separate decision and stays closed.
 
