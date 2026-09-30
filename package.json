@@ -12,6 +12,9 @@
     "equilibrium:server": "bun run server/equilibrium/serve.ts",
     "equilibrium:rehearse": "bun run server/equilibrium/rehearse.ts",
     "equilibrium:probe": "bun run scripts/equilibrium-probe.ts",
+    "equilibrium:solana:build": "bash scripts/solana/build-programs.sh",
+    "equilibrium:solana": "bun run scripts/solana/rehearse.ts",
+    "equilibrium:solana:preview": "bun run scripts/solana/deploy-preview.ts",
     "equilibrium:contracts": "FOUNDRY_PROFILE=equilibrium forge test -vv",
     "deploy:self": "bun run ./scripts/self-deploy.ts",
     "compass:deploy": "bun run ./scripts/compass-deploy.ts",
@@ -63,6 +66,9 @@
     "viem": "^2.56.3"
   },
   "devDependencies": {
+    "@noble/curves": "^1.4.2",
+    "@noble/hashes": "^1.8.0",
+    "@solana/web3.js": "^1.99.0",
     "@types/bun": "1.4.2",
     "@types/canvas-confetti": "^1.9.0",
     "@types/node": "^24.0.0",
