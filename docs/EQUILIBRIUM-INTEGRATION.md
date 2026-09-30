@@ -59,6 +59,8 @@ The default synthetic two-chain job quotes 27.2 synthetic USDC: 1 platform fee, 
 
 ### Evidence and economics
 
+The [read-only Arc/Base deployment audit](EQUILIBRIUM-AUDIT.md) checks pinned finalized supply, proxy implementations, authorities and peers against an approved manifest. It rejects missing deployments and unauthenticated backing gaps. Passing that two-chain snapshot never opens a route or proves payment, pools or the four-chain release.
+
 Free records exclude signatures/prepared bytes. PAYMENT-RESPONSE describes settlement only; partial fulfillment is 202. Supply is derived from recorded steps, marked incomplete while submitted operations are unresolved, and is not an independent onchain audit. Platform fee, execution fees, deployed quote principal and held remainder are separate. Pending costs may already be spent; timeout does not imply refund.
 
 The unspent remainder is reported as determinate only once every submitted effect resolved; while any operation is outstanding `funds.unresolvedEffects` names it and no refund may be decided from the figure. A remainder is marked refundable only when it is determinate, the launch is not complete and the amount is above zero — for example a venue that failed before its effect was ever prepared leaves exactly its step budget plus its undeployed quote inventory. This states what is owed, and does not move funds: no refund path is open.
