@@ -132,4 +132,42 @@ describe('EQUILIBRIUM Robinhood fulfillment adapter (no forks)', () => {
     for (const [step, ...codes] of await refusals()) expect([step, ...codes]).toEqual([step, 'payment_failed', 'payment_failed', 'payment_failed'])
     expect(store.db.query('SELECT COUNT(*) AS n FROM robinhood_launches').get()).toEqual({ n: 0 })
   })
+
+  test('a released job reports what its authorization moved, and only an owed residual can be refunded', async () => {
+    const store = new JobStore(':memory:')
+    const adapter = robinhoodFulfillment(config(), store.db)
+    await journalAsset(adapter)
+    const now = Math.floor(Date.now() / 1000)
+    const message = (id: string) => { try { adapter.assertReady(request(id, now)); return null } catch (cause) { return cause instanceof LaunchError ? [cause.code, cause.message] : String(cause) } }
+    const released = (id: string, reason: string) => {
+      const job = createJob(request(id, now), adapter, now)
+      store.db.query('INSERT INTO robinhood_released(job, asset, identity, reason, block, released_at) VALUES(?,?,?,?,?,?)').run(job.id, 'unit-asset', job.identity, reason, '9', 0)
+      return job
+    }
+    const ledger = (job: string, outcome: string, received: string, refund: string) => store.db.query(`INSERT INTO robinhood_payment_ledger(job, asset, payer, outcome, authorized, received, fees_spent, residual, evidence_tx, evidence_block, refund, recorded_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).run(job, 'unit-asset', payer, outcome, '60000000', received, '0', received, outcome === 'expired_unused' ? null : '0xevidence', '9', refund, 0)
+    // A journal from before attribution: the error must not claim nothing was charged.
+    released('req-unit-legacy', 'authorization nonce spent elsewhere')
+    const legacy = message('req-unit-legacy') as string[]
+    expect(legacy[0]).toBe('payment_failed')
+    expect(legacy[1]).not.toContain('Nothing was charged')
+    expect(legacy[1]).toContain('No payment attribution was recorded')
+    const expired = released('req-unit-expired', 'authorization expired')
+    ledger(expired.id, 'expired_unused', '0', 'none')
+    expect((message('req-unit-expired') as string[])[1]).toContain('never used: nothing was charged')
+    const moved = released('req-unit-moved', 'authorization used outside the job')
+    ledger(moved.id, 'used_outside_job', '60000000', 'owed')
+    const text = (message('req-unit-moved') as string[])[1]
+    expect(text).toContain('used outside the job in 0xevidence: 60000000 USDC atoms reached the Arc executor')
+    expect(text).toContain('refund owed to the payer; no refund has been sent')
+    expect(text).not.toContain('Nothing was charged')
+    const other = released('req-unit-other-terms', 'authorization nonce spent by other terms')
+    ledger(other.id, 'spent_by_other_authorization', '0', 'none')
+    expect((message('req-unit-other-terms') as string[])[1]).toContain('nothing is attributed to this job')
+    expect(adapter.ledger(moved.id)).toMatchObject({ outcome: 'used_outside_job', received: '60000000', fees_spent: '0', residual: '60000000', refund: 'owed' })
+    // Refunds need an owed residual; neither case reaches a chain.
+    const refused = async (job: string) => { try { await adapter.refund(job); return null } catch (cause) { return cause instanceof LaunchError ? cause.code : String(cause) } }
+    expect(await refused(expired.id)).toBe('nothing_to_refund')
+    expect(await refused('0xunknown')).toBe('not_released')
+  })
 })

@@ -33,6 +33,21 @@ const labelled = (response: Response) => {
   for (const [k, v] of Object.entries(headers)) out.headers.set(k, v)
   return out
 }
+/**
+ * A released job's money comes from the attribution ledger, not from its never-completed payment
+ * step: an authorization used outside the job did move funds, and the view must say so and whether
+ * they were refunded. Jobs without a ledger row are returned unchanged.
+ */
+const attributed = (view: ReturnType<typeof publicJob>) => {
+  const l = adapter.ledger(view.id)
+  if (!l) return view
+  const held = l.refund === 'owed' || l.refund === 'submitted' ? l.residual : '0'
+  return { ...view, error: adapter.explain(view.id) ?? view.error,
+    funds: { ...view.funds, paid: l.received, feesSpent: l.fees_spent, unallocatedHeld: held, determinate: true, refundable: l.refund === 'owed', refundableAmount: l.refund === 'owed' ? l.residual : '0', unresolvedEffects: [],
+      note: l.received === '0' ? `Released (${l.outcome}): nothing reached the executor under this job's authorization.` : `Released (${l.outcome}): ${l.received} reached the executor outside the job; residual ${l.residual}, refund ${l.refund}. No other job may spend it.` },
+    attribution: { outcome: l.outcome, authorized: l.authorized, received: l.received, feesSpent: l.fees_spent, residual: l.residual, evidence: { transaction: l.evidence_tx, block: l.evidence_block },
+      refund: { state: l.refund, transaction: l.refund_tx, block: l.refund_block } } }
+}
 /** Chain-read supply. Before the job deploys the spoke there is none to read, and that is reported, not hidden. */
 const supply = () => adapter.route.supply().then((s) => JSON.parse(JSON.stringify(s, (_, v: unknown) => (typeof v === 'bigint' ? v.toString() : v))) as unknown,
   (cause: unknown) => ({ unavailable: cause instanceof Error ? cause.message.split('\n')[0] : 'unreadable' }))
@@ -40,10 +55,15 @@ const server = Bun.serve({ hostname: '127.0.0.1', port: Number(process.env.EQUIL
   async fetch(request) {
     const path = new URL(request.url).pathname
     if (path === '/api/equilibrium' && request.method === 'GET') {
-      return labelled(Response.json({ mode: adapter.mode, adapter: adapter.version, labels, jobs: store.list().map(publicJob), supply: await supply() },
+      return labelled(Response.json({ mode: adapter.mode, adapter: adapter.version, labels, jobs: store.list().map((j) => attributed(publicJob(j))), supply: await supply() },
         { headers: { 'cache-control': 'no-store' } }))
     }
-    if (path === '/x402/equilibrium' || path === '/equilibrium/jobs' || path.startsWith('/equilibrium/jobs/')) return labelled(await service(request))
+    if (path === '/x402/equilibrium' || path === '/equilibrium/jobs' || path.startsWith('/equilibrium/jobs/')) {
+      const response = await service(request)
+      if (request.method !== 'GET' || !response.ok) return labelled(response)
+      const body = await response.json() as { jobs: ReturnType<typeof publicJob>[] }
+      return labelled(Response.json({ ...body, jobs: body.jobs.map(attributed) }, { status: response.status, headers: response.headers }))
+    }
     return labelled(Response.json({ mode: adapter.mode, adapter: adapter.version, labels, endpoints: ['/x402/equilibrium', '/equilibrium/jobs', '/api/equilibrium'] }))
   },
 })

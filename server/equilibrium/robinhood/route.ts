@@ -176,7 +176,12 @@ export function robinhoodRoute(config: RobinhoodRouteConfig, db: Database, optio
     return { operation, digest: row.digest, bytes: row.bytes }
   }
 
-  async function execute(name: string, side: Side, build: () => Promise<Plan['calls']> | Plan['calls']): Promise<TransactionReceipt> {
+  /**
+   * `guard` runs inside this side's send queue, after the operation is known to be neither executed
+   * nor pending and before anything is sent, so a check of executor funds cannot interleave with
+   * another send from this process.
+   */
+  async function execute(name: string, side: Side, build: () => Promise<Plan['calls']> | Plan['calls'], guard?: (calls: Plan['calls']) => Promise<void>): Promise<TransactionReceipt> {
     const { operation, digest, bytes } = await persist(name, side, build)
     const p = JSON.parse(bytes) as Plan
     const args = [operation, digest, p.calls.map((x) => ({ target: x.target, value: BigInt(x.value), data: x.data }))] as const
@@ -186,6 +191,7 @@ export function robinhoodRoute(config: RobinhoodRouteConfig, db: Database, optio
       if (current !== ZERO) throw new LaunchError(409, 'operation_conflict', `${name} already executed with other bytes (${current}).`)
       // A crashed or stale worker's copy may still be in the mempool: wait for it instead of paying for a second send.
       if (await digestOf(side, operation, 'pending') === digest) return landed(side, operation, name)
+      await guard?.(p.calls)
       let gas: bigint
       try {
         gas = await clients[side].estimateContractGas({ account, address: p.executor, abi: executorAbi, functionName: 'execute', args, value: BigInt(p.value) })

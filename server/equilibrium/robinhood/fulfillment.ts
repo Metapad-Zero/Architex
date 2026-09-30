@@ -1,5 +1,5 @@
 import type { Database } from 'bun:sqlite'
-import { decodeEventLog, encodeAbiParameters, encodeFunctionData, getAddress, parseSignature, zeroAddress, type Address, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
+import { decodeEventLog, decodeFunctionData, encodeAbiParameters, encodeFunctionData, getAddress, parseAbi, parseSignature, zeroAddress, type Address, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import { hash, identity } from '../request'
 import { LaunchError, type Atoms, type EffectContext, type EffectResult, type Job, type LaunchRequest, type PreparedEffect, type PromotionalTokenAdapter, type Step, type StepKind } from '../types'
 import { architexFactoryAbi, architexPairAbi, erc20Abi, nttAbi, usdcAbi, v3FactoryAbi, v3PoolAbi } from '../evm/contracts'
@@ -25,6 +25,14 @@ import { robinhoodRoute, type RobinhoodRoute, type RobinhoodRouteConfig, type Si
  * deep its operation is unexecuted and the authorization has expired or its nonce is spent. A
  * released job is refused at every later step, so it cannot charge or fulfil after ownership moves.
  * A send whose outcome is unknown keeps the reservation and stays observable for the sweep.
+ *
+ * A spent nonce is not by itself proof of anything about money. Before a spent-nonce release, the
+ * finalized log that spent it is found and the transfer in that transaction is matched against the
+ * job's bound payer, executor, amount and nonce. Whatever reached the executor is recorded against
+ * the ORIGINAL job in robinhood_payment_ledger (received, fees spent, residual, refund obligation) in
+ * the same transaction as the release. Owed residuals are excluded from the executor's spendable
+ * USDC, so a successor cannot fund its own steps with them; only `refund` moves them, back to the
+ * payer, as one executor operation per job that can execute at most once.
  */
 export interface RobinhoodFulfillmentConfig {
   route: RobinhoodRouteConfig
@@ -58,7 +66,40 @@ const call = (target: Address, data: Hex, value = 0n) => ({ target, value: value
 const destination = (request: LaunchRequest, chain: 'arc' | 'robinhood') => request.destinations.find((d) => d.chain === chain)
 
 /** The job holding the asset, with what decides whether its payment can still settle. */
-interface Reservation { identity: string; job: string; payer: string; valid_before: number; settled: number }
+interface Reservation { identity: string; job: string; payer: string; value: string | null; valid_before: number; settled: number }
+/** Why a job's payment can never settle, with what (if anything) its authorization moved. */
+interface Unsettleable {
+  reason: string
+  /** The Arc block `confirmations` deep at which this was decided. */
+  block: string
+  outcome: 'expired_unused' | 'cancelled' | 'used_outside_job' | 'spent_by_other_authorization'
+  /** USDC atoms this job's own authorization moved to the Arc executor. Nonzero only for a matching transfer. */
+  received: string
+  /** The transaction that spent the nonce, when one did. */
+  evidence: string | null
+}
+/**
+ * The original job's money after a release. `refund` is 'none' when nothing arrived, 'owed' while
+ * the residual sits on the executor, 'submitted' once the refund operation executed but is not yet
+ * `confirmations` deep, and 'refunded' only with that finalized receipt.
+ */
+export interface PaymentLedger {
+  job: string
+  asset: string
+  payer: string
+  outcome: Unsettleable['outcome']
+  authorized: string
+  received: string
+  fees_spent: string
+  residual: string
+  evidence_tx: string | null
+  evidence_block: string
+  refund: 'none' | 'owed' | 'submitted' | 'refunded'
+  refund_tx: string | null
+  refund_block: string | null
+  recorded_at: number
+}
+const authorizationEvents = parseAbi(['event AuthorizationUsed(address indexed authorizer, bytes32 indexed nonce)', 'event AuthorizationCanceled(address indexed authorizer, bytes32 indexed nonce)'])
 /** Route errors that leave a send's outcome unknown. The step is observed again, never re-planned. */
 const UNCERTAIN = new Set(['broadcast_uncertain', 'pending', 'pending_dropped'])
 
@@ -78,7 +119,7 @@ interface Binding {
 /** The Robinhood transfer a job's debit and credit steps drive. One per job, bound to its allocation. */
 export const transferId = (job: Pick<Job, 'id'>) => `launch-${job.id.slice(2)}`
 
-export function robinhoodFulfillment(config: RobinhoodFulfillmentConfig, db: Database, options: FulfillmentOptions = {}): PromotionalTokenAdapter & { route: RobinhoodRoute } {
+export function robinhoodFulfillment(config: RobinhoodFulfillmentConfig, db: Database, options: FulfillmentOptions = {}): PromotionalTokenAdapter & { route: RobinhoodRoute; ledger(job: string): PaymentLedger | undefined; explain(job: string): string | undefined; refund(job: string): Promise<PaymentLedger> } {
   if (JSON.stringify(config.labels) !== JSON.stringify(FULFILLMENT_LABELS)) throw new LaunchError(503, 'route_closed', 'Fulfillment labels differ from the fork fixture labels. Fixtures cannot be relabelled.')
   const names = new Map<string, string>()
   const route = robinhoodRoute(config.route, db, { afterSend: (name) => { const step = names.get(name); if (step) options.afterSend?.(step) } })
@@ -86,7 +127,11 @@ export function robinhoodFulfillment(config: RobinhoodFulfillmentConfig, db: Dat
   const { arc, robinhood } = config.route
   const clients: Record<Side, PublicClient> = route.clients
   db.exec(`CREATE TABLE IF NOT EXISTS robinhood_launches (asset TEXT PRIMARY KEY, identity TEXT NOT NULL, job TEXT NOT NULL, payer TEXT NOT NULL, valid_before INTEGER NOT NULL, settled INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
-    CREATE TABLE IF NOT EXISTS robinhood_released (job TEXT PRIMARY KEY, asset TEXT NOT NULL, identity TEXT NOT NULL, reason TEXT NOT NULL, block TEXT NOT NULL, released_at INTEGER NOT NULL);`)
+    CREATE TABLE IF NOT EXISTS robinhood_released (job TEXT PRIMARY KEY, asset TEXT NOT NULL, identity TEXT NOT NULL, reason TEXT NOT NULL, block TEXT NOT NULL, released_at INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS robinhood_payment_ledger (job TEXT PRIMARY KEY, asset TEXT NOT NULL, payer TEXT NOT NULL, outcome TEXT NOT NULL, authorized TEXT NOT NULL, received TEXT NOT NULL,
+      fees_spent TEXT NOT NULL, residual TEXT NOT NULL, evidence_tx TEXT, evidence_block TEXT NOT NULL, refund TEXT NOT NULL, refund_tx TEXT, refund_block TEXT, recorded_at INTEGER NOT NULL);`)
+  // Journals from before attribution lack the bound amount. Such a holder is never attributed a transfer: it cannot be matched.
+  if (!db.query("SELECT 1 FROM pragma_table_info('robinhood_launches') WHERE name='value'").get()) db.exec('ALTER TABLE robinhood_launches ADD COLUMN value TEXT')
   const pinned = { labels: config.labels, asset: { ...config.route.asset, issuance: config.route.asset.issuance.toString() }, arc: { chainId: arc.chainId, executor: arc.executor, usdc: config.arc.usdc, factory: config.arc.factory },
     robinhood: { chainId: robinhood.chainId, executor: robinhood.executor, venue: robinhood.venue, quote: robinhood.quote }, limits: { outbound: config.route.limits.outbound.toString(), inbound: config.route.limits.inbound.toString() },
     pricing: { arc: config.pricing.arc.toString(), robinhood: config.pricing.robinhood.toString() }, budgets: config.budgets }
@@ -101,10 +146,23 @@ export function robinhoodFulfillment(config: RobinhoodFulfillmentConfig, db: Dat
     throw new Error(`No Robinhood fulfillment plan for ${step.id}`)
   }
   const persisted = (name: string) => db.query<{ digest: Hex }, [string]>('SELECT digest FROM robinhood_ops WHERE operation=?').get(L.op(name))
-  const boundJob = () => db.query<Reservation, [string]>('SELECT identity, job, payer, valid_before, settled FROM robinhood_launches WHERE asset=?').get(config.route.asset.id)
+  const boundJob = () => db.query<Reservation, [string]>('SELECT identity, job, payer, value, valid_before, settled FROM robinhood_launches WHERE asset=?').get(config.route.asset.id)
   const released = (job: string) => db.query<{ reason: string; block: string }, [string]>('SELECT reason, block FROM robinhood_released WHERE job=?').get(job)
-  const failed = (job: string, why: { reason: string; block: string }) =>
-    new LaunchError(409, 'payment_failed', `Job ${job}'s payment can never settle (${why.reason} at Arc block ${why.block}); its asset reservation was released. Nothing was charged. Start a new request.`)
+  const ledgerOf = (job: string) => db.query<PaymentLedger, [string]>('SELECT * FROM robinhood_payment_ledger WHERE job=?').get(job) ?? undefined
+  /** Residual USDC on the Arc executor that belongs to released jobs and has not provably left it. */
+  const owed = (except?: string) => db.query<{ residual: string; job: string }, []>("SELECT residual, job FROM robinhood_payment_ledger WHERE refund IN ('owed','submitted')").all()
+    .filter((r) => r.job !== except).reduce((n, r) => n + BigInt(r.residual), 0n)
+  /** The released job's error, stating what its authorization actually did with the payer's money. */
+  function failed(job: string, why: { reason: string; block: string }) {
+    const l = ledgerOf(job)
+    const head = `Job ${job}'s payment can never settle (${why.reason} at Arc block ${why.block}); its asset reservation was released.`
+    if (!l) return new LaunchError(409, 'payment_failed', `${head} No payment attribution was recorded for it; read the executor's USDC history before assuming nothing was charged. Start a new request.`)
+    if (l.outcome === 'expired_unused') return new LaunchError(409, 'payment_failed', `${head} Its authorization was never used: nothing was charged. Start a new request.`)
+    if (l.outcome === 'cancelled') return new LaunchError(409, 'payment_failed', `${head} The payer cancelled its authorization in ${l.evidence_tx}: nothing was charged. Start a new request.`)
+    if (l.outcome === 'spent_by_other_authorization') return new LaunchError(409, 'payment_failed', `${head} Its nonce was spent in ${l.evidence_tx} by an authorization with other terms; no transfer matching this job's authorization reached the executor, so nothing is attributed to this job. Start a new request.`)
+    const refund = l.refund === 'refunded' ? `refunded to ${l.payer} in ${l.refund_tx}` : l.refund === 'submitted' ? `refund sent in ${l.refund_tx}, awaiting finality` : 'refund owed to the payer; no refund has been sent'
+    return new LaunchError(409, 'payment_failed', `${head} Its authorization was used outside the job in ${l.evidence_tx}: ${l.received} USDC atoms reached the Arc executor and nothing was fulfilled. Fees spent: ${l.fees_spent}. Residual ${l.residual}: ${refund}. That residual is held for this job and no other job may spend it. Start a new request.`)
+  }
 
   /** Refuse any work for a job that does not hold the asset. A released job never reacquires it. */
   function assertOwner(job: Job) {
@@ -115,30 +173,96 @@ export function robinhoodFulfillment(config: RobinhoodFulfillmentConfig, db: Dat
   }
 
   /**
-   * Why a reserved payment can never settle, or null while it still could. Read at one block
-   * `confirmations` deep: the operation is unexecuted there, and either the authorization's
-   * validBefore has passed (block time only grows) or its nonce is spent by something else. Either
-   * way no later block can execute it, and the persisted bytes of it revert if anyone resends them.
+   * Why a reserved payment can never settle, or null while it still could (or while that cannot yet
+   * be proven). Read at one block `confirmations` deep: the operation is unexecuted there, and either
+   * the nonce is spent — by a finalized, identified transaction whose transfer is matched against the
+   * bound terms — or the authorization's validBefore has passed unused (block time only grows).
+   * Either way no later block can execute it, and its persisted bytes revert if anyone resends them.
    */
-  async function unsettleable(job: string, r: Pick<Reservation, 'payer' | 'valid_before'>): Promise<{ reason: string; block: string } | null> {
+  async function unsettleable(job: string, r: Pick<Reservation, 'payer' | 'value' | 'valid_before'>): Promise<Unsettleable | null> {
     const latest = await clients.arc.getBlockNumber({ cacheTime: 0 })
     const at = latest - BigInt(arc.confirmations)
     if (await route.digestOf('arc', L.op(`job:${job}:payment:arc`), at) !== ZERO) {
       db.query('UPDATE robinhood_launches SET settled=1 WHERE job=?').run(job)
       return null
     }
+    const spentAt = (blockNumber: bigint) => clients.arc.readContract({ address: config.arc.usdc, abi: usdcAbi, functionName: 'authorizationState', args: [r.payer as Address, job as Hex], blockNumber })
+    // Spent first: an authorization used before it expired moved money even if it has expired since.
+    if (await spentAt(at)) return spentBy(job, r, at, spentAt)
     const block = await clients.arc.getBlock({ blockNumber: at })
-    if (block.timestamp >= BigInt(r.valid_before)) return { reason: 'authorization expired', block: at.toString() }
-    const spent = await clients.arc.readContract({ address: config.arc.usdc, abi: usdcAbi, functionName: 'authorizationState', args: [r.payer as Address, job as Hex], blockNumber: at })
-    return spent ? { reason: 'authorization nonce spent elsewhere', block: at.toString() } : null
+    if (block.timestamp >= BigInt(r.valid_before)) return { reason: 'authorization expired', block: at.toString(), outcome: 'expired_unused', received: '0', evidence: null }
+    return null
   }
-  /** Move the job out of the reservation. Idempotent; only ever removes the named job's row. */
-  function release(job: string, why: { reason: string; block: string }) {
+  /**
+   * The finalized transaction that spent the nonce, and what it moved. The nonce flipped in exactly
+   * one block at or below `at`: step back until it is unspent, then bisect. That block must hold one
+   * AuthorizationUsed or AuthorizationCanceled log for (payer, nonce); a used authorization is
+   * attributed only if the same transaction transferred exactly the bound amount from the payer to
+   * the Arc executor. Anything less certain returns null, which keeps the reservation.
+   */
+  async function spentBy(job: string, r: Pick<Reservation, 'payer' | 'value'>, at: bigint, spentAt: (b: bigint) => Promise<boolean>): Promise<Unsettleable | null> {
+    let hi = at; let lo = at; let step = 1n
+    while (true) {
+      if (lo === 0n) return null
+      lo = lo > step ? lo - step : 0n
+      if (!await spentAt(lo)) break
+      hi = lo; step *= 2n
+    }
+    while (hi - lo > 1n) { const mid = (lo + hi) / 2n; if (await spentAt(mid)) hi = mid; else lo = mid }
+    const logs = (await Promise.all(authorizationEvents.map((event) => clients.arc.getLogs({ address: config.arc.usdc, event, args: { authorizer: r.payer as Address, nonce: job as Hex }, fromBlock: hi, toBlock: hi })))).flat()
+    if (logs.length !== 1) return null
+    const [log] = logs
+    const base = { block: at.toString(), evidence: log.transactionHash }
+    if (log.eventName === 'AuthorizationCanceled') return { ...base, reason: 'authorization cancelled', outcome: 'cancelled', received: '0' }
+    const receipt = await clients.arc.getTransactionReceipt({ hash: log.transactionHash })
+    if (receipt.status !== 'success') return null
+    // The transfer the authorization made follows its AuthorizationUsed log in the same transaction.
+    const moved = receipt.logs.filter((l) => same(l.address, config.arc.usdc) && l.logIndex > log.logIndex).flatMap((l) => {
+      try {
+        const e = decodeEventLog({ abi: erc20Abi, data: l.data, topics: l.topics })
+        return e.eventName === 'Transfer' && same(e.args.from, r.payer) ? [e.args] : []
+      } catch { return [] }
+    })[0]
+    if (!moved) return null
+    if (r.value !== null && same(moved.to, arc.executor) && moved.value === BigInt(r.value)) return { ...base, reason: 'authorization used outside the job', outcome: 'used_outside_job', received: moved.value.toString() }
+    return { ...base, reason: 'authorization nonce spent by other terms', outcome: 'spent_by_other_authorization', received: '0' }
+  }
+  /**
+   * Move the job out of the reservation and record its money, in one transaction. Idempotent: the
+   * first decision stands, and only the named job's row is ever removed. The released job ran no
+   * executor operation — release requires its payment unexecuted, and every later step requires a
+   * completed payment — so it spent no fees and its whole receipt is residual.
+   */
+  function release(job: string, r: Pick<Reservation, 'payer' | 'value'>, why: Unsettleable) {
     db.transaction(() => {
       const bound = boundJob()
       if (bound?.job === job) db.query('DELETE FROM robinhood_launches WHERE asset=? AND job=?').run(config.route.asset.id, job)
       db.query('INSERT OR IGNORE INTO robinhood_released(job, asset, identity, reason, block, released_at) VALUES(?,?,?,?,?,?)').run(job, config.route.asset.id, bound?.job === job ? bound.identity : '', why.reason, why.block, Date.now())
+      db.query(`INSERT OR IGNORE INTO robinhood_payment_ledger(job, asset, payer, outcome, authorized, received, fees_spent, residual, evidence_tx, evidence_block, refund, recorded_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).run(job, config.route.asset.id, r.payer, why.outcome, r.value ?? 'unknown', why.received, '0', why.received, why.evidence, why.block, BigInt(why.received) > 0n ? 'owed' : 'none', Date.now())
     }).immediate()
+  }
+  /**
+   * Arc USDC a plan sends out of the executor. Plans make only plain transfers (outflows) and the
+   * payment's transferWithAuthorization (an inflow from the payer); any other USDC call is refused.
+   */
+  function usdcOut(calls: { target: Address; data: Hex }[]) {
+    return calls.filter((c) => same(c.target, config.arc.usdc)).reduce((n, c) => {
+      const d = decodeFunctionData({ abi: [...erc20Abi, ...usdcAbi], data: c.data })
+      if (d.functionName === 'transferWithAuthorization') return n
+      if (d.functionName !== 'transfer') throw new Error(`Unplanned USDC call ${d.functionName}`)
+      return n + d.args[1]
+    }, 0n)
+  }
+  /** Run in the Arc send queue: a plan may spend only executor USDC that no released job is owed. */
+  function spendable(except?: string) {
+    return async (calls: { target: Address; data: Hex }[]) => {
+      const out = usdcOut(calls)
+      if (out === 0n) return
+      const held = await clients.arc.readContract({ address: config.arc.usdc, abi: erc20Abi, functionName: 'balanceOf', args: [arc.executor] })
+      const reserved = owed(except)
+      if (held - reserved < out) throw new LaunchError(409, 'residual_reserved', `The Arc executor holds ${held} USDC atoms, of which ${reserved} are owed to released jobs; this operation needs ${out}. Nothing was sent.`)
+    }
   }
 
   /** eth_call as the executor, returning the address a factory call would create. */
@@ -167,13 +291,13 @@ export function robinhoodFulfillment(config: RobinhoodFulfillmentConfig, db: Dat
       if (holder && holder.job !== job.id) {
         const why = holder.settled ? null : await unsettleable(holder.job, holder)
         if (!why) throw new LaunchError(409, 'asset_launched', `Asset ${config.route.asset.id} is already launched by job ${holder.job}. Nothing was charged.`)
-        release(holder.job, why)
+        release(holder.job, holder, why)
       }
       // Bind the asset to this job before anything can settle. The loser of a race is refused uncharged.
       db.transaction(() => {
         const bound = boundJob()
         if (bound && bound.job !== job.id) throw new LaunchError(409, 'asset_launched', `Asset ${config.route.asset.id} is already launched by job ${bound.job}. Nothing was charged.`)
-        if (!bound) db.query('INSERT INTO robinhood_launches(asset, identity, job, payer, valid_before, created_at) VALUES(?,?,?,?,?,?)').run(config.route.asset.id, job.identity, job.id, a.from, Number(a.validBefore), Date.now())
+        if (!bound) db.query('INSERT INTO robinhood_launches(asset, identity, job, payer, value, valid_before, created_at) VALUES(?,?,?,?,?,?,?)').run(config.route.asset.id, job.identity, job.id, a.from, a.value, Number(a.validBefore), Date.now())
       }).immediate()
       const { r, s, v } = parseSignature(payment.signature)
       return route.persist(name, side, () => [call(config.arc.usdc, encodeFunctionData({ abi: usdcAbi, functionName: 'transferWithAuthorization',
@@ -287,10 +411,34 @@ export function robinhoodFulfillment(config: RobinhoodFulfillmentConfig, db: Dat
     if (!same(owner, config.route[side].executor)) throw new Error(`${side} manager owner is ${owner}, not the executor`)
   }
 
+  /**
+   * Operator action: return a released job's residual to its payer. The transfer is one executor
+   * operation named for the job, persisted before sending, so repeated calls, restarts and racing
+   * operators can execute it at most once; the ledger says 'refunded' only once that execution's
+   * receipt is `confirmations` deep and shows exactly the residual going to the payer.
+   */
+  async function refund(job: string): Promise<PaymentLedger> {
+    const l = ledgerOf(job)
+    if (!l) throw new LaunchError(404, 'not_released', `Job ${job} has no payment ledger; only a released job's residual can be refunded.`)
+    if (l.refund === 'none') throw new LaunchError(409, 'nothing_to_refund', `Job ${job}'s authorization moved nothing to the executor.`)
+    if (l.refund === 'refunded') return l
+    const receipt = await route.execute(`job:${job}:refund:arc`, 'arc', () => [call(config.arc.usdc, encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [l.payer as Address, BigInt(l.residual)] }))], spendable(job))
+    const back = sum(transfersIn(receipt, config.arc.usdc).filter((t) => same(t.from, arc.executor) && same(t.to, l.payer)))
+    if (back !== l.residual) throw new Error(`Refund receipt ${receipt.transactionHash} moved ${back}, not the residual ${l.residual}`)
+    const latest = await clients.arc.getBlockNumber({ cacheTime: 0 })
+    const final = latest >= receipt.blockNumber + BigInt(arc.confirmations)
+    db.query("UPDATE robinhood_payment_ledger SET refund=?, refund_tx=?, refund_block=? WHERE job=? AND refund <> 'refunded'").run(final ? 'refunded' : 'submitted', receipt.transactionHash, receipt.blockNumber.toString(), job)
+    return ledgerOf(job)!
+  }
+
   return {
     mode: 'fork',
     version,
     route,
+    ledger: ledgerOf,
+    /** A released job's error as of now. The job's stored error is a snapshot and goes stale once a refund moves. */
+    explain(job: string) { const gone = released(job); return gone ? failed(job, gone).message : undefined },
+    refund,
     terms: { chainId: arc.chainId, asset: config.arc.usdc, payTo: arc.executor, name: 'USDC', version: '2' },
     assertReady(request) {
       const chains = request.destinations.map((d) => d.chain).join(',')
@@ -325,8 +473,9 @@ export function robinhoodFulfillment(config: RobinhoodFulfillmentConfig, db: Dat
       const b = parse(context, prepared)
       const state = await settled(b)
       if (state === 'absent' && step.kind === 'payment') {
-        const why = await unsettleable(job.id, boundJob()!)
-        if (why) { release(job.id, why); throw failed(job.id, why) }
+        const bound = boundJob()!
+        const why = await unsettleable(job.id, bound)
+        if (why) { release(job.id, bound, why); throw failed(job.id, why) }
       }
       if (state === 'absent' || state === 'pending') return state
       if (step.kind === 'payment') db.query('UPDATE robinhood_launches SET settled=1 WHERE job=?').run(job.id)
@@ -345,7 +494,7 @@ export function robinhoodFulfillment(config: RobinhoodFulfillmentConfig, db: Dat
       try {
         if (context.step.kind === 'debit') await route.advance(b.transfer!, 'attested')
         else if (context.step.kind === 'credit') await route.advance(b.transfer!)
-        else await route.execute(b.name, b.side, () => { throw new Error(`${b.name} bytes are not journalled; refusing to re-plan during broadcast`) })
+        else await route.execute(b.name, b.side, () => { throw new Error(`${b.name} bytes are not journalled; refusing to re-plan during broadcast`) }, b.side === 'arc' ? spendable() : undefined)
       } catch (cause) {
         // Possibly on the wire: return so the job records a submission and observes it, keeping the
         // reservation and the sweep's claim on it. A definite refusal still fails the attempt.

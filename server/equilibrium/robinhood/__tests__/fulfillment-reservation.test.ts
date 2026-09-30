@@ -7,10 +7,13 @@
  *
  *   EQUILIBRIUM_ROBINHOOD_FULFILLMENT=1 bun test server/equilibrium/robinhood/__tests__/fulfillment-reservation.test.ts
  *
- * Two assets on the same forks, one per scenario, each with its own journal and service config:
+ * Three assets on the same forks, one per scenario, each with its own journal and service config:
  * - "uncertain": the payment send has no receipt (Arc automine off), so its outcome is unknown.
  * - "failed": the payer's balance is gone, so the send reverts in estimation, and then the
  *   authorization expires: the payment can provably never settle.
+ * - "transferred": Arc confirmations 2. The payer submits the job's signed authorization directly,
+ *   so its funds reach the executor outside the job. The release must attribute them to the
+ *   original job, a successor must not spend them, and only one refund may ever return them.
  *
  * Evidence is written to output/robinhood-reservation-evidence.json.
  */
@@ -45,6 +48,7 @@ interface Scenario { name: string; config: RobinhoodFulfillmentConfig; dir: stri
 let env: FulfillmentForkEnvironment
 let uncertain: Scenario
 let failed: Scenario
+let transferred: Scenario
 let service: ChildProcess | null = null
 const evidence: Record<string, unknown> = {}
 const json = (v: unknown): unknown => JSON.parse(JSON.stringify(v, (_, x: unknown) => (typeof x === 'bigint' ? x.toString() : x)))
@@ -92,9 +96,11 @@ async function executions(job: Job) {
   return out
 }
 
-async function scenario(name: string, assetId: string): Promise<Scenario> {
+async function scenario(name: string, assetId: string, arcConfirmations?: number): Promise<Scenario> {
   // Receipts are instant with automine on; a short wait is what makes a withheld receipt an unknown outcome.
-  const config: RobinhoodFulfillmentConfig = { ...env.fulfillment, route: { ...env.fulfillment.route, asset: { ...env.fulfillment.route.asset, id: assetId }, receiptTimeoutMs: 5000 } }
+  const route = env.fulfillment.route
+  const config: RobinhoodFulfillmentConfig = { ...env.fulfillment, route: { ...route, asset: { ...route.asset, id: assetId }, receiptTimeoutMs: 5000,
+    arc: { ...route.arc, confirmations: arcConfirmations ?? route.arc.confirmations } } }
   const dir = mkdtempSync(join(process.cwd(), 'output', `robinhood-reservation-${name}-`))
   const dbPath = join(dir, 'jobs.sqlite')
   const configPath = join(dir, 'fulfillment.json')
@@ -107,10 +113,10 @@ async function scenario(name: string, assetId: string): Promise<Scenario> {
   return { name, config, dir, dbPath, configPath, store, adapter }
 }
 
-function startService(s: Scenario): Promise<ChildProcess> {
+function startService(s: Scenario, extra: Record<string, string> = {}): Promise<ChildProcess> {
   const child = spawn('bun', ['run', join(import.meta.dir, '..', 'serve.ts')], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env,
     EQUILIBRIUM_ROBINHOOD_FULFILLMENT_CONFIG: s.configPath, EQUILIBRIUM_DB: s.dbPath, EQUILIBRIUM_PORT: String(PORTS.service),
-    EQUILIBRIUM_LEASE_MS: String(LEASE_MS), EQUILIBRIUM_RECONCILE_MS: '1000' } })
+    EQUILIBRIUM_LEASE_MS: String(LEASE_MS), EQUILIBRIUM_RECONCILE_MS: '1000', ...extra } })
   let log = ''
   child.stdout.on('data', (d) => { log += d })
   child.stderr.on('data', (d) => { log += d })
@@ -187,6 +193,7 @@ suite('EQUILIBRIUM Robinhood launch job: asset reservation on the mixed Arc-test
     mkdirSync(join(process.cwd(), 'output'), { recursive: true })
     uncertain = await scenario('uncertain', 'equilibrium-robinhood-reservation-uncertain')
     failed = await scenario('failed', 'equilibrium-robinhood-reservation-failed')
+    transferred = await scenario('transferred', 'equilibrium-robinhood-reservation-transferred', 2)
     Object.assign(evidence, { labels: env.fulfillment.labels, ports: PORTS,
       forks: { arc: { url: env.arc.url, chainId: env.config.arc.chainId, note: 'Arc TESTNET fork' }, robinhood: { url: env.robinhood.url, chainId: env.config.robinhood.chainId, block: env.robinhood.block.toString(), note: 'Robinhood MAINNET fork' } },
       setupSeconds: (Date.now() - started) / 1000 })
@@ -196,6 +203,7 @@ suite('EQUILIBRIUM Robinhood launch job: asset reservation on the mixed Arc-test
     await stopService()
     uncertain?.store.close()
     failed?.store.close()
+    transferred?.store.close()
     env?.stop()
     if (enabled) writeFileSync(join(process.cwd(), 'output', 'robinhood-reservation-evidence.json'), JSON.stringify(json(evidence), null, 2) + '\n')
   }, 30_000)
@@ -332,5 +340,132 @@ suite('EQUILIBRIUM Robinhood launch job: asset reservation on the mixed Arc-test
       releasedJob: { http: viaHttp.body.error, worker: lastLine(viaWorker.out).code, direct, replays }, afterRestart: [afterRestart.body.error, another.body.error],
       winner: publicJob(won), executions: counts, charged: won.total, supply: json(sup) }
     await stopService()
+  })
+  test_('a payment transferred outside the job is attributed to the original job, held from successors and refunded once', async () => {
+    const s = transferred
+    const X = env.config.arc.executor
+    const confirmations = s.config.route.arc.confirmations
+    expect(confirmations).toBe(2)
+    service = await startService(s)
+    const funded = await balance(env.payer)
+    const x = await quoted(s, launchRequest('reservation-transferred-x'))
+    // The payment cannot settle through the job while the payer is empty.
+    await payerTo(0n)
+    const attempt = await post(x.request, x.header)
+    expect([attempt.status, attempt.body.error]).toEqual([503, 'reconciliation_required'])
+    expect(holder(s)).toEqual({ job: x.job.id, settled: 0 })
+    await payerTo(funded)
+    // The payer submits X's own signed authorization directly: the funds reach the executor outside the job.
+    const executorBefore = await balance(X)
+    const signed = s.store.get(x.job.id)!.payment!
+    const a = signed.authorization
+    const { r, s: sig, v } = parseSignature(signed.signature)
+    const direct = createWalletClient({ account: payerKey, transport: http(env.config.arc.rpc) })
+    const spend = await client('arc').waitForTransactionReceipt({ hash: await direct.writeContract({ account: payerKey, chain: null, address: usdc(), abi: usdcAbi, functionName: 'transferWithAuthorization',
+      args: [a.from, a.to, BigInt(a.value), BigInt(a.validAfter), BigInt(a.validBefore), a.nonce, Number(v ?? 27n), r, sig] }) })
+    expect(spend.status).toBe('success')
+    expect(await balance(X)).toBe(executorBefore + BigInt(x.job.total))
+    // Not yet final: the reservation holds and nothing is attributed or released.
+    const depth: { mined: number; status: number; error?: string; holder: unknown }[] = []
+    for (let mined = 0; mined <= confirmations; mined++) {
+      if (mined) await client('arc').mine({ blocks: 1 })
+      const reply = await post(x.request, x.header)
+      depth.push({ mined, status: reply.status, error: reply.body.error, holder: holder(s) })
+    }
+    expect(depth.slice(0, confirmations).map((d) => [d.status, d.error])).toEqual(Array.from({ length: confirmations }, () => [503, 'reconciliation_required']))
+    expect(depth[confirmations].status).toBe(409)
+    expect(depth[confirmations].error).toBe('payment_failed')
+    expect(holder(s)).toBeNull()
+    const ledger = s.adapter.ledger(x.job.id)!
+    expect(ledger).toMatchObject({ outcome: 'used_outside_job', authorized: x.job.total, received: x.job.total, fees_spent: '0', residual: x.job.total, evidence_tx: spend.transactionHash, refund: 'owed', refund_tx: null })
+    expect(BigInt(ledger.evidence_block)).toBe(spend.blockNumber)
+    expect(releasedRow(s, x.job.id)?.reason).toBe('authorization used outside the job')
+    const released = s.store.get(x.job.id)!
+    expect(released.steps.every((st, i) => i === 0 ? st.state === 'prepared' : st.state === 'planned')).toBe(true)
+    expect(released.error).toContain(`${x.job.total} USDC atoms reached the Arc executor`)
+    expect(released.error).not.toContain('Nothing was charged')
+    // The public view reports the transferred funds and the owed refund, not paid: 0.
+    const view = async () => (await (await fetch(`${SERVICE}/equilibrium/jobs/${x.job.id}`)).json() as { jobs: { error: string; funds: { paid: string; unallocatedHeld: string; refundable: boolean; refundableAmount: string }; attribution: { outcome: string; refund: { state: string; transaction: string | null; block: string | null } } }[] }).jobs[0]
+    const owedView = await view()
+    expect(owedView.funds).toMatchObject({ paid: x.job.total, unallocatedHeld: x.job.total, refundable: true, refundableAmount: x.job.total })
+    expect(owedView.attribution).toMatchObject({ outcome: 'used_outside_job', refund: { state: 'owed', transaction: null, block: null } })
+    // Repeated reconciliation — HTTP, a separate worker, a restart — changes nothing in the ledger.
+    const again = await Promise.all([post(x.request, x.header), post(x.request, x.header)])
+    const viaWorker = await worker(s, x.job.id)
+    await stopService('SIGKILL')
+    service = await startService(s)
+    await sleep(3000)
+    const afterRestart = await post(x.request, x.header)
+    expect([...again.map((g) => g.body.error), lastLine(viaWorker.out).code, afterRestart.body.error]).toEqual(['payment_failed', 'payment_failed', 'payment_failed', 'payment_failed'])
+    expect(s.store.db.query('SELECT COUNT(*) AS n FROM robinhood_payment_ledger').get()).toEqual({ n: 1 })
+    expect(s.adapter.ledger(x.job.id)).toEqual(ledger)
+    expect((await executions(released))['payment:arc']).toBe(0)
+    await stopService()
+    // A successor pays for itself. Crash it right after its payment, then take the executor's
+    // USDC down to X's residual plus less than Y's pool quote: only X's money could fund the pool.
+    service = await startService(s, { EQUILIBRIUM_ROBINHOOD_KILL_AFTER_SEND: 'payment:arc' })
+    const y = await quoted(s, launchRequest('reservation-transferred-y'))
+    await post(y.request, y.header).catch(() => undefined)
+    await exited(service)
+    service = null
+    await client('arc').mine({ blocks: confirmations })
+    const poolQuote = BigInt(y.request.destinations.find((d) => d.chain === 'arc')!.poolQuote)
+    const ownFunds = await balance(X) - BigInt(ledger.residual)
+    expect(ownFunds).toBe(executorBefore + BigInt(y.job.total))
+    const drain = ownFunds - poolQuote / 2n
+    await s.adapter.route.execute('test:drain-successor-funds', 'arc', () => [{ target: usdc(), value: '0', data: encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [sink, drain] }) }])
+    expect(await balance(X)).toBe(BigInt(ledger.residual) + poolQuote / 2n)
+    // The killed service's lease must lapse before another worker may claim the job.
+    await sleep(LEASE_MS + 500)
+    const blocked = await worker(s, y.job.id)
+    expect(lastLine(blocked.out)).toMatchObject({ ok: false, code: 'residual_reserved' })
+    let yJob = s.store.get(y.job.id)!
+    expect(yJob.steps.find((st) => st.id === 'pool:arc')!.state).not.toBe('complete')
+    expect(await balance(X)).toBe(BigInt(ledger.residual) + poolQuote / 2n)
+    // Restore the successor's own funds; it finishes without touching X's residual.
+    await client('arc').waitForTransactionReceipt({ hash: await createWalletClient({ account: operator, transport: http(env.config.arc.rpc) }).writeContract({ account: operator, chain: null, address: usdc(), abi: usdcAbi, functionName: 'mint', args: [X, drain] }) })
+    service = await startService(s)
+    const miner = setInterval(() => { void client('arc').mine({ blocks: 1 }).catch(() => undefined) }, 700)
+    try {
+      await post(y.request, y.header)
+      yJob = await waitFor(s, y.job.id, (j) => j.state === 'complete')
+    } finally { clearInterval(miner) }
+    expect(yJob.state).toBe('complete')
+    const yCounts = await executions(yJob)
+    for (const [step, n] of Object.entries(yCounts)) expect([step, n]).toEqual([step, 1])
+    expect(yJob.settlement?.amount).toBe(yJob.total)
+    expect(publicJob(yJob).funds.paid).toBe(yJob.total)
+    expect(await balance(X)).toBe(BigInt(ledger.residual) + executorBefore + BigInt(yJob.total) - poolQuote)
+    expect(s.adapter.ledger(x.job.id)).toEqual(ledger)
+    const sup = await supply(s)
+    expect(sup).toEqual({ spokeSupply: 10_000_000_000n, custody: 10_000_000_000n, pending: 0n, reconciled: true })
+    await stopService()
+    // The operator refund: concurrent calls, a fresh process's adapter, and repeats execute it once.
+    const payerBeforeRefund = await balance(env.payer)
+    const [first, second] = await Promise.all([s.adapter.refund(x.job.id), s.adapter.refund(x.job.id)])
+    expect(first.refund_tx).toBe(second.refund_tx)
+    expect(first.refund).toBe('submitted')
+    const reopened = new JobStore(s.dbPath, { leaseMs: LEASE_MS })
+    const restarted = robinhoodFulfillment(s.config, reopened.db)
+    expect((await restarted.refund(x.job.id)).refund).toBe('submitted')
+    await client('arc').mine({ blocks: confirmations })
+    const done = await restarted.refund(x.job.id)
+    expect(done).toMatchObject({ refund: 'refunded', refund_tx: first.refund_tx, residual: x.job.total })
+    expect(await s.adapter.refund(x.job.id)).toEqual(done)
+    reopened.close()
+    const refundOp = s.adapter.route.layout.op(`job:${x.job.id}:refund:arc`)
+    const refundLogs = await client('arc').getLogs({ address: X, event: executorAbi.find((e) => e.type === 'event' && e.name === 'Executed')!, args: { operation: refundOp }, fromBlock: env.config.arc.fromBlock })
+    expect(refundLogs.length).toBe(1)
+    expect(await balance(env.payer)).toBe(payerBeforeRefund + BigInt(x.job.total))
+    expect(await balance(X)).toBe(executorBefore + BigInt(yJob.total) - poolQuote)
+    const refundedView = await (async () => { service = await startService(s); try { return await view() } finally { await stopService() } })()
+    expect(refundedView.funds).toMatchObject({ paid: x.job.total, unallocatedHeld: '0', refundable: false, refundableAmount: '0' })
+    expect(refundedView.attribution.refund).toEqual({ state: 'refunded', transaction: first.refund_tx, block: done.refund_block })
+    expect(refundedView.error).toContain(`refunded to ${x.job.request.payer} in ${first.refund_tx}`)
+    expect(owedView.error).toContain('refund owed to the payer; no refund has been sent')
+    evidence.transferred = { job: x.job.id, arcConfirmations: confirmations, directSpend: { tx: spend.transactionHash, block: spend.blockNumber.toString() }, depth,
+      ledgerAtRelease: ledger, owedView, repeated: { http: again.map((g) => g.body.error), worker: lastLine(viaWorker.out).code, afterRestart: afterRestart.body.error },
+      successor: { job: y.job.id, blocked: lastLine(blocked.out), drained: drain.toString(), executions: yCounts, charged: yJob.total, settlement: yJob.settlement, supply: json(sup) },
+      refund: { concurrent: [first.refund_tx, second.refund_tx], final: done, executedLogs: refundLogs.length, refundedView } }
   })
 })
