@@ -1,7 +1,7 @@
 import { Database } from 'bun:sqlite'
-import { chmodSync, mkdirSync, realpathSync } from 'node:fs'
+import { chmodSync, lstatSync, mkdirSync, readlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { basename, dirname, join, resolve } from 'node:path'
+import { dirname, isAbsolute, resolve } from 'node:path'
 import type { Hex } from 'viem'
 import { LaunchError, type Job, type JobStorage, type Settlement } from './types'
 
@@ -14,28 +14,42 @@ const EPHEMERAL = [/^(\/private)?\/tmp(\/|$)/, /^(\/private)?\/var\/tmp(\/|$)/, 
 /** Environment markers of a host whose local filesystem does not survive the next request. */
 const SERVERLESS = ['AWS_LAMBDA_FUNCTION_NAME', 'LAMBDA_TASK_ROOT', 'VERCEL', 'FUNCTIONS_WORKER_RUNTIME', 'K_SERVICE']
 
+/** A symlink chain longer than this is a loop, or near enough to one to refuse. */
+const MAX_SYMLINK_HOPS = 40
+
 /**
- * Resolve every symlink that already exists on the path. The database file itself normally does
- * not exist yet, so resolve the deepest existing ancestor and rejoin the remainder.
+ * Resolve the path the filesystem will actually write to, following symlinks even when their
+ * target does not exist yet. `realpathSync` cannot do this: it throws on a dangling symlink, and
+ * treating that failure as "nothing left to resolve" let `store -> /tmp/jobs.sqlite` past the
+ * guard and then created the database in /tmp anyway. `lstat` does not follow the link, so a
+ * dangling one is still reported as a symlink and its target is still readable.
  */
 export function canonicalPath(path: string): string {
-  const absolute = resolve(path)
-  const tail: string[] = []
-  let current = absolute
-  for (;;) {
-    try { return join(realpathSync(current), ...tail) } catch {
-      const parent = dirname(current)
-      if (parent === current) return absolute
-      tail.unshift(basename(current))
-      current = parent
-    }
+  const pending = resolve(path).split('/').filter(Boolean).reverse()
+  const resolved: string[] = []
+  let hops = 0
+  while (pending.length) {
+    const name = pending.pop()!
+    if (name === '.') continue
+    if (name === '..') { resolved.pop(); continue }
+    const candidate = `/${[...resolved, name].join('/')}`
+    let target: string | undefined
+    try { if (lstatSync(candidate).isSymbolicLink()) target = readlinkSync(candidate) } catch { /* nothing here to follow */ }
+    if (target === undefined) { resolved.push(name); continue }
+    if (++hops > MAX_SYMLINK_HOPS) throw new LaunchError(503, 'invalid_configuration', `${path} resolves through a symlink loop; give EQUILIBRIUM_DB a real path.`)
+    // Restart from root with the link's target in front of whatever is still unresolved.
+    const absolute = isAbsolute(target) ? target : `/${[...resolved, target].join('/')}`
+    pending.push(...resolve(absolute).split('/').filter(Boolean).reverse())
+    resolved.length = 0
   }
+  return `/${resolved.join('/')}`
 }
 
 /**
  * Refuse a job store that cannot outlive the request that wrote it. A prepared-but-unobserved
  * effect in a discarded store is an unrecoverable charge or duplicate issuance, so this is
- * checked at startup rather than discovered during a restart.
+ * checked at startup rather than discovered during a restart. Returns the canonical path, which
+ * callers open in place of the configured name so the store that is opened is the one checked.
  */
 export function assertDurableStore(path: string, env: Record<string, string | undefined> = process.env): string {
   const marker = SERVERLESS.find((name) => env[name])
