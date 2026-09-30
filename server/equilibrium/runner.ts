@@ -150,25 +150,34 @@ export async function reconcile(store: JobStorage, adapter: PromotionalTokenAdap
 /** Free public projection. Payment signatures and prepared transaction bytes never leave the store. */
 export function publicJob(job: Job) {
   const settled = job.steps[0].state === 'complete'
+  const fulfillment = job.state === 'complete' ? 'complete' : job.steps.some((s) => s.kind !== 'payment' && s.state !== 'planned') ? 'incomplete' : 'not_started'
   const feesSpent = job.steps.filter((s) => s.kind !== 'payment').reduce((n, s) => n + BigInt(s.result?.cost ?? '0'), 0n)
   const feeCaptured = settled ? BigInt(job.steps[0].budget) : 0n
   const quoteDeployed = job.steps.filter((s) => s.kind === 'pool' && s.state === 'complete').reduce((n, s) => n + BigInt(job.request.destinations.find((d) => d.chain === s.chain)!.poolQuote), 0n)
   const unsettledEffects = job.steps.filter((s) => s.state === 'prepared').map((s) => s.id)
+  // Broadcasting can change external supply before its receipt reaches this journal. During
+  // that gap even previously finalized vector entries are stale, so withhold the whole vector.
+  const supplyUnresolved = job.steps.some((s) => ['canonical', 'debit', 'credit'].includes(s.kind) && s.state === 'prepared')
   const custody = job.steps.filter((s) => s.kind === 'debit' && s.state === 'complete').reduce((n, s) => n + BigInt(job.request.destinations.find((d) => d.chain === s.chain)!.amount), 0n)
   const remote = job.steps.filter((s) => s.kind === 'credit' && s.state === 'complete').reduce((n, s) => n + BigInt(job.request.destinations.find((d) => d.chain === s.chain)!.amount), 0n)
   const issued = job.steps.find((s) => s.kind === 'canonical')?.state === 'complete'
   const unallocated = settled ? BigInt(job.total) - feeCaptured - feesSpent - quoteDeployed : 0n
   // Unspent funds are a determinate figure only once every submitted effect resolved. While an
   // operation is outstanding its cost may already be spent, so no refund may be decided from it.
-  const determinate = settled && unsettledEffects.length === 0
-  const refundable = determinate && job.state !== 'complete' && unallocated > 0n
+  const determinate = unsettledEffects.length === 0
+  const refundable = settled && determinate && job.state !== 'complete' && unallocated > 0n
+  // These are the same durable eligibility markers the unattended store sweep uses. A live
+  // lease delays the sweep's claim, but the reader should keep observing work already underway.
+  const automatic = !!job.payment && job.sweep !== 'blocked' && job.state !== 'complete'
+  const recoveryReason = job.state === 'complete' ? 'complete' : job.sweep === 'blocked' ? 'blocked' : !job.payment ? 'awaiting_payment' : unsettledEffects.length ? 'pending_evidence' : 'authorized_work'
   return { id: job.id, mode: job.mode, state: job.state, error: job.error,
-    payment: { settled, transaction: job.steps[0].result?.transaction ?? null, fulfillment: job.state === 'complete' ? 'complete' : 'incomplete' },
+    payment: { settled, transaction: job.steps[0].result?.transaction ?? null, fulfillment },
+    recovery: { automatic, reason: recoveryReason },
     // Settlement is inspectable on its own: it proves the charge, not the launch.
-    settlement: job.settlement ? { ...job.settlement, fulfillment: job.state === 'complete' ? 'complete' : 'incomplete' } : null,
+    settlement: job.settlement ? { ...job.settlement, fulfillment } : null,
     funds: { paid: settled ? job.total : '0', platformFee: feeCaptured.toString(), feesSpent: feesSpent.toString(), quoteInventoryDeployed: quoteDeployed.toString(), unallocatedHeld: unallocated.toString(),
       determinate, refundable, refundableAmount: refundable ? unallocated.toString() : '0', unresolvedEffects: unsettledEffects,
-      note: determinate ? 'Every submitted effect resolved, so the unspent remainder is final.' : 'Unallocated funds can include pending costs. Reconcile all submitted effects before a refund.' },
-    supply: { evidence: unsettledEffects.length ? 'incomplete' : 'recorded_steps', issuance: issued ? job.request.canonical.issuance : '0', custody: custody.toString(), remote: remote.toString(), pending: (custody - remote).toString(), canonicalOutsideCustody: issued ? (BigInt(job.request.canonical.issuance) - custody).toString() : '0', reconciled: issued && !unsettledEffects.length },
+      note: !determinate ? 'Unallocated funds can include pending costs. Reconcile all submitted effects before a refund.' : settled ? 'Every submitted effect resolved, so the unspent remainder is final.' : 'No payment is settled and no submitted effects are outstanding.' },
+    supply: { evidence: supplyUnresolved ? 'withheld' : issued ? 'recorded_steps' : 'not_started', issuance: supplyUnresolved ? null : issued ? job.request.canonical.issuance : '0', custody: supplyUnresolved ? null : custody.toString(), remote: supplyUnresolved ? null : remote.toString(), pending: supplyUnresolved ? null : (custody - remote).toString(), canonicalOutsideCustody: supplyUnresolved ? null : issued ? (BigInt(job.request.canonical.issuance) - custody).toString() : '0', reconciled: issued && !unsettledEffects.length },
     steps: job.steps.map(({ id, kind, chain, state, budget, result }) => ({ id, kind, chain, state, budget, result })) }
 }

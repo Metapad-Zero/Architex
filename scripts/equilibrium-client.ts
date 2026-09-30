@@ -12,7 +12,7 @@ import { decodePaymentResponseHeader, encodePaymentSignatureHeader } from '@x402
 import type { PaymentRequirements } from '@x402/core/types'
 import { privateKeyToAccount } from 'viem/accounts'
 import type { Hex } from 'viem'
-import { usdcAmount as usdc, type PublicJob } from '../src/lib/equilibriumRecord'
+import { fulfillment, recoveryNote, supplyNote, supplyWithheld, usdcAmount as usdc, type PublicJob } from '../src/lib/equilibriumRecord'
 
 export const DEFAULT_SERVER = 'http://127.0.0.1:4042'
 /** The only payment domain this client will sign for: the local rehearsal's synthetic USDC. */
@@ -150,9 +150,11 @@ export function describe(job: PublicJob): string[] {
   const unit = job.mode === 'local' ? 'synthetic USDC' : 'USDC'
   const lines = [`job ${job.id} · mode ${job.mode}${job.mode === 'local' ? ' (synthetic payment and addresses)' : ''} · state ${job.state}`]
   lines.push(job.settlement ? `settlement: ${usdc(job.settlement.amount)} ${unit} (${job.settlement.amount} atoms) in ${job.settlement.transaction}` : `settlement: ${job.payment?.settled ? 'settled, no separate settlement record (older job)' : 'none'}`)
-  lines.push(`fulfillment: ${job.state === 'complete' ? 'complete' : 'incomplete'}${job.error ? ` · last attempt: ${job.error}` : ''}`)
+  lines.push(`fulfillment: ${fulfillment(job) === 'not_started' ? 'not started' : fulfillment(job)}${job.error ? ` · last attempt: ${job.error}` : ''}`)
+  lines.push(`recovery: ${recoveryNote(job)}`)
   const funds = job.funds
   if (funds) lines.push(`funds: fee ${usdc(funds.platformFee ?? '0')} · execution ${usdc(funds.feesSpent ?? '0')} · pool quote ${usdc(funds.quoteInventoryDeployed ?? '0')} · held ${usdc(funds.unallocatedHeld ?? '0')} ${unit}${funds.determinate === undefined ? ' (older record: finality not reported)' : funds.determinate ? '' : ' (not final: operations outstanding)'}`)
+  lines.push(supplyWithheld(job) ? `supply: ${supplyNote(job)}` : `supply: issuance ${job.supply.issuance ?? 'withheld'} · custody ${job.supply.custody ?? 'withheld'} · remote ${job.supply.remote ?? 'withheld'} · pending ${job.supply.pending ?? 'withheld'} atoms. ${supplyNote(job)}`)
   lines.push(`steps: ${job.steps.map((s) => `${s.id}=${s.state}`).join(' ')}`)
   return lines
 }
@@ -201,7 +203,7 @@ async function main(argv: string[]) {
     if (!key || !/^0x[0-9a-fA-F]{64}$/.test(key)) throw new ClientError('usage', 'Set EQUILIBRIUM_LOCAL_KEY to a local test key. It signs only for the synthetic chain 31337 domain.')
     const result = await launch(server, readRequest(), key as Hex, maxTotal)
     print(result.job)
-    if (!json) console.log(result.status === 200 ? 'HTTP 200: fulfilled.' : 'HTTP 202: settled or held, fulfillment incomplete. Read status; the service resumes it. Resending the same request never charges again.')
+    if (!json) console.log(result.status === 200 ? 'HTTP 200: fulfilled.' : 'HTTP 202: authorization held or settled. Read status and recovery eligibility before resuming. Resending the same request never charges again.')
     if (!json && result.settlement) console.log(`payment-response: settlement ${result.settlement.transaction} on ${result.settlement.network} (settlement only)`)
   } else if (command === 'status') {
     const id = rest.find((a) => !a.startsWith('--') && a !== flag('--server'))

@@ -4,6 +4,8 @@ import { localAdapter } from '../localAdapter'
 import { createLaunchService } from '../service'
 import { ClientError, describe as describeJob, launch, quote, status, template, usdc } from '../../../scripts/equilibrium-client'
 import { account } from './fixtures'
+import { reconcile } from '../runner'
+import { shouldRefresh } from '../../../src/lib/equilibriumRecord'
 
 // The same local test key the service fixtures use. It signs only for the synthetic chain 31337 domain.
 const KEY = '0x0000000000000000000000000000000000000000000000000000000000000123'
@@ -38,6 +40,12 @@ describe('EQUILIBRIUM client against the local service', () => {
     expect(q.accepts[0].extra?.authorizationNonce).toBe(q.jobId)
     expect(signed).toHaveLength(0)
     expect(store.get(q.jobId)?.payment).toBeUndefined()
+    const record = await status(SERVER, q.jobId, fetcher)
+    const lines = describeJob(record).join('\n')
+    expect(lines).toContain('fulfillment: not started')
+    expect(lines).toContain('Issuance has not started')
+    expect(lines).not.toContain('operations outstanding')
+    expect(shouldRefresh([record])).toBe(false)
     store.close()
   })
 
@@ -70,7 +78,8 @@ describe('EQUILIBRIUM client against the local service', () => {
   })
 
   test('a pending step returns 202: settled, fulfillment incomplete, and the record says so', async () => {
-    const { fetcher, store } = harness({ pending: new Set(['credit:base']) })
+    const pending = new Set(['credit:base'])
+    const { fetcher, store, signed } = harness({ pending })
     const request = template(account.address, { requestId: 'client-partial-1', now })
     const result = await launch(SERVER, request, KEY, '30000000', fetcher, now)
     expect(result.status).toBe(202)
@@ -79,6 +88,18 @@ describe('EQUILIBRIUM client against the local service', () => {
     expect(lines).toContain('settlement: 27.2 synthetic USDC')
     expect(lines).toContain('fulfillment: incomplete')
     expect(lines).toContain('not final')
+    expect(lines).toContain('Supply amounts withheld until finalized receipts are recorded')
+    expect(lines).not.toContain('remote 0')
+    expect(shouldRefresh([result.job])).toBe(true)
+    pending.clear()
+    await reconcile(store, localAdapter(store), () => now * 1000)
+    const recovered = await status(SERVER, result.job.id, fetcher)
+    expect(recovered.state).toBe('complete')
+    expect(recovered.supply.remote).toBe('500000000000')
+    expect(shouldRefresh([recovered])).toBe(false)
+    expect(signed).toHaveLength(1)
+    const effects = store.db.query<{ count: number }, []>('SELECT COUNT(*) AS count FROM local_effects').get()!.count
+    expect(effects).toBe(8)
     store.close()
   })
 
