@@ -12,6 +12,7 @@
     "equilibrium:server": "bun run server/equilibrium/serve.ts",
     "equilibrium:rehearse": "bun run server/equilibrium/rehearse.ts",
     "equilibrium:probe": "bun run scripts/equilibrium-probe.ts",
+    "equilibrium:audit": "bun run scripts/equilibrium-audit.ts",
     "equilibrium:contracts": "FOUNDRY_PROFILE=equilibrium forge test -vv",
     "deploy:self": "bun run ./scripts/self-deploy.ts",
     "compass:deploy": "bun run ./scripts/compass-deploy.ts",
