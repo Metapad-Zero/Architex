@@ -183,6 +183,16 @@ contract EquilibriumRouteRegistry {
         address token;
         address manager;
         address transceiver;
+        /**
+         * Network fees the worker spent building this leg, in the launch's own six-decimal atoms.
+         *
+         * A leg is several deployments and several configuration calls, so its cost is not readable
+         * from the commit transaction's own receipt. Recording it here is what lets an observer — a
+         * restarted one included — report what the step actually cost instead of the last call's fee.
+         * Fees spent on an attempt that never reached this point are not attributed to anything,
+         * because nothing identifies them: that is the price of a leg that cannot be built atomically.
+         */
+        uint256 feeAtoms;
     }
 
     address public immutable operator;
@@ -190,7 +200,7 @@ contract EquilibriumRouteRegistry {
     /// Keyed by the launch job's own step operation hash, which the worker persists before it acts.
     mapping(bytes32 => Leg) private legs;
 
-    event LegRegistered(bytes32 indexed operation, address token, address manager, address transceiver);
+    event LegRegistered(bytes32 indexed operation, address token, address manager, address transceiver, uint256 feeAtoms);
 
     error OperatorOnly();
     error IncompleteLeg();
@@ -209,17 +219,22 @@ contract EquilibriumRouteRegistry {
      * Idempotent for an identical leg and refusing for any other, so the caller may retry without
      * having to know whether its previous attempt was recorded.
      */
-    function registerLeg(bytes32 operation, address token, address manager, address transceiver) external {
+    function registerLeg(bytes32 operation, address token, address manager, address transceiver, uint256 feeAtoms)
+        external
+    {
         if (msg.sender != operator) revert OperatorOnly();
         if (token.code.length == 0 || manager.code.length == 0 || transceiver.code.length == 0) revert IncompleteLeg();
         Leg memory existing = legs[operation];
         if (existing.manager != address(0)) {
-            if (existing.token != token || existing.manager != manager || existing.transceiver != transceiver) {
+            if (
+                existing.token != token || existing.manager != manager || existing.transceiver != transceiver
+                    || existing.feeAtoms != feeAtoms
+            ) {
                 revert LegConflict();
             }
             return;
         }
-        legs[operation] = Leg(token, manager, transceiver);
-        emit LegRegistered(operation, token, manager, transceiver);
+        legs[operation] = Leg(token, manager, transceiver, feeAtoms);
+        emit LegRegistered(operation, token, manager, transceiver, feeAtoms);
     }
 }

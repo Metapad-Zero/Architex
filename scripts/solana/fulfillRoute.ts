@@ -96,7 +96,7 @@ const factoryAbi = [
 const registryAbi = [
   {
     type: 'function', name: 'legOf', inputs: [{ type: 'bytes32' }], stateMutability: 'view',
-    outputs: [{ type: 'tuple', components: [{ type: 'address', name: 'token' }, { type: 'address', name: 'manager' }, { type: 'address', name: 'transceiver' }] }],
+    outputs: [{ type: 'tuple', components: [{ type: 'address', name: 'token' }, { type: 'address', name: 'manager' }, { type: 'address', name: 'transceiver' }, { type: 'uint256', name: 'feeAtoms' }] }],
   },
 ] as const satisfies Abi
 
@@ -120,7 +120,7 @@ const eventsAbi = [
   { type: 'event', name: 'LogMessagePublished', inputs: [{ type: 'address', name: 'sender', indexed: true }, { type: 'uint64', name: 'sequence' }, { type: 'uint32', name: 'nonce' }, { type: 'bytes', name: 'payload' }, { type: 'uint8', name: 'consistencyLevel' }] },
   { type: 'event', name: 'AuthorizationUsed', inputs: [{ type: 'address', name: 'authorizer', indexed: true }, { type: 'bytes32', name: 'nonce', indexed: true }] },
   { type: 'event', name: 'Issued', inputs: [{ type: 'bytes32', name: 'identity', indexed: true }, { type: 'bytes32', name: 'payload', indexed: true }, { type: 'address', name: 'token', indexed: true }] },
-  { type: 'event', name: 'LegRegistered', inputs: [{ type: 'bytes32', name: 'operation', indexed: true }, { type: 'address', name: 'token' }, { type: 'address', name: 'manager' }, { type: 'address', name: 'transceiver' }] },
+  { type: 'event', name: 'LegRegistered', inputs: [{ type: 'bytes32', name: 'operation', indexed: true }, { type: 'address', name: 'token' }, { type: 'address', name: 'manager' }, { type: 'address', name: 'transceiver' }, { type: 'uint256', name: 'feeAtoms' }] },
   { type: 'event', name: 'InventoryPlaced', inputs: [{ type: 'bytes32', name: 'operation', indexed: true }, { type: 'address', name: 'holder', indexed: true }, { type: 'address', name: 'recipient', indexed: true }, { type: 'uint256', name: 'poolTokens' }, { type: 'uint256', name: 'poolQuote' }, { type: 'uint256', name: 'delivered' }] },
 ] as const satisfies Abi
 
@@ -339,6 +339,18 @@ export function fulfillmentRoute(infrastructure: RouteInfrastructure, options: {
     }))
   }
 
+  /**
+   * Whether a message the hub transceiver published is an NTT transfer at all.
+   *
+   * It publishes more than transfers: `initialize` broadcasts a transceiver-init message and
+   * `setWormholePeer` a peer registration, both through the same core bridge and the same emitter.
+   * Neither is a debit, and neither carries the NTT transceiver prefix, so a scan looking for a
+   * transfer has to step over them rather than fail on the first one it meets.
+   */
+  const transferOrNot = (payload: Uint8Array) => {
+    try { return decodeTransceiverMessage(payload) } catch { return undefined }
+  }
+
   /** The NTT manager message the hub published, re-encoded and checked against the published bytes. */
   const managerMessageOf = (payload: Uint8Array) => {
     const decoded = decodeTransceiverMessage(payload)
@@ -461,7 +473,9 @@ export function fulfillmentRoute(infrastructure: RouteInfrastructure, options: {
             if (!logs.length) return 'pending'
             const token = await canonicalToken(job)
             if (leg.token.toLowerCase() !== token.toLowerCase()) throw new Error('The registered Arc leg belongs to a different token than this job issued')
-            return { operation, transaction: logs[0].transactionHash, finalized: true, cost: await arcCost(client, logs[0].transactionHash), address: leg.manager }
+            // The leg's own recorded build fee plus the commit call's, which the record cannot contain.
+            const commit = BigInt(await arcCost(client, logs[0].transactionHash))
+            return { operation, transaction: logs[0].transactionHash, finalized: true, cost: (leg.feeAtoms + commit).toString(), address: leg.manager }
           }
           const spoke = spokeOf(job)
           // Every account the leg needs, with the last one written checked too: a leg interrupted
@@ -490,13 +504,16 @@ export function fulfillmentRoute(infrastructure: RouteInfrastructure, options: {
             // the recorded sequence is the only handle on this effect, and a matching payload at a
             // different sequence means the handle is wrong, not that the effect never happened.
             for (const message of published) {
-              const decoded = decodeTransceiverMessage(message.payload)
-              if (decoded.managerPayload.payload.toChain === SOLANA_CHAIN
+              const decoded = transferOrNot(message.payload)
+              if (decoded?.managerPayload.payload.toChain === SOLANA_CHAIN
                 && decoded.managerPayload.payload.amount.amount === trimAmount(BigInt(plan.amount), DECIMALS, DECIMALS).amount) {
                 throw new Error(`A matching debit is published at sequence ${message.sequence} rather than the recorded ${plan.expectedSequence}; reconcile this job before retrying.`)
               }
             }
             return 'absent'
+          }
+          if (!transferOrNot(expected.payload)) {
+            throw new Error(`The Arc message at sequence ${plan.expectedSequence} is not an NTT transfer; something else took the recorded sequence.`)
           }
           const decoded = managerMessageOf(expected.payload)
           const trimmed = trimAmount(BigInt(plan.amount), DECIMALS, DECIMALS)
@@ -572,6 +589,13 @@ export function fulfillmentRoute(infrastructure: RouteInfrastructure, options: {
           if (plan.chain === 'arc') {
             const token = await canonicalToken(job)
             const issuance = BigInt(job.request.canonical.issuance)
+            /**
+             * Native balance before and after, which is exactly what this leg's fees cost: a leg is
+             * several deployments and several calls, nothing else spends the operator's native
+             * balance here, and no receipt covers the whole of it. The figure is handed to the
+             * registry so the step's observation can report it after a restart.
+             */
+            const fundedBefore = await client.getBalance({ address: arc.account })
             const libraries = { TransceiverStructs: infrastructure.structs }
             const managerImpl = await deploy(arc, linkLibraries(artifact('NttManager'), libraries), [token, LOCKING, ARC_CHAIN, BigInt(RATE_LIMIT_DURATION), false])
             const manager = await deploy(arc, artifact('ERC1967Proxy'), [managerImpl, '0x'])
@@ -588,8 +612,15 @@ export function fulfillmentRoute(infrastructure: RouteInfrastructure, options: {
             await call(arc, manager, managerContract, 'setPeer', [SOLANA_CHAIN, toHex(bytes32(spoke.manager)), DECIMALS, issuance])
             await call(arc, manager, managerContract, 'setInboundLimit', [issuance, SOLANA_CHAIN])
             await call(arc, transceiver, transceiverContract, 'setWormholePeer', [SOLANA_CHAIN, toHex(bytes32(spoke.at.emitter))])
+            // Approve here rather than in the steps that spend, so the debit and each inventory
+            // placement are one transaction whose receipt is the whole of their cost. An allowance is
+            // not a transfer: it moves nothing and grants nothing the launch was not already going to do.
+            await call(arc, token, tokenContract, 'approve', [manager, issuance])
+            await call(arc, token, tokenContract, 'approve', [infrastructure.distributor, issuance])
+            await call(arc, infrastructure.quoteAsset, tokenContract, 'approve', [infrastructure.distributor, FIXTURE_SUPPLY])
+            const spent = (fundedBefore - await client.getBalance({ address: arc.account })) / 10n ** 12n
             // The commit point. Everything above is inert until this records it against the operation.
-            await call(arc, infrastructure.registry, registryContract, 'registerLeg', [plan.operation, token, manager, transceiver])
+            await call(arc, infrastructure.registry, registryContract, 'registerLeg', [plan.operation, token, manager, transceiver, spent])
             return
           }
           const spoke = spokeOf(job)
@@ -623,12 +654,10 @@ export function fulfillmentRoute(infrastructure: RouteInfrastructure, options: {
           return
         }
         case 'debit': {
-          const token = await canonicalToken(job)
           const leg = await arcLeg(job)
-          const amount = BigInt(plan.amount)
-          const allowance = await client.readContract({ address: token, abi: erc20Abi, functionName: 'allowance', args: [arc.account, leg.manager] })
-          if (allowance < amount) await call(arc, token, tokenContract, 'approve', [leg.manager, amount])
-          await call(arc, leg.manager, managerContract, 'transfer', [amount, SOLANA_CHAIN, toHex(bytes32(new PublicKey(plan.custodian)))])
+          // One call, already approved by the leg: its receipt is the whole of this step's cost, and
+          // the sequence it publishes at is the handle the observation was given before it ran.
+          await call(arc, leg.manager, managerContract, 'transfer', [BigInt(plan.amount), SOLANA_CHAIN, toHex(bytes32(new PublicKey(plan.custodian)))])
           return
         }
         case 'credit': {
@@ -662,12 +691,8 @@ export function fulfillmentRoute(infrastructure: RouteInfrastructure, options: {
           const operation = operationOf(job, step)
           if (plan.chain === 'arc') {
             const token = await canonicalToken(job)
-            const needed = BigInt(plan.tokens) + BigInt(plan.delivered)
-            const tokenAllowance = await client.readContract({ address: token, abi: erc20Abi, functionName: 'allowance', args: [arc.account, infrastructure.distributor] })
-            if (tokenAllowance < needed) await call(arc, token, tokenContract, 'approve', [infrastructure.distributor, needed])
-            const quoteAllowance = await client.readContract({ address: infrastructure.quoteAsset, abi: erc20Abi, functionName: 'allowance', args: [arc.account, infrastructure.distributor] })
-            if (quoteAllowance < BigInt(plan.quote)) await call(arc, infrastructure.quoteAsset, tokenContract, 'approve', [infrastructure.distributor, BigInt(plan.quote)])
-            // One call: inventory and the recipient's share move together or not at all.
+            // One call, already approved by the leg: inventory and the recipient's share move
+            // together or not at all, and the receipt is the whole of this step's cost.
             await call(arc, infrastructure.distributor, distributorContract, 'place',
               [operation, token, infrastructure.quoteAsset, plan.holder, plan.recipient, BigInt(plan.tokens), BigInt(plan.quote), BigInt(plan.delivered)])
             return

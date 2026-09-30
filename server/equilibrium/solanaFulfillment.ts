@@ -38,6 +38,7 @@ import { Keypair } from '@solana/web3.js'
 import { encodePaymentSignatureHeader } from '@x402/core/http'
 import { privateKeyToAccount } from 'viem/accounts'
 import type { Hex } from 'viem'
+import { revertReason } from '../../scripts/solana/arcFork'
 import { closeRoute, fulfillmentRoute, openRoute, restartSpoke, type RouteInfrastructure } from '../../scripts/solana/fulfillRoute'
 import { AUTHORIZATION_TYPES, paymentDomain, paymentRequirements } from './payment'
 import { publicJob, reconcile } from './runner'
@@ -192,7 +193,15 @@ async function main(): Promise<void> {
     /* -------------------------------------------------------- 1. the free quote */
 
     const now = () => Math.floor(Date.now() / 1000)
-    const quoted = await post(request(now(), beneficiary))
+    /**
+     * One payload, reused byte for byte.
+     *
+     * A launch request is identified by its payer and requestId and bound to its exact contents, so
+     * rebuilding it with a later `quote.expires` is a different payload under the same identity —
+     * which the service correctly refuses. The replay case below depends on sending the same bytes.
+     */
+    const payload = request(now(), beneficiary)
+    const quoted = await post(payload)
     assert(quoted.status === 402, `an unpaid quote must answer 402, not ${quoted.status}`)
     assert(typeof quoted.headers.get('PAYMENT-REQUIRED') === 'string', 'the 402 does not carry a PAYMENT-REQUIRED header')
     const jobId = quoted.body.jobId as Hex
@@ -202,12 +211,12 @@ async function main(): Promise<void> {
 
     /* -------------------------------------------------------- 2. request conflicts */
 
-    const conflicting = await post({ ...request(now(), beneficiary), canonical: { ...request(now(), beneficiary).canonical, symbol: 'OTHER' } })
+    const conflicting = await post({ ...payload, canonical: { ...payload.canonical, symbol: 'OTHER' } })
     assert(conflicting.status === 409 && conflicting.body.error === 'identity_conflict',
       `a second payload under the same requestId must be refused as identity_conflict, got ${conflicting.status} ${String(conflicting.body.error)}`)
     refusals.push({ case: 'a different payload under the same payer/requestId', refusal: `${conflicting.status} ${String(conflicting.body.error)}` })
 
-    const unopened = await post({ ...request(now(), beneficiary), requestId: 'arc-solana-fulfilment-base', destinations: [
+    const unopened = await post({ ...payload, requestId: 'arc-solana-fulfilment-base', destinations: [
       { chain: 'arc', recipient: payerAccount.address, amount: '1000', poolTokens: '100', poolQuote: '100' },
       { chain: 'base', recipient: payerAccount.address, amount: '1000', poolTokens: '100', poolQuote: '100' },
     ] })
@@ -219,17 +228,17 @@ async function main(): Promise<void> {
     /* -------------------------------------------------------- 3. failed payment */
 
     const pending = store.get(jobId)!
-    const wrongSigner = await post(request(now(), beneficiary), await header(pending, strangerAccount))
+    const wrongSigner = await post(payload, await header(pending, strangerAccount))
     assert(wrongSigner.status === 402 && wrongSigner.body.error === 'invalid_payment',
       `an authorization signed by another key must be refused, got ${wrongSigner.status} ${String(wrongSigner.body.error)}`)
     refusals.push({ case: 'an authorization signed by a key other than the bound payer', refusal: `${wrongSigner.status} ${String(wrongSigner.body.error)}` })
 
-    const wrongAmount = await post(request(now(), beneficiary), await header(pending, payerAccount, { value: (BigInt(total) - 1n).toString() }))
+    const wrongAmount = await post(payload, await header(pending, payerAccount, { value: (BigInt(total) - 1n).toString() }))
     assert(wrongAmount.status === 402 && wrongAmount.body.error === 'invalid_payment',
       `an authorization for a different amount must be refused, got ${wrongAmount.status} ${String(wrongAmount.body.error)}`)
     refusals.push({ case: 'an authorization for less than the quoted total', refusal: `${wrongAmount.status} ${String(wrongAmount.body.error)}` })
 
-    const expired = await post(request(now(), beneficiary), await header(pending, payerAccount, { validBefore: String(now() - 1) }))
+    const expired = await post(payload, await header(pending, payerAccount, { validBefore: String(now() - 1) }))
     assert(expired.status === 402 || expired.status === 409, `an expired authorization must be refused, got ${expired.status}`)
     refusals.push({ case: 'an authorization whose validity window already closed', refusal: `${expired.status} ${String(expired.body.error)}` })
 
@@ -245,7 +254,7 @@ async function main(): Promise<void> {
     // The credit is submitted and then reported unresolved, which is what a worker that dies between
     // sending an effect and recording it leaves behind. Everything before it runs to completion.
     reopen({ pending: new Set(['credit:solana']) })
-    const interrupted = await post(request(now(), beneficiary), await header(store.get(jobId)!))
+    const interrupted = await post(payload, await header(store.get(jobId)!))
     assert(interrupted.status === 202, `an interrupted launch must answer 202, not ${interrupted.status}`)
     const partial = store.get(jobId)!
     assert(partial.state === 'partial', `the interrupted job is ${partial.state}, not partial`)
@@ -283,7 +292,7 @@ async function main(): Promise<void> {
     /* -------------------------------------------------------- 7. replay */
 
     const settledOnce = recovered.steps[0].result!.transaction
-    const replayed = await post(request(now(), beneficiary), await header(recovered))
+    const replayed = await post(payload, await header(recovered))
     assert(replayed.status === 200, `replaying the completed paid request must answer 200, not ${replayed.status}`)
     const afterReplay = store.get(jobId)!
     assert(afterReplay.steps[0].result!.transaction === settledOnce, 'the replay produced a second settlement transaction')
@@ -298,7 +307,8 @@ async function main(): Promise<void> {
     try {
       await route.submit({ job: afterReplay, step: afterReplay.steps[0] }, await route.plan({ job: afterReplay, step: afterReplay.steps[0] }))
     } catch (error) {
-      onChainReplay = (error instanceof Error ? error.message : String(error)).split('\n')[0].slice(0, 200)
+      // Named, not "the call reverted": the evidence should say which constraint held.
+      onChainReplay = revertReason(error)
     }
     assert(!onChainReplay.startsWith('accepted'), 'the settled authorization was accepted a second time by the token')
     refusals.push({ case: 'the settled EIP-3009 authorization resubmitted directly to the token', refusal: onChainReplay })

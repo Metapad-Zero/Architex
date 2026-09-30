@@ -9,6 +9,11 @@ substituted into both core bridges, which is precisely why a passing run is not 
 It is the join between the two existing rehearsals: `contracts-equilibrium/test/NttRehearsal.t.sol`
 (Arc–Base, one process) and [the Solana spoke](EQUILIBRIUM-SOLANA.md) (one chain, modelled hub).
 
+What it proves is that the route works, not that a launch can be sold across it: it runs straight
+through, in one process, with nothing paid for. [Durable launch fulfilment over this
+route](EQUILIBRIUM-ARC-SOLANA-FULFILLMENT.md) drives the same two environments underneath a paid,
+recoverable job reached over HTTP, and then interrupts it.
+
 ### What it adds over those two
 
 The spoke rehearsal could not fail its own reconciliation. It derived Arc circulating supply and

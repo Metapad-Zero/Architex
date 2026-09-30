@@ -106,19 +106,26 @@ contract FulfillmentTest is Test {
         address token = address(new EquilibriumCanonical("Equilibrium", "EQL", address(this), 1_000e6));
         address manager = address(new EquilibriumRouteRegistry(address(this)));
         address transceiver = address(new EquilibriumRouteRegistry(address(this)));
-        registry.registerLeg(operation, token, manager, transceiver);
+        registry.registerLeg(operation, token, manager, transceiver, 12_345);
         assertEq(registry.legOf(operation).manager, manager);
+        assertEq(registry.legOf(operation).feeAtoms, 12_345);
 
         // Idempotent for the identical leg: a worker unsure whether its call landed may repeat it.
-        registry.registerLeg(operation, token, manager, transceiver);
+        registry.registerLeg(operation, token, manager, transceiver, 12_345);
         assertEq(registry.legOf(operation).transceiver, transceiver);
 
         // A second, different leg is refused, so two racing workers cannot leave two managers each
         // believing it holds the backing for one issuance.
         address other = address(new EquilibriumRouteRegistry(address(this)));
         vm.expectRevert(EquilibriumRouteRegistry.LegConflict.selector);
-        registry.registerLeg(operation, token, other, transceiver);
+        registry.registerLeg(operation, token, other, transceiver, 12_345);
         assertEq(registry.legOf(operation).manager, manager);
+
+        // And a leg re-registered with a different recorded fee: the figure is part of the record a
+        // refund decision reads, so it cannot be revised after the fact either.
+        vm.expectRevert(EquilibriumRouteRegistry.LegConflict.selector);
+        registry.registerLeg(operation, token, manager, transceiver, 12_346);
+        assertEq(registry.legOf(operation).feeAtoms, 12_345);
     }
 
     function test_onlyTheOperatorRegistersAndOnlyContractsCount() public {
@@ -126,11 +133,11 @@ contract FulfillmentTest is Test {
         address token = address(new EquilibriumCanonical("Equilibrium", "EQL", address(this), 1_000e6));
         vm.prank(address(0xBEEF));
         vm.expectRevert(EquilibriumRouteRegistry.OperatorOnly.selector);
-        registry.registerLeg(keccak256("op"), token, address(this), address(this));
+        registry.registerLeg(keccak256("op"), token, address(this), address(this), 0);
 
         // An address with no code is a half-built leg, not a manager.
         vm.expectRevert(EquilibriumRouteRegistry.IncompleteLeg.selector);
-        registry.registerLeg(keccak256("op"), token, address(0xBEEF), address(this));
+        registry.registerLeg(keccak256("op"), token, address(0xBEEF), address(this), 0);
     }
 
     /* ------------------------------------------------ the atomic inventory placement */
