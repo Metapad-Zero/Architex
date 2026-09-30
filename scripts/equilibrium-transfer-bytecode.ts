@@ -7,10 +7,10 @@
  * It builds ForkUsdcCctp itself and compares the whole creation code, CBOR metadata included.
  * Foundry's auto-detected remappings for nested libraries carry the checkout's absolute path, and
  * the compiler metadata hashes them, so the same source built in two directories differs in its
- * metadata trailer. This build turns auto-detection off for this one contract (the project's
- * remappings.txt and the equilibrium profile's remappings are all relative), writes to its own
- * output directory and leaves foundry.toml and the launch artifacts untouched. The result is
- * identical in any checkout with the locked node_modules.
+ * metadata trailer. The equilibrium profile disables auto-detection; this build also forces it off
+ * (the project's remappings.txt and the profile's remappings are all relative), writes to its own
+ * output directory and leaves the launch artifacts untouched. The result is identical in any
+ * checkout with the locked node_modules.
  */
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'

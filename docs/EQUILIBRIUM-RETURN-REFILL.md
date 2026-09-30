@@ -129,7 +129,7 @@ Measured gas at the pinned forks:
 **Fork-only substitutions.** These are in addition to fork.ts's:
 
 - Both MessageTransmitterV2 attester sets are replaced by one local key at threshold 1. `transfers/fork.ts` stands in for Iris. It fills exactly the fields Iris fills and signs `keccak256(message)` as the real attesters do.
-- Arc's USDC stand-in becomes `ForkUsdcCctp`: ForkUsdc plus `mint` returning true and `burn`, with the same storage layout. Circle's TokenMinterV2 needs both. The real Arc USDC mints and burns through Arc precompiles anvil lacks. The stand-in ships in its own bundle (`transfers/fork-bytecode.json`) so the launch bundle is untouched. `bun run equilibrium:transfer-bytecode --check` builds it fresh and compares the whole creation code, CBOR metadata included. Foundry's auto-detected remappings for nested libraries carry the checkout's absolute path into the metadata, so this one build turns auto-detection off (every project remapping is relative) and writes to `output/forge-fork`. `foundry.toml` is not changed. The same bytes come out of any checkout with the locked `node_modules`.
+- Arc's USDC stand-in becomes `ForkUsdcCctp`: ForkUsdc plus `mint` returning true and `burn`, with the same storage layout. Circle's TokenMinterV2 needs both. The real Arc USDC mints and burns through Arc precompiles anvil lacks. The stand-in ships in its own bundle (`transfers/fork-bytecode.json`) so the launch bundle is untouched. `bun run equilibrium:transfer-bytecode --check` builds it fresh and compares the whole creation code, CBOR metadata included. Foundry's auto-detected remappings for nested libraries carry the checkout's absolute path into the metadata. PR #12's `equilibrium` profile now sets `auto_detect_remappings = false`; this build also forces it off (every project remapping is relative) and writes to `output/forge-fork`, apart from the launch artifacts. The same bytes come out of any checkout with the locked `node_modules`.
 
 **What the forks do not prove:**
 
@@ -153,7 +153,7 @@ Outside forks it refuses to start unless `EQUILIBRIUM_TRANSFER_APPROVAL` equals 
 - the settings file
 - the transfer code: `TRANSFER_FILES` in `transfers/config.ts`, which is every transfer file plus the whole launch manifest (`CODE_FILES`): request hashing, the store, config parsing, types, the adapter, contracts and bytecode. Editing any of them changes the digest.
 
-The repair changed transfer code, so any digest computed before it is void. No transfer approval has been given.
+Bringing in PR #12 at `5a65b20` changed `adapter.ts` and `bytecode.json`, so the transfer digest, the launch approval digest and every CREATE2 prediction (`layout()` derives them from the bundle at runtime) changed with it. Any digest computed before that merge is void. No transfer approval has been given.
 
 A testnet configuration without operator gas caps is refused, as is a fork-only attester. There is no live mode.
 
@@ -201,5 +201,6 @@ This approval is separate from 49TH-25's, which authorizes one launch and nothin
 - The operator key is hot, and through the executors it owns NTT admin and the transfer rails. Testnet only.
 - Refill reservations are never released. A refill that stops half way still counts against `maxTotal`, which errs toward spending less than approved.
 - One sender process per operator key: the transfer sender and the launch sender each serialize their own sends. Correctness rests on the executor, but two processes can waste gas on nonce races.
-- `bun run equilibrium:bytecode --check` (the launch bundle) still fails in a fresh checkout for the absolute-remapping reason above. That remediation belongs to 49TH-25; the launch bundle was not regenerated.
+- The launch bundle is checked with PR #12's `bun run equilibrium:bytecode-build --check`, which rebuilds both compilers and compares the complete bundle, metadata included. The plain `equilibrium:bytecode --check` compares against whatever is already in `out/`, so run the build form in a fresh checkout. Transfers did not regenerate the launch bundle.
+- The repository root carries stray SQLite files `y`, `y-shm` and `y-wal`, inherited from PR #12 at `add47bb`. They are not read by any code path here and are left for 49TH-25.
 - `JobStore` (a launch-approval file) sets `journal_mode` before `busy_timeout`, so processes opening one store at the same instant can fail at startup with `SQLITE_BUSY`. This fails closed, with nothing sent. It is reported to 49TH-25, and the transfer race test opens its store with `busy_timeout` first.
