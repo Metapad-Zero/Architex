@@ -97,3 +97,13 @@
   .eq-receipt-id { grid-column: 2; grid-row: 1; }
   .eq-bottom { align-items: flex-start; flex-direction: column; gap: 12px; }
 }
+.eq-route-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin: 20px 0; }
+.eq-route { border: 1px solid var(--g300); border-radius: var(--radius); padding: 16px; overflow-wrap: anywhere; }
+.eq-route h3 { margin-top: 0; }
+.eq-route dl > div { display: flex; justify-content: space-between; gap: 12px; }
+@media (max-width: 650px) { .eq-route-grid { grid-template-columns: 1fr; } }
+.eq-integration .eq-tools-content { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.eq-job-steps { list-style: none; padding: 0; margin: 0; }
+.eq-job-steps li { border-bottom: 1px solid var(--g300); padding: 12px 0; font-size: .875rem; overflow-wrap: anywhere; }
+.eq-job-steps p { margin: 0; }
+@media (max-width: 767px) { .eq-integration .eq-tools-content { grid-template-columns: 1fr; } }

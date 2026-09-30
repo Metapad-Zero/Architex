@@ -1,0 +1,229 @@
+{
+  "observedAt": "2026-09-30T16:48:59.330Z",
+  "purpose": "Read-only infrastructure evidence. Not a token deployment or bridge/pool route test.",
+  "bridge": {
+    "name": "Wormhole NTT",
+    "evmVersion": "v2.0.0+evm",
+    "evmCommit": "c636cc15b07969e4b44de7e466c999c07e7387a9",
+    "solanaVersion": "v3.0.0+solana",
+    "solanaCommit": "1a2a92ef7f289972b2d00dd1d58077d139fe68d7",
+    "decimals": 6,
+    "wireMaxDecimals": 8,
+    "consistencyLevel": 0
+  },
+  "paidLaunchOpen": false,
+  "observations": [
+    {
+      "chain": "arc",
+      "network": "mainnet",
+      "mode": "live",
+      "rpc": "https://rpc.mainnet.arc.io",
+      "actualId": 5042,
+      "finality": "rpc_finalized",
+      "blockNumber": "0x167a54f",
+      "blockHash": "0xde73cd55c407d63a8ea1aee71c2771d5ea9323ed7c1d09977c370c8d748c1d62",
+      "contracts": [
+        {
+          "kind": "core",
+          "address": "0xC8aD24fC6063c41cB5C12a8e3851AafC3b3CF027",
+          "state": "bytecode_observed",
+          "byteHash": "0x5d38d1d0856505eef1da19c5f18d630a652368c379bba93bc3389d5314117118",
+          "bytes": 680
+        },
+        {
+          "kind": "market",
+          "address": "0x3648cc1323b4729e472cffdC570C6096565b0923",
+          "state": "bytecode_observed",
+          "byteHash": "0x1827dff8d116c0a50a80f81a84b4d1be45efc57464153edf4e0307e85fc3e075",
+          "bytes": 11717
+        }
+      ],
+      "routeTested": false
+    },
+    {
+      "chain": "arc",
+      "network": "testnet",
+      "mode": "testnet",
+      "rpc": "https://rpc.testnet.arc.io",
+      "actualId": 5042002,
+      "finality": "rpc_finalized",
+      "blockNumber": "0x3dce1a8",
+      "blockHash": "0x322aa1e84def5432356c9a80bf7b62b750cf8ddce28c8ed7be2d99ce4d10b6c1",
+      "contracts": [
+        {
+          "kind": "core",
+          "address": "0xBB73cB66C26740F31d1FabDC6b7A46a038A300dd",
+          "state": "bytecode_observed",
+          "byteHash": "0xbc8fa8e742d94fefadf07dc4c91b0681bb69a67d6a92213041bae6fdbc0402af",
+          "bytes": 680
+        },
+        {
+          "kind": "market",
+          "address": "0x6362f5a0fc007ab7d1e61f99d3f4eb04360d060a",
+          "state": "bytecode_observed",
+          "byteHash": "0x9d53a2f270c7287896a32980dbc40b43b212439dd29503d7f1f50ae062ac8777",
+          "bytes": 11715
+        }
+      ],
+      "routeTested": false
+    },
+    {
+      "chain": "base",
+      "network": "mainnet",
+      "mode": "live",
+      "rpc": "https://mainnet.base.org",
+      "actualId": 8453,
+      "finality": "rpc_finalized",
+      "blockNumber": "0x3196eb3",
+      "blockHash": "0xdba78e5d1736b6686d2e850fe7764e8ca7e14818fbe23e716d340cb15893618a",
+      "contracts": [
+        {
+          "kind": "core",
+          "address": "0xbebdb6C8ddC678FfA9f8748f85C815C556Dd8ac6",
+          "state": "bytecode_observed",
+          "byteHash": "0x502ed826a5c13dc27d501dcd0180214368e3ec4a32b94a1fc14eb59ab4427beb",
+          "bytes": 680
+        },
+        {
+          "kind": "market",
+          "address": "0x33128a8fC17869897dcE68Ed026d694621f6FDfD",
+          "state": "bytecode_observed",
+          "byteHash": "0x95707a4ac71f20181a63ef7d180e3c625be5d20fc8f6f980befa966bad568132",
+          "bytes": 24535
+        }
+      ],
+      "routeTested": false
+    },
+    {
+      "chain": "base",
+      "network": "testnet",
+      "mode": "testnet",
+      "rpc": "https://sepolia.base.org",
+      "actualId": 84532,
+      "finality": "rpc_finalized",
+      "blockNumber": "0x2d4ed0d",
+      "blockHash": "0xbadd7a86ab1547e2e40035a1c2fafa168e0b136c592d0908c80a1aff883592ce",
+      "contracts": [
+        {
+          "kind": "core",
+          "address": "0x79A1027a6A159502049F10906D333EC57E95F083",
+          "state": "bytecode_observed",
+          "byteHash": "0x502ed826a5c13dc27d501dcd0180214368e3ec4a32b94a1fc14eb59ab4427beb",
+          "bytes": 680
+        },
+        {
+          "kind": "market",
+          "address": "0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24",
+          "state": "bytecode_observed",
+          "byteHash": "0x02ee6e36873eea6fbb674a23d53b735646f12dc84efa08eac17872fe2fad9d06",
+          "bytes": 24535
+        }
+      ],
+      "routeTested": false
+    },
+    {
+      "chain": "solana",
+      "network": "mainnet",
+      "mode": "live",
+      "cluster": "mainnet-beta",
+      "rpc": "https://api.mainnet-beta.solana.com",
+      "genesis": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+      "finalizedSlot": 452022983,
+      "contracts": [
+        {
+          "kind": "core",
+          "address": "worm2ZoG2kUd4vFXhvjh93UUH596ayRfgQ2MgjNMTth",
+          "state": "executable_program_observed",
+          "owner": "BPFLoaderUpgradeab1e11111111111111111111111",
+          "slot": 452022983,
+          "byteHash": "0x1e8f4665d2ea0eb2d595fe32537cb77a910c109ce383d8bee9514b547a74b320"
+        },
+        {
+          "kind": "market",
+          "address": "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
+          "state": "executable_program_observed",
+          "owner": "BPFLoaderUpgradeab1e11111111111111111111111",
+          "slot": 452022983,
+          "byteHash": "0x5e12d3fb27de2fb400257a43656e16ae73ad59cc95ac5c2dff433a259d84a7d6"
+        }
+      ],
+      "routeTested": false
+    },
+    {
+      "chain": "solana",
+      "network": "testnet",
+      "mode": "testnet",
+      "cluster": "devnet",
+      "rpc": "https://api.devnet.solana.com",
+      "genesis": "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
+      "finalizedSlot": 505970377,
+      "contracts": [
+        {
+          "kind": "core",
+          "address": "3u8hJUVTA4jH1wYAyUur7FFZVQ8H635K3tSHHF4ssjQ5",
+          "state": "executable_program_observed",
+          "owner": "BPFLoaderUpgradeab1e11111111111111111111111",
+          "slot": 505970377,
+          "byteHash": "0x3211c0b24ecd07d9b7c1a8c852ef312f375476525cfaa74e7176109c28037f85"
+        },
+        {
+          "kind": "market",
+          "address": "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
+          "state": "executable_program_observed",
+          "owner": "BPFLoaderUpgradeab1e11111111111111111111111",
+          "slot": 505970377,
+          "byteHash": "0x5e12d3fb27de2fb400257a43656e16ae73ad59cc95ac5c2dff433a259d84a7d6"
+        }
+      ],
+      "routeTested": false
+    },
+    {
+      "chain": "robinhood",
+      "network": "mainnet",
+      "mode": "live",
+      "rpc": "https://rpc.mainnet.chain.robinhood.com",
+      "actualId": 4663,
+      "finality": "rpc_finalized",
+      "blockNumber": "0x491c896",
+      "blockHash": "0x56ffe66b2686417e353957f016494938426d321a90e78589a10ba7bc7f9c390c",
+      "contracts": [
+        {
+          "kind": "core",
+          "address": "0x141fBa8AD5D61bdaB45A047cF60b5Ad9784987FB",
+          "state": "unverified",
+          "error": "historical state 05cd844b9185e87aa0fa7fe918cdbf476a4b3d1a970dec19aec5240cb514d737 is not available"
+        },
+        {
+          "kind": "market",
+          "address": "0x1f7d7550b1b028f7571e69a784071f0205fd2efa",
+          "state": "unverified",
+          "error": "historical state 05cd844b9185e87aa0fa7fe918cdbf476a4b3d1a970dec19aec5240cb514d737 is not available"
+        }
+      ],
+      "routeTested": false
+    },
+    {
+      "chain": "robinhood",
+      "network": "testnet",
+      "mode": "testnet",
+      "rpc": "https://rpc.testnet.chain.robinhood.com",
+      "actualId": 46630,
+      "finality": "rpc_finalized",
+      "blockNumber": "0x78e6248",
+      "blockHash": "0xc9ba02f5ffaa8db614dab9bb5a9d5651f9596ad46bd163c9bccca6a8f9aca4d3",
+      "contracts": [
+        {
+          "kind": "core",
+          "address": null,
+          "state": "not_documented"
+        },
+        {
+          "kind": "market",
+          "address": null,
+          "state": "not_documented"
+        }
+      ],
+      "routeTested": false
+    }
+  ]
+}

@@ -4,6 +4,7 @@ import fs from 'fs'
 import path from 'path'
 import { nodePolyfills } from 'vite-plugin-node-polyfills'
 import { devMetadata } from './server/devMetadata'
+import { devEquilibrium } from './server/devEquilibrium'
 
 /**
  * The production layout: the landing page at /, the app at /app/. Both stay on architex.fun, one origin, so the
@@ -37,7 +38,7 @@ function landingAtRoot(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [react(), nodePolyfills(), devMetadata(), landingAtRoot()],
+  plugins: [react(), nodePolyfills(), devMetadata(), devEquilibrium(), landingAtRoot()],
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { CHAINS, CHAIN_NAMES, ISSUANCE, LIMITS, UNIT, applyDemo, createDemo, displayUnits, gap, quoteCycle, restoreDemo, serializeDemo, spot, supply, treasury, type DemoAction, type DemoChain, type DemoState } from '../lib/equilibrium'
 import './equilibrium.css'
+import { EquilibriumIntegration } from './EquilibriumIntegration'
 
 const STORAGE = 'architex.equilibrium.v1'
 function loadSession(): { state: DemoState; message: string } {
@@ -32,7 +33,7 @@ function PriceBeam({ state }: { state: DemoState }) {
   )
 }
 
-export function EquilibriumView() {
+export function EquilibriumView({ offline = false }: { offline?: boolean }) {
   const [session, setSession] = useState(loadSession)
   const [demandChain, setDemandChain] = useState<DemoChain>('solana')
   const [demandAmount, setDemandAmount] = useState('200')
@@ -147,7 +148,8 @@ export function EquilibriumView() {
       </li>)}</ol>}
       {state.receipts.length > 20 && <p className="eq-muted">Showing the latest 20 actions. The download includes the complete session.</p>}
     </section>
-    <section className="eq-next"><h2>From demonstration to a paid launch</h2><p>This proves the local mechanism. The four-chain x402 gateway still needs a deployed payment ledger, working venue adapters, verified token routes and funded markets. Four ordinary launches would create four separate assets; EQUILIBRIUM needs a dedicated shared-supply path.</p><a href="/equilibrium-readiness.md" download="equilibrium-readiness.md">Download the implementation checklist</a></section>
+    <EquilibriumIntegration offline={offline} />
+    <section className="eq-next"><h2>From demonstration to a paid launch</h2><p>The dedicated shared-supply job now has durable payment and fulfillment steps, with restart and retry tests. Its executable local rehearsal uses synthetic funds. Public routes and paid launches remain closed until the release prerequisites are proven.</p><a href="/equilibrium-readiness.md" download="equilibrium-readiness.md">Download the implementation checklist</a></section>
     <div className="eq-bottom"><p className="eq-muted">Saved in this browser when storage is available. Reset clears this simulation’s actions and balances.</p><button type="button" className="ghost-button" onClick={reset}>Reset simulation</button></div>
   </article>
 }

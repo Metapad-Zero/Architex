@@ -31,3 +31,5 @@ deployments/*.progress.json
 deployments/*.progress.json.tmp
 output/
 .playwright-cli/
+contracts-equilibrium/out/
+contracts-equilibrium/cache/
