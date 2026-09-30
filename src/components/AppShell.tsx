@@ -19,7 +19,10 @@ export function AppShell({ route, onRoute, children }: AppShellProps) {
   useEffect(() => {
     // Centre it rather than nudging it to the edge: the wallet button's width settles late, and an edge-aligned
     // tab ended up a few pixels short. No requestAnimationFrame here, it does not fire in a hidden tab.
-    navRef.current?.querySelector('[data-active="true"]')?.scrollIntoView({ block: 'nearest', inline: 'center' })
+    const revealActive = () => navRef.current?.querySelector('[data-active="true"]')?.scrollIntoView({ block: 'nearest', inline: 'center' })
+    revealActive()
+    window.addEventListener('resize', revealActive)
+    return () => window.removeEventListener('resize', revealActive)
   }, [route.view])
 
   return (
@@ -35,7 +38,7 @@ export function AppShell({ route, onRoute, children }: AppShellProps) {
           </button>
           <span className="testnet-chip">{activeChain.isTestnet ? 'Testnet' : 'Beta'}</span>
           <nav ref={navRef} className="ml-1 flex h-14 items-stretch sm:ml-4" aria-label="Primary">
-            {(['swap', 'pools', ...(isLaunchViewAvailable ? (['launch'] as const) : []), 'bridge', 'docs'] as const).map((view) => (
+            {(['swap', 'pools', ...(isLaunchViewAvailable ? (['launch'] as const) : []), 'bridge', 'equilibrium', 'docs'] as const).map((view) => (
               <button
                 key={view}
                 type="button"
@@ -44,7 +47,7 @@ export function AppShell({ route, onRoute, children }: AppShellProps) {
                 aria-current={(view === 'launch' ? route.view === 'launch' || route.view === 'launch-new' : route.view === view) ? 'page' : undefined}
                 onClick={() => onRoute(view === 'launch' ? { view: 'launch' } : { view })}
               >
-                {view === 'swap' ? 'Swap' : view === 'pools' ? 'Pools' : view === 'launch' ? 'Launch' : view === 'bridge' ? 'Bridge' : 'Docs'}
+                {view === 'swap' ? 'Swap' : view === 'pools' ? 'Pools' : view === 'launch' ? 'Launch' : view === 'bridge' ? 'Bridge' : view === 'equilibrium' ? 'Equilibrium' : 'Docs'}
               </button>
             ))}
           </nav>
