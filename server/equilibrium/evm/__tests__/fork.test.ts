@@ -197,6 +197,35 @@ suite('EQUILIBRIUM Arc–Base adapter on pinned testnet forks', () => {
     })
   }
 
+  test_('the approved scope allows one paid launch, refuses a second before any charge, and never sends past the gas cap', async () => {
+    const scopedStore = new JobStore(join(dir, 'scoped.sqlite'), { leaseMs: 1000 })
+    const r = request('scope-0001', now())
+    const scope = { launches: 1, payer: r.payer, recipient: r.canonical.recipient, issuance: r.canonical.issuance,
+      destinations: r.destinations.map(({ chain, amount, poolTokens, poolQuote }) => ({ chain: chain as 'arc' | 'base', amount, poolTokens, poolQuote })), maxTotal: '39000000',
+      operatorGas: { arc: (10n ** 20n).toString(), base: (10n ** 18n).toString() } }
+    const scoped = evmAdapter({ ...env.config, scope }, scopedStore.db)
+    const service = createLaunchService(scopedStore, scoped)
+    const post = async (body: typeof r) => {
+      const job = quote(scopedStore, scoped, body, now())
+      return service(new Request('http://fork/x402/equilibrium', { method: 'POST', body: JSON.stringify(body), headers: { 'payment-signature': await signedHeader(job) } }))
+    }
+    expect((await post(r)).status).toBe(200)
+    const before = await balance('arc', PINNED.arc.usdc, payer.address)
+    let refused: unknown; try { await post(request('scope-0002', now())) } catch (cause) { refused = cause }
+    expect(String(refused)).toContain('already hold an authorization')
+    expect(await balance('arc', PINNED.arc.usdc, payer.address)).toBe(before)
+    // A cap below one send's worst case refuses before anything reaches the chain.
+    const capStore = new JobStore(join(dir, 'capped.sqlite'), { leaseMs: 1000 })
+    const capped = evmAdapter({ ...env.config, scope: { ...scope, operatorGas: { arc: '1', base: '1' } } }, capStore.db)
+    const c = request('cap-0001', now())
+    const job = quote(capStore, capped, c, now())
+    let blocked: unknown; try { await runJob(capStore, capped, job.id, await signedPayment(job)) } catch (cause) { blocked = cause }
+    expect(String(blocked)).toContain('operator gas would exceed')
+    expect(capStore.db.query('SELECT COUNT(*) AS n FROM evm_broadcasts').get()).toEqual({ n: 0 })
+    expect(await executions('arc', hash([job.id, 'payment:arc']))).toBe(0)
+    scopedStore.close(); capStore.close()
+  })
+
   test_('unfinalized Base effects are pending, never absent: the job waits and finishes without re-executing', async () => {
     const slow = evmAdapter({ ...env.config, base: { ...env.config.base, finality: 3 } }, store.db)
     const { job, payment } = await paid('fork-finality-0001', slow)

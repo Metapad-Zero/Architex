@@ -124,6 +124,7 @@ export async function forkEnvironment(options: { arcPort?: number; basePort?: nu
       usdcAtomsPerNative: name === 'arc' ? 1_000_000n : 5_000_000_000n,
       // Base's real priority fee is around 0.001 gwei; anvil suggests 1 gwei, which would misstate cost.
       priorityFeeWei: name === 'base' ? 1_000_000n : undefined,
+      opStackL1Fee: name === 'base',
       venue: name === 'arc' ? { kind: 'architex', factory: PINNED.arc.factory } : { kind: 'uniswap-v3', factory: PINNED.base.factory, fee: 3000, tickSpacing: 60 },
     })
     const config: EvmAdapterConfig = {

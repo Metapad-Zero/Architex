@@ -1,6 +1,6 @@
 import type { Hex } from 'viem'
 import type { Atoms, StepKind } from '../types'
-import type { ChainConfig, EvmAdapterConfig } from './types'
+import type { ChainConfig, EvmAdapterConfig, PilotScope } from './types'
 import { localGuardian, wormholescan } from './vaa'
 
 /** The on-disk form: no keys. Keys come from the environment of the process that signs. */
@@ -13,6 +13,7 @@ export interface EvmFileConfig {
   limits: { outbound: string; inbound: string }
   budgets: Record<StepKind, Atoms>
   receiptTimeoutMs?: number
+  scope?: PilotScope
 }
 
 const chainFrom = (c: ChainFile): ChainConfig => ({ ...c, usdcAtomsPerNative: BigInt(c.usdcAtomsPerNative), fromBlock: BigInt(c.fromBlock), priorityFeeWei: c.priorityFeeWei === undefined ? undefined : BigInt(c.priorityFeeWei) })
@@ -29,12 +30,14 @@ export function fromFile(file: EvmFileConfig, env: Record<string, string | undef
     if (!key) throw new Error('EQUILIBRIUM_FORK_GUARDIAN_KEY is required for a fork guardian.')
     vaa = localGuardian(key as Hex, file.vaa.guardianSetIndex)
   } else vaa = wormholescan(file.vaa.api)
+  // A public-chain configuration without a scope would authorize unbounded launches and gas.
+  if (file.mode !== 'fork' && !file.scope) throw new Error('A testnet configuration must carry the approved pilot scope.')
   return { mode: file.mode, operatorKey: operatorKey as Hex, arc: chainFrom(file.arc), base: chainFrom(file.base), vaa,
-    limits: { outbound: BigInt(file.limits.outbound), inbound: BigInt(file.limits.inbound) }, budgets: file.budgets, receiptTimeoutMs: file.receiptTimeoutMs }
+    limits: { outbound: BigInt(file.limits.outbound), inbound: BigInt(file.limits.inbound) }, budgets: file.budgets, receiptTimeoutMs: file.receiptTimeoutMs, scope: file.scope }
 }
 
 export function toFile(config: EvmAdapterConfig, guardianSetIndex = 0): EvmFileConfig {
   return { mode: config.mode, arc: chainTo(config.arc), base: chainTo(config.base),
     vaa: config.vaa.kind === 'local-guardian' ? { kind: 'local-guardian', guardianSetIndex } : { kind: 'wormholescan', api: 'https://api.testnet.wormholescan.io' },
-    limits: { outbound: config.limits.outbound.toString(), inbound: config.limits.inbound.toString() }, budgets: config.budgets, receiptTimeoutMs: config.receiptTimeoutMs }
+    limits: { outbound: config.limits.outbound.toString(), inbound: config.limits.inbound.toString() }, budgets: config.budgets, receiptTimeoutMs: config.receiptTimeoutMs, scope: config.scope }
 }

@@ -25,11 +25,22 @@ describe('pinned EVM bytecode and address layout', () => {
     expect(predict('0x00000000000000000000000000000000000000e1', a.op('canonical:arc'), 0, a.canonicalInit)).toBe(a.canonical)
   })
   test('testnet broadcasting needs approval of this exact preview and configuration; forks stay local', () => {
-    const digest = approvalDigest('preview', 'config')
-    expect(() => assertApproved('testnet', 'preview', 'config', undefined, [])).toThrow(digest)
-    expect(() => assertApproved('testnet', 'preview', 'config!', digest, [])).toThrow('Required EQUILIBRIUM_APPROVAL')
-    expect(() => assertApproved('testnet', 'preview', 'config', digest, [])).not.toThrow()
+    const digest = approvalDigest('preview', 'config', [])
+    expect(() => assertApproved('testnet', 'preview', 'config', undefined, [], [])).toThrow(digest)
+    expect(() => assertApproved('testnet', 'preview', 'config!', digest, [], [])).toThrow('Required EQUILIBRIUM_APPROVAL')
+    expect(() => assertApproved('testnet', 'preview', 'config', digest, [], [])).not.toThrow()
     expect(() => assertApproved('fork', '', '', undefined, ['https://sepolia.base.org'])).toThrow('local anvil forks only')
     expect(() => assertApproved('fork', '', '', undefined, ['http://127.0.0.1:18545'])).not.toThrow()
+  })
+})
+
+describe('the approval binds code as well as preview and configuration', () => {
+  test('changing any manifest entry changes the digest and refuses the old approval', () => {
+    const manifest = [{ file: 'server/equilibrium/evm/adapter.ts', sha256: 'a'.repeat(64) }]
+    const approved = approvalDigest('preview', 'config', manifest)
+    const edited = [{ file: 'server/equilibrium/evm/adapter.ts', sha256: 'b'.repeat(64) }]
+    expect(approvalDigest('preview', 'config', edited)).not.toBe(approved)
+    expect(() => assertApproved('testnet', 'preview', 'config', approved, [], edited)).toThrow('Required EQUILIBRIUM_APPROVAL')
+    expect(() => assertApproved('testnet', 'preview', 'config', approved, [], manifest)).not.toThrow()
   })
 })

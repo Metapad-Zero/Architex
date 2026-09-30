@@ -29,7 +29,7 @@ Every address a job creates is CREATE2-predicted from the job id and the two exe
 - Arc USDC runs as an EIP-3009 stand-in, because Arc's native USDC calls Arc precompiles `0x1800…00/01` that anvil lacks.
 - The Base executor's USDC quote inventory is written to storage.
 
-The 11 scenarios:
+The 12 scenarios:
 
 - A paid x402 launch runs through the HTTP service and returns 200. On-chain supply reconciles: 1,000,000 issued, 10,000 locked backing 10,000 on Base, both pools holding exact inventory, and the executors emptied.
 - A resend executes nothing.
@@ -40,29 +40,35 @@ The 11 scenarios:
 - Only the owner can execute.
 - Worker processes killed after the credit broadcast, before the debit broadcast, and after the Arc pool broadcast are all finished by `reconcile`, every effect exactly once.
 - Delayed Base finality stays pending and completes without re-execution.
+- The approved scope allows one paid launch and refuses a second before any charge. A gas cap below one send's worst case refuses before anything is sent.
 
 What forks do **not** prove: public Guardian attestation of this route, Arc's real USDC precompile path, and real Base L1 data fees.
 
 ### Unattended runner
 
-`bun run equilibrium:evm-serve` is the local service (`serve.ts`) wired to the EVM adapter. It verifies executors, owners, cores and venues at startup, binds 127.0.0.1, refuses ephemeral stores, and sweeps interrupted jobs every `EQUILIBRIUM_RECONCILE_MS`. A fork config must point at loopback forks. A testnet config refuses to start unless `EQUILIBRIUM_APPROVAL` equals `sha256(release preview, exact config)`, so approval of one preview cannot authorize a different configuration. There is no live mode.
+`bun run equilibrium:evm-serve` is the local service (`serve.ts`) wired to the EVM adapter. It verifies executors, owners, cores and venues at startup, binds 127.0.0.1, refuses ephemeral stores, and sweeps interrupted jobs every `EQUILIBRIUM_RECONCILE_MS`. A fork config must point at loopback forks. A testnet config must carry a pilot scope and refuses to start unless `EQUILIBRIUM_APPROVAL` equals the digest over the release preview, the exact config and the code manifest. The adapter then enforces the scope: one launch, the named payer and recipient, the exact allocation, a total of at most 219 USDC, and worst-case operator gas within the caps before every send. There is no live mode.
 
-### Release procedure (Stage A: Arc testnet + Base Sepolia)
+### Release procedure (Stage A: Arc testnet + Base Sepolia, one launch)
 
-1. **Wallets.** Angus names two testnet wallets:
-   - an **operator**, which owns both executors and so both NTT managers, the LP positions and every deployment;
-   - a **payer**, which signs the EIP-3009 authorization.
-2. **Plan.** Run `bun run equilibrium:infra plan --operator <operator> --payer <payer>`. It is read-only. It writes `deployments/equilibrium-testnet.json` with nonce-predicted library and executor addresses, prints the approval digest, and lists every missing balance. The 2026-09-30 run with an empty stand-in operator reported:
-   - Arc operator: about 1.003 native USDC for gas (3x margin at 25 gwei);
-   - Base operator: about 0.0053 ETH, including a 0.005 ETH L1 fee allowance;
-   - Base executor: 100 Base Sepolia USDC quote inventory;
-   - payer: 219 Arc testnet USDC (200 pool quote + 19 step budgets).
-3. **Fund.** Use the Circle testnet faucet for USDC on Arc and Base Sepolia, plus Base Sepolia ETH. Re-run `plan` until `missing` is empty.
-4. **Approve.** Angus approves the printed `EQUILIBRIUM_APPROVAL` digest on the issue. Any later change to the preview or config needs a new digest.
-5. **Deploy.** Run `EQUILIBRIUM_OPERATOR_KEY=… EQUILIBRIUM_APPROVAL=… bun run equilibrium:infra deploy`. This deploys the NTT library and the executor on each chain, checked against the predicted addresses. Then send the 100 Base USDC to the Base executor.
-6. **Run.** `EQUILIBRIUM_EVM_CONFIG=deployments/equilibrium-testnet.json EQUILIBRIUM_OPERATOR_KEY=… EQUILIBRIUM_APPROVAL=… EQUILIBRIUM_DB=<durable path> bun run equilibrium:evm-serve`
-7. **Launch.** Run `bun run equilibrium:infra request --payer <payer> --recipient <treasury>`, then `EQUILIBRIUM_PAYER_KEY=… bun run equilibrium:evm-launch --request request.json --max-total 219000000 --yes`. The request uses the preview allocation. HTTP 202 is expected while Base finalizes, which takes roughly 15–20 minutes per Base step. The sweep finishes it unattended; read `GET /equilibrium/jobs/<id>`.
-8. **Verify and record.** Check token, manager, transceiver and pool addresses and balances on both explorers. Then prove the return route (Base→Arc) separately; this adapter launches outbound only.
+1. **Wallets.** Angus names three public testnet addresses:
+   - an **operator**, which owns both executors and, through them, NTT admin and the LP positions;
+   - a **payer**, which signs the EIP-3009 authorization;
+   - a **recipient**, which receives the allocations.
+2. **Plan, once.** Run `bun run equilibrium:infra plan --operator <o> --payer <p> --recipient <r>`. It is read-only against both testnets. It:
+   - writes `deployments/equilibrium-testnet.json` with nonce-predicted addresses and the pilot scope (one launch, those wallets, the preview allocation, 219 USDC total, gas caps);
+   - prints `EQUILIBRIUM_APPROVAL`;
+   - lists the **before-deployment** shortfall: operator gas on both chains and the payer's 219 USDC.
+
+   It refuses to overwrite an existing plan without `--replace`, and refuses if current gas prices would break a cap.
+3. **Approve.** Angus approves that digest on the issue. It binds the preview, that exact config and the code manifest.
+4. **Fund before deployment.** Operator: about 1 Arc native USDC and 0.0013 Base Sepolia ETH (Circle faucet and a Base Sepolia faucet). Payer: 219 Arc testnet USDC.
+5. **Deploy.** Run `EQUILIBRIUM_OPERATOR_KEY=… EQUILIBRIUM_APPROVAL=… bun run equilibrium:infra deploy`. It deploys the library and executor per chain, checks worst-case gas against the deploy caps before sending, and checks that each address matches the plan.
+6. **Fund after deployment.** Send 100 Base Sepolia USDC to the Base executor. Then run `bun run equilibrium:infra check`; it must report `ready: true`.
+7. **Run.** `EQUILIBRIUM_EVM_CONFIG=deployments/equilibrium-testnet.json EQUILIBRIUM_OPERATOR_KEY=… EQUILIBRIUM_APPROVAL=… EQUILIBRIUM_DB=<durable path> bun run equilibrium:evm-serve`
+8. **Launch.** Run `bun run equilibrium:infra request`, then `EQUILIBRIUM_PAYER_KEY=… bun run equilibrium:evm-launch --request request.json --max-total 219000000 --yes`. HTTP 202 is expected while Base finalizes (roughly 15–20 minutes per Base step). The sweep finishes it unattended; read `GET /equilibrium/jobs/<id>`.
+9. **Verify and record** addresses and balances on both explorers. Prove the Base→Arc return separately; this adapter launches outbound only.
+
+**Ceiling:** 321 test USDC + 0.01 test ETH. That is payer 219 + Base inventory 100 + operator gas caps (Arc: deploy 0.5 + launch 1.5 native USDC; Base: 0.002 + 0.008 ETH).
 
 Stop conditions and recovery are unchanged from the preview. Preserve the store (and WAL); never edit `digestOf` expectations; restart with the same config; the sweep observes before it sends.
 

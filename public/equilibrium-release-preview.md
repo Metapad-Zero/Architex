@@ -28,7 +28,18 @@ Arc LP tokens and Base v3 LP NFT belong to the approved treasury and remain **wi
 
 ### Budgets and limits
 
-Stage A uses test assets only. Per launch at the preview allocation: payer 219 Arc test USDC (100 per pool plus 19 in step budgets: payment/platform fee 1, issuance 2, managers 5 each, pools 2 each, debit 1, credit 1); Base executor 100 Base Sepolia USDC quote inventory (pre-positioned, no CCTP refill); operator about 1 Arc native USDC and 0.0053 Base Sepolia ETH for gas including infrastructure (`equilibrium:infra plan`, 2026-09-30, 3x margin). Ceiling: **320 test USDC + 0.02 test ETH**. No purchased assets or mainnet spending. Keeper stays disabled.
+Stage A uses test assets only and covers **one** launch at the preview allocation (1,000,000 EQL; 990,000 on Arc and 10,000 on Base; 5,000 EQL and 100 test USDC per pool). Committed test assets, all capped:
+
+| Holder | Amount | Cap and enforcement |
+| --- | --- | --- |
+| Payer (Arc testnet USDC) | 219 | Quoted total: 200 pool quote + 19 step budgets (payment/platform fee 1, issuance 2, managers 5 + 5, pools 2 + 2, debit 1, credit 1). The adapter refuses any total above 219. |
+| Base executor (Base Sepolia USDC) | 100 | Pre-positioned quote inventory for the Base pool; no CCTP refill. Sent **after** deployment, because the executor does not exist before it. |
+| Operator gas, Arc (native USDC) | at most 2 | Deploy cap 0.5, checked before each deployment; launch cap 1.5, checked by the adapter against worst-case cost before every send. |
+| Operator gas, Base (ETH) | at most 0.01 | Deploy cap 0.002 and launch cap 0.008, same enforcement, including the OP Stack L1 fee upper bound. |
+
+Ceiling: **321 test USDC + 0.01 test ETH** (219 + 100 + 2). The 2026-09-30 plan funds about 1.0 Arc native USDC and 0.0013 ETH (3x current gas prices), inside the caps; a price spike that would exceed a cap makes `plan` refuse. No purchased assets or mainnet spending. Keeper stays disabled.
+
+Funding before deployment: operator gas on both chains and the payer's 219 USDC. After deployment: the Base executor's 100 USDC. `equilibrium:infra check` verifies both stages without changing the approved configuration.
 
 After public proof and real paid-job implementation, a **separate** Arc/Base mainnet proposal has a **500 USDC** total ceiling: pools 200; keeper quote 100; deployment/gas/bridge 50; recovery 50; refill fees 25; contingency 75. ETH purchases count at executable cost against this cap. Refresh mainnet addresses/quotes/roles and obtain separate approval. Contingency does not authorize another chain.
 
@@ -39,10 +50,9 @@ Proposed live keeper: at most 80 tokens/trade, 50 USDC cumulative session spend,
 1. Approve the commit, named roles, allocation, LP terms and Stage A test budget. Prepare exact signed operation preview (nonce, salt, chain, gas cap, expected address) before broadcast.
 2. Deploy/verify tokens/managers/transceivers and record hashes, owners, mint binding, peers, threshold, rates and decimals. Prove public Arc→Base Guardian credit and Base→Arc return with finalized receipts and exact backing. Fork signatures do not satisfy this gate.
 3. Seed actual pools and verify balances, LP ownership, fee tier/tick and executable quotes. Prove separate quote refill or keep refill/keeper disabled.
-4. Add real signed chain adapters, USDC escrow/settlement, authenticated operator access, durable production database/indexer and nonce management. Rehearse real settlement/debit crashes and stale/pending evidence. Enforce replay-safe identities onchain or equivalently.
+4. Real signed Arc/Base adapters, nonce handling and on-chain replay-safe identities are implemented (`EquilibriumExecutor`, `server/equilibrium/evm/`) and rehearsed on forks, including killed workers and stale/pending evidence. Still required: authenticated operator access, a production database/indexer, and the same crash rehearsals against public settlement.
 5. Independently review bridge/admin/escrow behavior before accepting external funds. Open only proven routes with free records. No UI mode or environment flag can bypass these prerequisites.
-6. **Release blocker — a stale worker can still submit.** The worker re-reads its lease immediately before `broadcast` and before `recordSettlement`, and heartbeats it while a call is outstanding. Neither is a guarantee. The pre-call check is point-in-time: the lease can lapse between that check and the moment the adapter actually puts bytes on the wire. The heartbeat is a timer, so an adapter that does not yield — a synchronous signer, a blocking RPC client, a long CPU-bound encode — prevents any renewal from being attempted at all, and the lapse is neither prevented nor detected. Today only the local adapter's primary key stops the duplicate row. Before real funds move, the destination must reject a stale worker itself: a fencing token or provider idempotency key carried with the submission and enforced on the far side, so lease expiry is decided where the effect lands rather than in the process that lost it. Until that is in place, treat every `broadcast` as capable of succeeding after its lease expired.
-
+6. **Stale workers: rejected at the destination for Arc–Base; still a blocker for any other adapter.** The lease check before `broadcast` and `recordSettlement` is point-in-time, and the heartbeat is a timer, so neither can stop a worker whose lease lapsed from reaching the wire. For the Arc–Base adapter the far side decides instead. Every effect is one `EquilibriumExecutor.execute(operation, …)`, and the executor binds `operation` before running anything and reverts `OperationDone` on any second execution. Settlement is additionally bound by the EIP-3009 nonce, which is the job hash. A stale worker can therefore only spend its own gas. The fork suite proves this: a stale worker racing a live one on the same debit, a late duplicate after completion, a raw resubmission, and killed worker processes. The local rehearsal adapter still relies on its database primary key. Solana, Robinhood or any future adapter must carry an equivalent destination-side identity before real funds move.
 ```bash
 bun install --frozen-lockfile
 git submodule update --init --recursive
@@ -58,15 +68,33 @@ bun run equilibrium:export
 ```
 
 ```bash
-bun run equilibrium:fork-test                       # pinned Arc testnet + Base Sepolia forks, 11 scenarios
+bun run equilibrium:fork-test                       # pinned Arc testnet + Base Sepolia forks, 12 scenarios
 bun run equilibrium:bytecode --check                # deployed code matches a fresh pinned build
-bun run equilibrium:infra plan --operator <a> --payer <b>   # read-only; prints missing funds and the approval digest
+bun run equilibrium:infra plan --operator <a> --payer <b> --recipient <c>   # read-only; writes the config once, prints the digest
 EQUILIBRIUM_APPROVAL=<digest> bun run equilibrium:infra deploy
+bun run equilibrium:infra check                     # read-only, after deploy: deployment, Base inventory, payer, gas
 EQUILIBRIUM_APPROVAL=<digest> bun run equilibrium:evm-serve
-bun run equilibrium:evm-launch --request request.json --max-total <atoms> --yes
+bun run equilibrium:infra request && bun run equilibrium:evm-launch --request request.json --max-total 219000000 --yes
 ```
 
-Approval is the digest `equilibrium:infra plan` prints over this preview and the exact configuration. Nothing broadcasts to a public chain without it, and changing either invalidates it.
+### What the approval binds and authorizes
+
+`EQUILIBRIUM_APPROVAL` is one SHA-256 over three things:
+
+- this preview;
+- the exact configuration `plan` writes: chains, RPCs, executor and library addresses, finality, NTT limits, budgets and the pilot scope;
+- a manifest of the deployed bytecode bundle and every off-chain file on the launch path (`CODE_FILES` in `server/equilibrium/evm/approval.ts`).
+
+Editing any of them invalidates it. `infra deploy` and `equilibrium:evm-serve` recompute it and refuse to act without an exact match, and a testnet configuration without a scope does not load.
+
+The scope is enforced by the adapter, not by convention:
+
+- **One launch:** a second job cannot start, and a second payment cannot be sent, even concurrently.
+- **Only the named payer and recipient**, and only the exact allocation.
+- **A quoted total of at most 219 USDC.**
+- **Cumulative operator gas** within the launch caps, checked against worst-case cost before every send.
+
+Nothing broadcasts to a public chain without the approval. There is no live mode.
 
 ### Recovery
 

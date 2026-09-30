@@ -23,6 +23,23 @@ export interface ChainConfig {
   fromBlock: bigint
   /** Priority fee in wei. Unset lets the RPC suggest one; set it where the suggestion is unrealistic. */
   priorityFeeWei?: bigint
+  /** OP Stack chain: bound the L1 data fee with GasPriceOracle.getL1FeeUpperBound before sending. */
+  opStackL1Fee?: boolean
+}
+/**
+ * What an approval authorizes, carried inside the approved configuration. The adapter enforces it:
+ * at most `launches` paid jobs, only this payer, recipient and exact allocation, a quoted total no
+ * higher than `maxTotal`, and cumulative operator gas (native wei, L1 fee included) within
+ * `operatorGas` per chain. Nothing is sent that could cross a cap.
+ */
+export interface PilotScope {
+  launches: number
+  payer: Address
+  recipient: Address
+  issuance: Atoms
+  destinations: { chain: 'arc' | 'base'; amount: Atoms; poolTokens: Atoms; poolQuote: Atoms }[]
+  maxTotal: Atoms
+  operatorGas: { arc: string; base: string }
 }
 export interface EvmAdapterConfig {
   mode: 'fork' | 'testnet'
@@ -34,4 +51,6 @@ export interface EvmAdapterConfig {
   limits: { outbound: bigint; inbound: bigint }
   budgets: Record<StepKind, Atoms>
   receiptTimeoutMs?: number
+  /** Required for testnet; forks may omit it. */
+  scope?: PilotScope
 }

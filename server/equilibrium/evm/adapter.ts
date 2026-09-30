@@ -4,7 +4,7 @@ import {
   http, parseSignature, zeroAddress, type Address, type Hex, type PublicClient, type TransactionReceipt, type WalletClient,
 } from 'viem'
 import { privateKeyToAccount, type PrivateKeyAccount } from 'viem/accounts'
-import { hash } from '../request'
+import { hash, identity } from '../request'
 import { LaunchError, type Atoms, type EffectContext, type EffectResult, type Job, type LaunchRequest, type PreparedEffect, type PromotionalTokenAdapter, type Step, type StepKind } from '../types'
 import {
   CODE, NTT_COMMIT, architexFactoryAbi, architexPairAbi, coreAbi, erc20Abi, executorAbi, linked, nttAbi, predict, proxyInit, spokeAbi, transceiverAbi,
@@ -17,6 +17,8 @@ import type { ChainConfig, EvmAdapterConfig } from './types'
 export type { ChainConfig, EvmAdapterConfig, Venue } from './types'
 
 const LOCKING = 0
+const GAS_PRICE_ORACLE = '0x420000000000000000000000000000000000000F' as const
+const gasPriceOracleAbi = [{ type: 'function', name: 'getL1FeeUpperBound', stateMutability: 'view', inputs: [{ type: 'uint256' }], outputs: [{ type: 'uint256' }] }] as const
 /** Selector of EquilibriumExecutor.OperationDone(bytes32,bytes32). */
 const OPERATION_DONE = '0x3a140fc2'
 const ZERO: Hex = `0x${'0'.repeat(64)}`
@@ -90,12 +92,14 @@ export function evmAdapter(config: EvmAdapterConfig, db: Database): PromotionalT
     base: createWalletClient({ account, chain: chainOf(config.base), transport: http(config.base.rpc) }),
   }
   db.exec(`CREATE TABLE IF NOT EXISTS evm_broadcasts (operation TEXT NOT NULL, chain TEXT NOT NULL, tx TEXT NOT NULL, sent_at INTEGER NOT NULL, PRIMARY KEY (operation, tx));
-    CREATE TABLE IF NOT EXISTS evm_vaas (operation TEXT PRIMARY KEY, vaa TEXT NOT NULL);`)
+    CREATE TABLE IF NOT EXISTS evm_vaas (operation TEXT PRIMARY KEY, vaa TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS evm_spend (tx TEXT PRIMARY KEY, chain TEXT NOT NULL, wei TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS evm_payments (operation TEXT PRIMARY KEY, sent_at INTEGER NOT NULL);`)
   // One sender per chain in this process, so two jobs never race for the operator's nonce.
   const sending: Record<'arc' | 'base', Promise<unknown>> = { arc: Promise.resolve(), base: Promise.resolve() }
   const pinned = { mode: config.mode, ntt: NTT_COMMIT, code: Object.fromEntries(Object.entries(CODE).map(([k, v]) => [k, v.sha256])),
     chains: [config.arc, config.base].map((c) => ({ ...c, rpc: undefined, fromBlock: undefined, priorityFeeWei: undefined, usdcAtomsPerNative: c.usdcAtomsPerNative.toString() })),
-    limits: { outbound: config.limits.outbound.toString(), inbound: config.limits.inbound.toString() }, budgets: config.budgets, vaa: config.vaa.kind }
+    limits: { outbound: config.limits.outbound.toString(), inbound: config.limits.inbound.toString() }, budgets: config.budgets, vaa: config.vaa.kind, scope: config.scope ?? null }
   const version = `evm-arc-base-v1:${hash(pinned).slice(2, 18)}`
 
   const chainForStep = (step: Step): 'arc' | 'base' => (step.kind === 'debit' || step.chain === 'arc' ? 'arc' : 'base')
@@ -251,11 +255,31 @@ export function evmAdapter(config: EvmAdapterConfig, db: Database): PromotionalT
     return { ...base, address: p.expect.pool, amount: token, quoteAmount: quote }
   }
 
-  async function priority(chain: 'arc' | 'base') {
+  /** Explicit EIP-1559 fees, so the worst-case cost checked before sending is the one the tx may pay. */
+  async function fees(chain: 'arc' | 'base') {
     const tip = chains[chain].priorityFeeWei
-    if (tip === undefined) return {}
+    if (tip === undefined) {
+      const { maxFeePerGas, maxPriorityFeePerGas } = await clients[chain].estimateFeesPerGas()
+      return { maxFeePerGas, maxPriorityFeePerGas }
+    }
     const block = await clients[chain].getBlock()
     return { maxPriorityFeePerGas: tip, maxFeePerGas: (block.baseFeePerGas ?? 0n) * 2n + tip }
+  }
+  const spent = (chain: 'arc' | 'base') => db.query<{ wei: string }, [string]>('SELECT wei FROM evm_spend WHERE chain=?').all(chain).reduce((n, r) => n + BigInt(r.wei), 0n)
+  const toAtoms = (chain: 'arc' | 'base', wei: bigint) => (wei * chains[chain].usdcAtomsPerNative + 10n ** 18n - 1n) / 10n ** 18n
+
+  /**
+   * Refuse to send anything whose worst-case cost (gas limit x max fee, plus the OP Stack L1 fee
+   * upper bound) could exceed the step budget or, with a scope, the approved cumulative operator gas.
+   */
+  async function assertAffordable(chain: 'arc' | 'base', step: Step, gas: bigint, maxFeePerGas: bigint, data: Hex) {
+    let worst = gas * maxFeePerGas
+    if (chains[chain].opStackL1Fee) {
+      worst += await clients[chain].readContract({ address: GAS_PRICE_ORACLE, abi: gasPriceOracleAbi, functionName: 'getL1FeeUpperBound', args: [BigInt((data.length - 2) / 2 + 68)] })
+    }
+    if (toAtoms(chain, worst) > BigInt(step.budget)) throw new LaunchError(409, 'budget', `${step.id} could cost up to ${toAtoms(chain, worst)} USDC atoms, above its ${step.budget} budget. Nothing was sent.`)
+    const cap = config.scope?.operatorGas[chain]
+    if (cap !== undefined && spent(chain) + worst > BigInt(cap)) throw new LaunchError(409, 'gas_cap', `${chain} operator gas would exceed the approved ${cap} wei. Nothing was sent.`)
   }
 
   async function executed(p: Plan, blockNumber: bigint): Promise<Hex> {
@@ -279,6 +303,20 @@ export function evmAdapter(config: EvmAdapterConfig, db: Database): PromotionalT
       }
       const base = destination(request, 'base')!
       if (BigInt(base.amount) > config.limits.inbound || BigInt(base.amount) > config.limits.outbound) throw new LaunchError(409, 'rate_limit', 'The Base allocation exceeds the configured NTT rate limit and would queue.')
+      const scope = config.scope
+      if (!scope) return
+      const out = (message: string): never => { throw new LaunchError(403, 'pilot_scope', `${message} The approval covers one exact pilot.`) }
+      if (!same(request.payer, scope.payer)) out('Only the approved payer may launch.')
+      if (!same(request.canonical.recipient, scope.recipient) || request.destinations.some((d) => !same(d.recipient, scope.recipient))) out('Only the approved recipient may receive allocations.')
+      if (request.canonical.issuance !== scope.issuance) out('The issuance differs from the approved allocation.')
+      const wanted = JSON.stringify(scope.destinations.map(({ chain, amount, poolTokens, poolQuote }) => ({ chain, amount, poolTokens, poolQuote })))
+      if (JSON.stringify(request.destinations.map(({ chain, amount, poolTokens, poolQuote }) => ({ chain, amount, poolTokens, poolQuote }))) !== wanted) out('The destinations differ from the approved allocation.')
+      const b = config.budgets
+      const total = [b.payment, b.canonical, b.manager, b.pool, b.manager, b.debit, b.credit, b.pool].reduce((n, x) => n + BigInt(x), 0n) + request.destinations.reduce((n, d) => n + BigInt(d.poolQuote), 0n)
+      if (total > BigInt(scope.maxTotal)) out(`The quoted total ${total} exceeds the approved ${scope.maxTotal}.`)
+      // A job already holding an authorization may always resume; a new one may not exceed the launch count.
+      const others = db.query<{ count: number }, [string]>("SELECT COUNT(*) AS count FROM jobs WHERE identity != ? AND json_extract(data, '$.payment') IS NOT NULL").get(identity(request))!.count
+      if (others >= scope.launches) out(`${others} approved launch(es) already hold an authorization.`)
     },
     budgets: () => config.budgets,
     async verify() {
@@ -326,19 +364,30 @@ export function evmAdapter(config: EvmAdapterConfig, db: Database): PromotionalT
         const current = await executed(p, await client.getBlockNumber({ cacheTime: 0 }))
         if (current === prepared.digest) return
         if (current !== ZERO) throw new Error('Operation already bound to other bytes')
-        let gas: bigint | undefined
+        let gas: bigint
         try {
-          ({ request: { gas } } = await client.simulateContract({ account, address: p.executor, abi: executorAbi, functionName: 'execute', args: executeArgs(p, prepared.digest), value: BigInt(p.value) }))
+          await client.simulateContract({ account, address: p.executor, abi: executorAbi, functionName: 'execute', args: executeArgs(p, prepared.digest), value: BigInt(p.value) })
+          gas = await client.estimateContractGas({ account, address: p.executor, abi: executorAbi, functionName: 'execute', args: executeArgs(p, prepared.digest), value: BigInt(p.value) })
         } catch (cause) {
           // Another worker executed it between the read and the simulation: nothing to send.
           const revert = cause instanceof BaseError ? cause.walk((e) => e instanceof ContractFunctionRevertedError) : null
           if (revert instanceof ContractFunctionRevertedError && revert.data?.errorName === 'OperationDone') return
           throw cause
         }
+        const limit = (gas * 12n) / 10n
+        const fee = await fees(p.chain)
+        const data = encodeFunctionData({ abi: executorAbi, functionName: 'execute', args: executeArgs(p, prepared.digest) })
+        await assertAffordable(p.chain, step, limit, fee.maxFeePerGas, data)
+        if (step.kind === 'payment' && config.scope) {
+          // Serialized with every other send on this chain, so two jobs cannot both take the last slot.
+          const settled = db.query<{ count: number }, [string]>('SELECT COUNT(*) AS count FROM evm_payments WHERE operation != ?').get(p.operation)!.count
+          if (settled >= config.scope.launches) throw new LaunchError(403, 'pilot_scope', 'The approved number of launches has already been paid. Nothing was sent.')
+          db.query('INSERT OR IGNORE INTO evm_payments(operation, sent_at) VALUES(?, ?)').run(p.operation, Date.now())
+        }
         let tx: Hex | undefined
         for (let attempt = 0; attempt < 3 && !tx; attempt++) {
           try { tx = await wallets[p.chain].writeContract({ account, chain: chainOf(chains[p.chain]), address: p.executor, abi: executorAbi, functionName: 'execute',
-            args: executeArgs(p, prepared.digest), value: BigInt(p.value), gas, ...(await priority(p.chain)) }) } catch (cause) {
+            args: executeArgs(p, prepared.digest), value: BigInt(p.value), gas: limit, ...fee }) } catch (cause) {
             // Another worker's execution landed between our simulation and our send: nothing to send.
             // Observe decides afterwards whether that execution is final, pending or was dropped.
             if (String(cause).includes(OPERATION_DONE) || await client.readContract({ address: p.executor, abi: executorAbi, functionName: 'digestOf', args: [p.operation], blockTag: 'pending' }) === prepared.digest) return
@@ -347,6 +396,8 @@ export function evmAdapter(config: EvmAdapterConfig, db: Database): PromotionalT
         }
         db.query('INSERT OR IGNORE INTO evm_broadcasts(operation, chain, tx, sent_at) VALUES(?,?,?,?)').run(p.operation, p.chain, tx!, Date.now())
         const receipt = await client.waitForTransactionReceipt({ hash: tx!, timeout: config.receiptTimeoutMs ?? 120_000 })
+        const l1 = (receipt as TransactionReceipt & { l1Fee?: bigint }).l1Fee ?? 0n
+        db.query('INSERT OR IGNORE INTO evm_spend(tx, chain, wei) VALUES(?,?,?)').run(tx!, p.chain, (receipt.gasUsed * receipt.effectiveGasPrice + l1).toString())
         if (receipt.status !== 'success' && await executed(p, receipt.blockNumber) !== prepared.digest) throw new Error(`${step.id} execution reverted in ${tx}`)
       }
       const next = sending[p.chain].then(run, run)
