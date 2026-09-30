@@ -42,7 +42,8 @@ this is not a route proof.** A real transfer needs the live Guardian set to obse
 1. **Six-decimal mint with manager-PDA authority.** A classic SPL mint is created at six decimals
    with zero supply and no freeze authority, then its mint authority is handed to the manager's
    `token_authority` PDA before `initialize`. The program checks that constraint itself in burning
-   mode: initialization fails if the authority was not handed over first.
+   mode (`InvalidMintAuthority`). The rehearsal satisfies that constraint; it does not run the
+   negative case, so that refusal is read from the pinned source rather than executed here.
 2. **Burning manager and peers.** `initialize` in burning mode on Wormhole chain 1, one registered
    transceiver, threshold 1, an Arc peer at chain 71 registered on both the manager and the
    transceiver. The written config is read back and asserted, including that the deployer is the
@@ -63,9 +64,13 @@ this is not a route proof.** A real transfer needs the live Guardian set to obse
    published core bridge message is read back and decoded, and its trimmed amount, decimals and
    destination chain are asserted against the debit. A second publication of the same outbox item is
    refused (`MessageAlreadySent`).
-7. **Round-trip conservation.** After a credit and a matching debit the spoke is back to zero supply
-   with the full issuance accounted for, and the in-flight state in between counts the transfer once,
-   as pending.
+7. **Round-trip conservation, spoke side.** After a credit and a matching debit the spoke is back to
+   zero measured supply, zero recipient balance and zero custody. The hub half of the conservation
+   claim is **modelled, not observed**: no Arc hub exists to read, so the rehearsal derives hub
+   circulating and custody from the measured spoke supply against the fixed issuance. That makes
+   `reconcileSpoke` unable to fail on its own in the rehearsal, and passing it there is not
+   independent evidence. The invariant itself is unit-tested against cases that do fail, and the
+   record carries `modelledHubSide: true`.
 8. **Restart recovery.** The validator is `SIGKILL`ed after a claim is approved and finalized but
    before it is credited. The same ledger is reopened: the claim is still there with the same
    amount, the restart credited nothing on its own, releasing it afterwards credits exactly once,
@@ -73,8 +78,11 @@ this is not a route proof.** A real transfer needs the live Guardian set to obse
 9. **Rate-limited claim.** A claim above the inbound limit is queued with a release timestamp rather
    than dropped, and an early release is refused (`CantReleaseYet`). The claim is retained.
 
-Every refusal in the record carries the program's own error code rather than a generic simulation
-failure, so the evidence names the constraint that held.
+Every refusal in the record names the constraint that held rather than a generic simulation failure.
+Most are Anchor error numbers from the manager. One is not: re-validating an already-delivered VAA is
+refused by the runtime with `Allocate ... already in use`, because the validated-message account is a
+PDA of the message id and already exists. That is the same guarantee reached a different way, and it
+is worth reading as such rather than as an NTT check.
 
 ### The pool path stays closed
 
@@ -132,6 +140,8 @@ deployment records.
   for both, before anything is funded.
 - **A devnet rehearsal.** Wormhole's SVM guide uses Solana devnet, not Solana testnet, for NTT token
   creation. A public rehearsal goes there first.
+- **An observed hub side.** Until an Arc locking manager exists, hub custody cannot be read and the
+  cross-chain half of supply conservation stays modelled.
 - **Quote inventory.** NTT moves the canonical token only. USDC for the pool and SOL for gas have to
   be pre-positioned; SVM CCTP is a separate decision and stays closed.
 

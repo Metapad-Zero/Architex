@@ -169,9 +169,14 @@ async function send(connection: Connection, payer: Keypair, instructions: Transa
   }
 }
 /**
- * Records the on-chain refusal rather than swallowing it, so the evidence names the constraint the
- * program enforced. A bare "simulation failed" would not distinguish a rejected replay from a
- * malformed transaction, so the program logs are searched for the error the runtime raised.
+ * Records the on-chain refusal rather than swallowing it, so the evidence names the constraint that
+ * held. A bare "simulation failed" would not distinguish a rejected replay from a malformed
+ * transaction, so the program logs are searched for the error that was raised.
+ *
+ * Note that not every refusal is an NTT error number. Re-validating an already-delivered VAA is
+ * refused by the runtime with `Allocate ... already in use`, because the validated-message account
+ * is a PDA of the message id and already exists. That is a weaker-looking line than an Anchor error
+ * but it is the same guarantee: the second delivery cannot create a second claim.
  */
 async function expectRefusal(label: string, attempt: () => Promise<unknown>): Promise<void> {
   try {
@@ -249,16 +254,32 @@ async function postVaa(connection: Connection, payer: Keypair, deployment: NttDe
 
 /* ------------------------------------------------------------------ accounting */
 
+/**
+ * Measured spoke state, plus a MODELLED hub side.
+ *
+ * `spokeSupply` and `custody` are read from the chain. The two hub figures are derived from them
+ * against the fixed issuance, because no Arc hub exists to read: there is no locking manager whose
+ * custody could be observed. `reconcileSpoke` therefore cannot fail on its own here, and passing it
+ * is not independent evidence. It is kept as a guard on this function's own arithmetic, and the
+ * record marks the hub side as modelled so a reader does not mistake it for an observation.
+ *
+ * What the chain actually attests to is the spoke mint supply, the recipient balance, the custody
+ * balance, the inbox item and the bytes of the published message. Those are asserted separately.
+ */
 async function supplyOf(connection: Connection, deployment: NttDeployment, pending: bigint) {
   const mint = await readMint(connection, deployment.mint)
   const ledger = {
     issuance: ISSUANCE,
-    hubCirculating: ISSUANCE - mint.supply - pending,
-    hubCustody: mint.supply + pending,
     spokeSupply: mint.supply,
     pending,
+    modelledHubCirculating: ISSUANCE - mint.supply - pending,
+    modelledHubCustody: mint.supply + pending,
   }
-  return { ...ledger, ...reconcileSpoke(ledger), custody: await readTokenBalance(connection, deployment.custody()) }
+  const modelled = reconcileSpoke({
+    issuance: ledger.issuance, spokeSupply: ledger.spokeSupply, pending: ledger.pending,
+    hubCirculating: ledger.modelledHubCirculating, hubCustody: ledger.modelledHubCustody,
+  })
+  return { ...ledger, modelled, custody: await readTokenBalance(connection, deployment.custody()) }
 }
 
 /* ------------------------------------------------------------------ the rehearsal */
@@ -339,8 +360,8 @@ async function main(): Promise<void> {
     assert(books.spokeSupply === TRANSFER, 'credit did not mint exactly the transferred amount')
     assert(await readTokenBalance(connection, recipientAta) === TRANSFER, 'recipient did not receive the credit')
     assert(books.custody === 0n, 'custody retained tokens after a credit')
-    assert(books.conserved && books.backed, 'supply did not reconcile after the credit')
-    record('credit', `VAA ${posted.posted.toBase58()} credited ${TRANSFER} atoms once; spoke supply ${books.spokeSupply}, custody 0, hub backing reconciled`)
+    assert(books.modelled.conserved && books.modelled.backed, 'the modelled ledger contradicts itself')
+    record('credit', `VAA ${posted.posted.toBase58()} credited ${TRANSFER} atoms once; measured spoke supply ${books.spokeSupply}, measured custody 0. The hub side is modelled, not observed: no Arc hub exists to read.`)
 
     /* 4. Replay of a completed credit, submitted by someone other than the original sender. */
     await expectRefusal('replay: same VAA re-validated', () => send(connection, stranger, [spoke.receiveWormholeMessage(stranger.publicKey, posted.posted, ARC_CHAIN, first.message.id)]))
@@ -375,7 +396,7 @@ async function main(): Promise<void> {
     })
     books = await supplyOf(connection, spoke, 0n)
     assert(books.spokeSupply === TRANSFER, 'a rejected credit changed the spoke supply')
-    record('unauthorized', `three authenticated-but-unauthorized deliveries refused; spoke supply unchanged at ${books.spokeSupply}`)
+    record('unauthorized', `three authenticated-but-unauthorized deliveries refused; measured spoke supply unchanged at ${books.spokeSupply}`)
 
     /* 6. Outbound debit and its published message. */
     const outboxItem = Keypair.generate()
@@ -384,7 +405,7 @@ async function main(): Promise<void> {
     books = await supplyOf(connection, spoke, TRANSFER)
     assert(books.spokeSupply === 0n, 'the debit did not burn the transferred amount')
     assert(books.custody === 0n, 'custody retained tokens after a debit')
-    assert(books.conserved && books.backed, 'supply did not reconcile with the transfer in flight')
+    assert(books.modelled.conserved && books.modelled.backed, 'the modelled ledger contradicts itself')
     await send(connection, payer, [spoke.releaseWormholeOutbound(payer.publicKey, outboxItem.publicKey, true)])
     const published = await fetchAccount(connection, spoke.at.wormholeMessage(outboxItem.publicKey))
     const start = published.findIndex((_, index) => published[index] === 0x99 && published[index + 1] === 0x45 && published[index + 2] === 0xff && published[index + 3] === 0x10)
@@ -396,11 +417,12 @@ async function main(): Promise<void> {
     record('debit', `burned ${TRANSFER} atoms and published one message to Arc: trimmed amount ${emitted.managerPayload.payload.amount.amount} at ${emitted.managerPayload.payload.amount.decimals} decimals, in flight and still backed`)
     await expectRefusal('replay: same outbox item published twice', () => send(connection, stranger, [spoke.releaseWormholeOutbound(stranger.publicKey, outboxItem.publicKey, true)]))
 
-    /* 7. A round trip conserves the issuance exactly. */
+    /* 7. A round trip returns the spoke to zero. The hub half of that is modelled, not observed. */
     books = await supplyOf(connection, spoke, 0n)
     assert(books.spokeSupply === 0n, 'the completed round trip left supply on the spoke')
-    assert(books.hubCirculating === ISSUANCE, 'the completed round trip did not return the issuance to the hub')
-    record('round trip', `credit then debit of ${TRANSFER} atoms returned the spoke to zero supply with the full ${ISSUANCE} atom issuance accounted for`)
+    assert(await readTokenBalance(connection, recipientAta) === 0n, 'the completed round trip left tokens with the recipient')
+    assert(books.custody === 0n, 'the completed round trip left tokens in custody')
+    record('round trip', `credit then debit of ${TRANSFER} atoms returned the spoke to zero measured supply, zero recipient balance and zero custody. Returning the issuance to the hub is modelled: an Arc hub would have to be read to observe it.`)
 
     /* 8. Crash after the claim is approved and before it is credited. */
     const pending = inboundTransfer(spoke.manager, arcManager, arcTransceiver, payer.publicKey, TRANSFER, 5n, 'crash-recovery')
@@ -475,6 +497,8 @@ async function main(): Promise<void> {
         transceiver: statSync(join(DEPLOY, 'ntt_transceiver.so')).size,
       },
       publicRouteTested: false,
+      modelledHubSide: true,
+      measured: 'spoke mint supply, recipient balance, custody balance, inbox item, published message bytes',
       steps,
     }
     const out = join(ROOT, 'output/equilibrium')
