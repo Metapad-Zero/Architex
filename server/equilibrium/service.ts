@@ -1,10 +1,9 @@
 import { encodePaymentResponseHeader } from '@x402/core/http'
 import { required, verifyPayment } from './payment'
 import { publicJob, quote, runJob } from './runner'
-import type { JobStore } from './store'
-import { LaunchError, type PromotionalTokenAdapter } from './types'
+import { LaunchError, type JobStorage, type PromotionalTokenAdapter } from './types'
 
-export function createLaunchService(store: JobStore, adapter: PromotionalTokenAdapter, now: () => number = Date.now) {
+export function createLaunchService(store: JobStorage, adapter: PromotionalTokenAdapter, now: () => number = Date.now) {
   return async (request: Request): Promise<Response> => {
     try {
       const url = new URL(request.url)

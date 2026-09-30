@@ -46,6 +46,18 @@ export interface PaymentAuthorization {
 }
 export interface SignedPayment { authorization: PaymentAuthorization; signature: Hex }
 export interface PaymentTerms { chainId: number; asset: Address; payTo: Address; name: string; version: string }
+/** Settlement evidence, recorded and readable independently of launch fulfillment. */
+export interface Settlement {
+  chainId: number
+  asset: Address
+  payer: Address
+  payTo: Address
+  /** The EIP-3009 authorization nonce. At most one settlement may ever exist for it. */
+  nonce: Hex
+  amount: Atoms
+  transaction: string
+  finalizedAt: number
+}
 export interface Job {
   id: Hex
   identity: Hex
@@ -55,11 +67,44 @@ export interface Job {
   terms: PaymentTerms
   total: Atoms
   payment?: SignedPayment
+  /** Present only once the authorization settled with finalized evidence. */
+  settlement?: Settlement
   steps: Step[]
+  /**
+   * Whether the unattended sweep may claim this job. A failure that submitted nothing — an
+   * expired authorization, a route that closed before any effect went out — blocks it, so the
+   * sweep cannot reclaim the same doomed job every tick. Progress makes it eligible again, and
+   * an explicit client request always reaches the job directly regardless of this marker.
+   */
+  sweep: 'eligible' | 'blocked'
   state: 'awaiting_payment' | 'running' | 'partial' | 'complete'
   error?: string
   revision: number
   createdAt: number
+}
+/**
+ * The durable contract the runner and service depend on. SQLite satisfies it for a single
+ * host; a production deployment substitutes a transactional shared database implementing
+ * the same revision fencing, renewable leases and settled-authorization uniqueness.
+ */
+export interface JobStorage {
+  /** The lease this store grants. Workers derive their heartbeat interval from it. */
+  readonly leaseMs: number
+  get(id: string): Job | undefined
+  insert(job: Job): Job
+  claim(id: Hex, owner: string, now: number, duration?: number): Job
+  /** Extend an owned lease without writing job data. Throws if the lease was lost. */
+  renew(id: Hex, owner: string, now: number, duration?: number): void
+  save(job: Job, owner: string, now: number): void
+  release(id: string, owner: string): void
+  list(limit?: number): Job[]
+  /** Unleased, sweep-eligible jobs that are not terminal, so a restart resumes without a request. */
+  resumable(now: number, limit?: number): Job[]
+  /** Bind (chainId, asset, nonce) to this job before any settlement may be submitted. */
+  reserveAuthorization(job: Job): void
+  /** Record finalized settlement against the reserved authorization. Idempotent per job. */
+  recordSettlement(settlement: Settlement, jobId: Hex): Settlement
+  settlementOf(jobId: Hex): Settlement | undefined
 }
 export interface EffectContext { job: Job; step: Step }
 export interface PromotionalTokenAdapter {
