@@ -1,6 +1,7 @@
 import { Database } from 'bun:sqlite'
 import { describe, expect, test } from 'bun:test'
 import type { Address } from 'viem'
+import { createJob } from '../../request'
 import { JobStore } from '../../store'
 import { createLaunchService } from '../../service'
 import { LaunchError, type LaunchRequest } from '../../types'
@@ -85,9 +86,50 @@ describe('EQUILIBRIUM Robinhood fulfillment adapter (no forks)', () => {
     expect(conflict.status).toBe(409)
     expect((await conflict.json() as { error: string }).error).toBe('identity_conflict')
     // Once a job binds the asset (its payment step prepared), no other request may launch it.
-    store.db.query('INSERT INTO robinhood_launches(asset, identity, job, created_at) VALUES(?,?,?,?)').run('unit-asset', '0xother', '0xotherjob', 0)
+    store.db.query('INSERT INTO robinhood_launches(asset, identity, job, payer, valid_before, created_at) VALUES(?,?,?,?,?,?)').run('unit-asset', '0xother', '0xotherjob', payer, Math.floor(now / 1000) + 60, 0)
     const second = await post(request('req-unit-http-2', Math.floor(now / 1000)))
     expect(second.status).toBe(409)
     expect((await second.json() as { error: string }).error).toBe('asset_launched')
+  })
+
+  test('a holder refuses others until its authorization lapses; settled holders refuse forever', async () => {
+    const store = new JobStore(':memory:')
+    const adapter = robinhoodFulfillment(config(), store.db)
+    await journalAsset(adapter)
+    const now = Math.floor(Date.now() / 1000)
+    const hold = (validBefore: number, settled: number) => {
+      store.db.query('DELETE FROM robinhood_launches').run()
+      store.db.query('INSERT INTO robinhood_launches(asset, identity, job, payer, valid_before, settled, created_at) VALUES(?,?,?,?,?,?,?)').run('unit-asset', '0xholder', '0xholderjob', payer, validBefore, settled, 0)
+    }
+    hold(now + 60, 0)
+    expect(code(() => adapter.assertReady(request('req-unit-other', now)))).toBe('asset_launched')
+    // Past validBefore the quote may proceed; the payment step decides from chain state before charging.
+    hold(now - 1, 0)
+    expect(code(() => adapter.assertReady(request('req-unit-other', now)))).toBeNull()
+    hold(now - 1, 1)
+    expect(code(() => adapter.assertReady(request('req-unit-other', now)))).toBe('asset_launched')
+  })
+
+  test('a released or non-holding job is refused at every step before any chain access', async () => {
+    const store = new JobStore(':memory:')
+    // The RPCs point at closed loopback ports: reaching a chain would fail with another error.
+    const adapter = robinhoodFulfillment(config(), store.db)
+    await journalAsset(adapter)
+    const now = Math.floor(Date.now() / 1000)
+    const job = createJob(request('req-unit-released', now), adapter, now)
+    job.payment = { authorization: { from: payer, to: loopback.arc.executor, value: job.total, validAfter: '0', validBefore: String(job.request.quote.expires), nonce: job.id }, signature: `0x${'11'.repeat(65)}` }
+    const prepared = { operation: job.id, digest: job.id, bytes: '{}' }
+    const refusals = async () => Promise.all(job.steps.map(async (step) => {
+      const at = async (fn: () => Promise<unknown>) => { try { await fn(); return null } catch (cause) { return cause instanceof LaunchError ? cause.code : String(cause) } }
+      return [step.id, await at(() => adapter.prepare({ job, step })), await at(() => adapter.observe({ job, step }, prepared)), await at(() => adapter.broadcast({ job, step }, prepared))]
+    }))
+    // Another job holds the asset: every step but payment is refused as not holding it.
+    store.db.query('INSERT INTO robinhood_launches(asset, identity, job, payer, valid_before, settled, created_at) VALUES(?,?,?,?,?,?,?)').run('unit-asset', '0xholder', '0xholderjob', payer, now + 60, 1, 0)
+    for (const [step, ...codes] of await refusals()) expect([step, ...codes]).toEqual([step, 'asset_launched', 'asset_launched', 'asset_launched'])
+    // Released: the job can never reacquire the asset, even once nobody holds it.
+    store.db.query('DELETE FROM robinhood_launches').run()
+    store.db.query('INSERT INTO robinhood_released(job, asset, identity, reason, block, released_at) VALUES(?,?,?,?,?,?)').run(job.id, 'unit-asset', job.identity, 'authorization expired', '1', 0)
+    for (const [step, ...codes] of await refusals()) expect([step, ...codes]).toEqual([step, 'payment_failed', 'payment_failed', 'payment_failed'])
+    expect(store.db.query('SELECT COUNT(*) AS n FROM robinhood_launches').get()).toEqual({ n: 0 })
   })
 })

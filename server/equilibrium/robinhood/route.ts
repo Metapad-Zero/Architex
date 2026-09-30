@@ -1,6 +1,6 @@
 import type { Database } from 'bun:sqlite'
 import {
-  BaseError, ContractFunctionRevertedError, ContractFunctionZeroDataError, createPublicClient, createWalletClient, decodeEventLog, defineChain, encodeAbiParameters,
+  BaseError, ContractFunctionRevertedError, ContractFunctionZeroDataError, HttpRequestError, TimeoutError, createPublicClient, createWalletClient, decodeEventLog, defineChain, encodeAbiParameters,
   encodeFunctionData, http, parseAbi, zeroAddress, type Address, type Hex, type PublicClient, type TransactionReceipt, type WalletClient,
 } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
@@ -129,8 +129,9 @@ export function robinhoodRoute(config: RobinhoodRouteConfig, db: Database, optio
   const sending: Record<Side, Promise<unknown>> = { arc: Promise.resolve(), robinhood: Promise.resolve() }
   const L = layout(config)
 
-  async function digestOf(side: Side, operation: Hex, blockTag: 'latest' | 'pending' = 'latest'): Promise<Hex> {
-    try { return await clients[side].readContract({ address: config[side].executor, abi: executorAbi, functionName: 'digestOf', args: [operation], blockTag }) } catch (cause) {
+  async function digestOf(side: Side, operation: Hex, at: 'latest' | 'pending' | bigint = 'latest'): Promise<Hex> {
+    const block = typeof at === 'bigint' ? { blockNumber: at } : { blockTag: at }
+    try { return await clients[side].readContract({ address: config[side].executor, abi: executorAbi, functionName: 'digestOf', args: [operation], ...block }) } catch (cause) {
       if (cause instanceof BaseError && cause.walk((e) => e instanceof ContractFunctionZeroDataError)) return ZERO
       throw cause
     }
@@ -200,11 +201,19 @@ export function robinhoodRoute(config: RobinhoodRouteConfig, db: Database, optio
         tx = await wallets[side].writeContract({ account, chain: chainOf(config[side]), address: p.executor, abi: executorAbi, functionName: 'execute', args, value: BigInt(p.value), gas: (gas * 12n) / 10n, ...fees })
       } catch (cause) {
         if (String(cause).includes(OPERATION_DONE) || await digestOf(side, operation, 'pending') === digest) return executedReceipt(side, operation)
+        // A transport failure may still have delivered the transaction: its outcome is unknown, not failed.
+        if (cause instanceof BaseError && cause.walk((e) => e instanceof HttpRequestError || e instanceof TimeoutError)) throw new LaunchError(409, 'broadcast_uncertain', `${name} may have been sent; observe it before resending.`)
         throw cause
       }
       options.afterSend?.(name, tx)
       db.query('UPDATE robinhood_ops SET tx=? WHERE operation=?').run(tx, operation)
-      const receipt = await clients[side].waitForTransactionReceipt({ hash: tx, timeout: config.receiptTimeoutMs ?? 120_000 })
+      let receipt: TransactionReceipt
+      try {
+        receipt = await clients[side].waitForTransactionReceipt({ hash: tx, timeout: config.receiptTimeoutMs ?? 120_000 })
+      } catch {
+        // The transaction is on the wire. Without a receipt it is neither done nor failed.
+        throw new LaunchError(409, 'broadcast_uncertain', `${name} was sent in ${tx} and has no receipt yet; observe it before resending.`)
+      }
       if (receipt.status === 'success') return receipt
       // Our copy lost a race to another worker's identical operation: the other one is the effect.
       if (await digestOf(side, operation) === digest) return executedReceipt(side, operation)

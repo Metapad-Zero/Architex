@@ -19,6 +19,12 @@ import { robinhoodRoute, type RobinhoodRoute, type RobinhoodRouteConfig, type Si
  * effect is one `EquilibriumExecutor.execute(operation, digest, calls)` and the executor refuses a
  * second execution of an operation on-chain, so a stale worker, a restarted process or a replayed
  * transaction finds the operation done instead of doing it again.
+ *
+ * The asset is reserved for one job from its payment step onward. The reservation moves to another
+ * job only once chain state proves the holder's payment can never settle: at a block `confirmations`
+ * deep its operation is unexecuted and the authorization has expired or its nonce is spent. A
+ * released job is refused at every later step, so it cannot charge or fulfil after ownership moves.
+ * A send whose outcome is unknown keeps the reservation and stays observable for the sweep.
  */
 export interface RobinhoodFulfillmentConfig {
   route: RobinhoodRouteConfig
@@ -51,6 +57,11 @@ const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase()
 const call = (target: Address, data: Hex, value = 0n) => ({ target, value: value.toString(), data })
 const destination = (request: LaunchRequest, chain: 'arc' | 'robinhood') => request.destinations.find((d) => d.chain === chain)
 
+/** The job holding the asset, with what decides whether its payment can still settle. */
+interface Reservation { identity: string; job: string; payer: string; valid_before: number; settled: number }
+/** Route errors that leave a send's outcome unknown. The step is observed again, never re-planned. */
+const UNCERTAIN = new Set(['broadcast_uncertain', 'pending', 'pending_dropped'])
+
 /** What the job persists for a step: the route operation it runs and that operation's exact bytes. */
 interface Binding {
   environment: string
@@ -74,7 +85,8 @@ export function robinhoodFulfillment(config: RobinhoodFulfillmentConfig, db: Dat
   const L = route.layout
   const { arc, robinhood } = config.route
   const clients: Record<Side, PublicClient> = route.clients
-  db.exec('CREATE TABLE IF NOT EXISTS robinhood_launches (asset TEXT PRIMARY KEY, identity TEXT NOT NULL, job TEXT NOT NULL, created_at INTEGER NOT NULL)')
+  db.exec(`CREATE TABLE IF NOT EXISTS robinhood_launches (asset TEXT PRIMARY KEY, identity TEXT NOT NULL, job TEXT NOT NULL, payer TEXT NOT NULL, valid_before INTEGER NOT NULL, settled INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS robinhood_released (job TEXT PRIMARY KEY, asset TEXT NOT NULL, identity TEXT NOT NULL, reason TEXT NOT NULL, block TEXT NOT NULL, released_at INTEGER NOT NULL);`)
   const pinned = { labels: config.labels, asset: { ...config.route.asset, issuance: config.route.asset.issuance.toString() }, arc: { chainId: arc.chainId, executor: arc.executor, usdc: config.arc.usdc, factory: config.arc.factory },
     robinhood: { chainId: robinhood.chainId, executor: robinhood.executor, venue: robinhood.venue, quote: robinhood.quote }, limits: { outbound: config.route.limits.outbound.toString(), inbound: config.route.limits.inbound.toString() },
     pricing: { arc: config.pricing.arc.toString(), robinhood: config.pricing.robinhood.toString() }, budgets: config.budgets }
@@ -89,7 +101,45 @@ export function robinhoodFulfillment(config: RobinhoodFulfillmentConfig, db: Dat
     throw new Error(`No Robinhood fulfillment plan for ${step.id}`)
   }
   const persisted = (name: string) => db.query<{ digest: Hex }, [string]>('SELECT digest FROM robinhood_ops WHERE operation=?').get(L.op(name))
-  const boundJob = () => db.query<{ identity: string; job: string }, [string]>('SELECT identity, job FROM robinhood_launches WHERE asset=?').get(config.route.asset.id)
+  const boundJob = () => db.query<Reservation, [string]>('SELECT identity, job, payer, valid_before, settled FROM robinhood_launches WHERE asset=?').get(config.route.asset.id)
+  const released = (job: string) => db.query<{ reason: string; block: string }, [string]>('SELECT reason, block FROM robinhood_released WHERE job=?').get(job)
+  const failed = (job: string, why: { reason: string; block: string }) =>
+    new LaunchError(409, 'payment_failed', `Job ${job}'s payment can never settle (${why.reason} at Arc block ${why.block}); its asset reservation was released. Nothing was charged. Start a new request.`)
+
+  /** Refuse any work for a job that does not hold the asset. A released job never reacquires it. */
+  function assertOwner(job: Job) {
+    const gone = released(job.id)
+    if (gone) throw failed(job.id, gone)
+    const bound = boundJob()
+    if (!bound || bound.job !== job.id) throw new LaunchError(409, 'asset_launched', `Job ${job.id} does not hold asset ${config.route.asset.id}${bound ? `; job ${bound.job} does` : ''}. Nothing was sent.`)
+  }
+
+  /**
+   * Why a reserved payment can never settle, or null while it still could. Read at one block
+   * `confirmations` deep: the operation is unexecuted there, and either the authorization's
+   * validBefore has passed (block time only grows) or its nonce is spent by something else. Either
+   * way no later block can execute it, and the persisted bytes of it revert if anyone resends them.
+   */
+  async function unsettleable(job: string, r: Pick<Reservation, 'payer' | 'valid_before'>): Promise<{ reason: string; block: string } | null> {
+    const latest = await clients.arc.getBlockNumber({ cacheTime: 0 })
+    const at = latest - BigInt(arc.confirmations)
+    if (await route.digestOf('arc', L.op(`job:${job}:payment:arc`), at) !== ZERO) {
+      db.query('UPDATE robinhood_launches SET settled=1 WHERE job=?').run(job)
+      return null
+    }
+    const block = await clients.arc.getBlock({ blockNumber: at })
+    if (block.timestamp >= BigInt(r.valid_before)) return { reason: 'authorization expired', block: at.toString() }
+    const spent = await clients.arc.readContract({ address: config.arc.usdc, abi: usdcAbi, functionName: 'authorizationState', args: [r.payer as Address, job as Hex], blockNumber: at })
+    return spent ? { reason: 'authorization nonce spent elsewhere', block: at.toString() } : null
+  }
+  /** Move the job out of the reservation. Idempotent; only ever removes the named job's row. */
+  function release(job: string, why: { reason: string; block: string }) {
+    db.transaction(() => {
+      const bound = boundJob()
+      if (bound?.job === job) db.query('DELETE FROM robinhood_launches WHERE asset=? AND job=?').run(config.route.asset.id, job)
+      db.query('INSERT OR IGNORE INTO robinhood_released(job, asset, identity, reason, block, released_at) VALUES(?,?,?,?,?,?)').run(job, config.route.asset.id, bound?.job === job ? bound.identity : '', why.reason, why.block, Date.now())
+    }).immediate()
+  }
 
   /** eth_call as the executor, returning the address a factory call would create. */
   async function dryRun(side: Side, to: Address, data: Hex): Promise<Address> {
@@ -101,6 +151,7 @@ export function robinhoodFulfillment(config: RobinhoodFulfillmentConfig, db: Dat
 
   async function build(job: Job, step: Step): Promise<{ operation: Hex; digest: Hex; bytes: string; transfer?: string }> {
     const { name, side } = nameOf(job, step)
+    if (step.id !== 'payment:arc') assertOwner(job)
     const refuse = (): never => { throw new LaunchError(409, 'asset_missing', `${name} is not persisted: the existing canonical asset ${config.route.asset.id} must be deployed before a launch job adopts it.`) }
     if (step.id === 'canonical:arc' || step.id === 'manager:arc') return route.persist(name, side, refuse)
     if (step.id === 'manager:robinhood') return route.persist(name, side, route.spokeCalls)
@@ -109,11 +160,20 @@ export function robinhoodFulfillment(config: RobinhoodFulfillmentConfig, db: Dat
       if (!payment) throw new Error('Payment step without a verified authorization')
       const a = payment.authorization
       if (!same(a.to, arc.executor)) throw new Error('Authorization does not pay the Arc executor')
+      const gone = released(job.id)
+      if (gone) throw failed(job.id, gone)
+      // A holder whose payment can provably never settle gives way; any other holder keeps the asset.
+      const holder = boundJob()
+      if (holder && holder.job !== job.id) {
+        const why = holder.settled ? null : await unsettleable(holder.job, holder)
+        if (!why) throw new LaunchError(409, 'asset_launched', `Asset ${config.route.asset.id} is already launched by job ${holder.job}. Nothing was charged.`)
+        release(holder.job, why)
+      }
       // Bind the asset to this job before anything can settle. The loser of a race is refused uncharged.
       db.transaction(() => {
         const bound = boundJob()
         if (bound && bound.job !== job.id) throw new LaunchError(409, 'asset_launched', `Asset ${config.route.asset.id} is already launched by job ${bound.job}. Nothing was charged.`)
-        if (!bound) db.query('INSERT INTO robinhood_launches(asset, identity, job, created_at) VALUES(?,?,?,?)').run(config.route.asset.id, job.identity, job.id, Date.now())
+        if (!bound) db.query('INSERT INTO robinhood_launches(asset, identity, job, payer, valid_before, created_at) VALUES(?,?,?,?,?,?)').run(config.route.asset.id, job.identity, job.id, a.from, Number(a.validBefore), Date.now())
       }).immediate()
       const { r, s, v } = parseSignature(payment.signature)
       return route.persist(name, side, () => [call(config.arc.usdc, encodeFunctionData({ abi: usdcAbi, functionName: 'transferWithAuthorization',
@@ -241,8 +301,13 @@ export function robinhoodFulfillment(config: RobinhoodFulfillmentConfig, db: Dat
       if (!persisted('canonical:arc') || !persisted('manager:arc')) throw new LaunchError(409, 'asset_missing', `The existing canonical asset ${asset.id} and its Arc hub are not deployed in this journal.`)
       const rh = destination(request, 'robinhood')!
       if (BigInt(rh.amount) > config.route.limits.outbound || BigInt(rh.amount) > config.route.limits.inbound) throw new LaunchError(409, 'rate_limit', 'The Robinhood allocation exceeds the configured NTT rate limit and would queue.')
+      // A released request is told why, whoever holds the asset now.
+      const gone = db.query<{ job: string; reason: string; block: string }, [string]>('SELECT job, reason, block FROM robinhood_released WHERE identity=?').get(identity(request))
+      if (gone) throw failed(gone.job, gone)
+      // A settled holder, or one whose authorization could still settle, refuses others outright. Past
+      // its validBefore the request may proceed: the payment step decides from chain state, uncharged.
       const bound = boundJob()
-      if (bound && bound.identity !== identity(request)) throw new LaunchError(409, 'asset_launched', `Asset ${asset.id} is already launched by job ${bound.job}. Nothing was charged.`)
+      if (bound && bound.identity !== identity(request) && (bound.settled || Date.now() / 1000 < bound.valid_before)) throw new LaunchError(409, 'asset_launched', `Asset ${asset.id} is already launched by job ${bound.job}. Nothing was charged.`)
     },
     budgets: () => config.budgets,
     async prepare(context) {
@@ -256,9 +321,15 @@ export function robinhoodFulfillment(config: RobinhoodFulfillmentConfig, db: Dat
     },
     async observe(context, prepared) {
       const { job, step } = context
+      assertOwner(job)
       const b = parse(context, prepared)
       const state = await settled(b)
+      if (state === 'absent' && step.kind === 'payment') {
+        const why = await unsettleable(job.id, boundJob()!)
+        if (why) { release(job.id, why); throw failed(job.id, why) }
+      }
       if (state === 'absent' || state === 'pending') return state
+      if (step.kind === 'payment') db.query('UPDATE robinhood_launches SET settled=1 WHERE job=?').run(job.id)
       if (step.kind === 'manager') await ownedBy(b.side, b.side === 'arc' ? L.hub.proxy : L.spokeManager.proxy, state.blockNumber)
       if (step.kind === 'debit') {
         // Usable only once attested. The debit is already on-chain, so advancing cannot send it again.
@@ -269,10 +340,18 @@ export function robinhoodFulfillment(config: RobinhoodFulfillmentConfig, db: Dat
       return result(b, step, job, state)
     },
     async broadcast(context, prepared) {
+      assertOwner(context.job)
       const b = parse(context, prepared)
-      if (context.step.kind === 'debit') { await route.advance(b.transfer!, 'attested'); return }
-      if (context.step.kind === 'credit') { await route.advance(b.transfer!); return }
-      await route.execute(b.name, b.side, () => { throw new Error(`${b.name} bytes are not journalled; refusing to re-plan during broadcast`) })
+      try {
+        if (context.step.kind === 'debit') await route.advance(b.transfer!, 'attested')
+        else if (context.step.kind === 'credit') await route.advance(b.transfer!)
+        else await route.execute(b.name, b.side, () => { throw new Error(`${b.name} bytes are not journalled; refusing to re-plan during broadcast`) })
+      } catch (cause) {
+        // Possibly on the wire: return so the job records a submission and observes it, keeping the
+        // reservation and the sweep's claim on it. A definite refusal still fails the attempt.
+        if (cause instanceof LaunchError && UNCERTAIN.has(cause.code)) return
+        throw cause
+      }
     },
   }
 }
