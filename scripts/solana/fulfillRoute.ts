@@ -45,17 +45,17 @@ import {
 } from '../../src/lib/equilibriumSolana'
 import { evmToWormholeFormat, type ObservedRoute } from '../../src/lib/equilibriumArcSolana'
 import {
-  decodePlan, inventoryHolder, operationOf, solanaInventoryOwner,
+  decodePlan, inventoryHolder, operationOf, solanaInventoryOwner, spokeClaim,
   type CanonicalPlan, type CreditPlan, type DebitPlan, type InventoryPlan, type LegPlan,
   type PaymentPlan, type RoutePending, type SolanaRoute, type StepPlan,
 } from '../../server/equilibrium/solanaRoute'
-import { LaunchError, type Atoms, type EffectContext, type EffectResult, type Job, type LaunchRequest, type StepKind } from '../../server/equilibrium/types'
+import { LaunchError, type Atoms, type EffectContext, type Job, type LaunchRequest, type Observation, type StepKind } from '../../server/equilibrium/types'
 import {
   ARC_TESTNET, artifact, call, connect, deploy, linkLibraries, overrideGuardianSet, startAnvil,
   stopAnvil, waitForAnvil,
 } from './arcFork'
 import { BURNING, LOCKING, NttDeployment, decodeConfig, decodeInboxItem } from './nttClient'
-import { awaitConfirmed, postVaa, send, startValidator, stopValidator, waitForHealth } from './localValidator'
+import { awaitConfirmed, postVaa, readChainClock, send, startValidator, stopValidator, waitForHealth } from './localValidator'
 import { DEV_GUARDIAN_ADDRESS } from './wormholeCore'
 import {
   associatedTokenAddress, createAssociatedTokenAccount, createMintAccount, initializeMint2, mintTo,
@@ -142,6 +142,53 @@ const SPOKE_ADDRESSES = nttAddresses(SPOKE_MANAGER, SPOKE_TRANSCEIVER, SPOKE_COR
 /** The mint keypair a prepared spoke leg holds the secret for. */
 function mintOf(plan: LegPlan): Keypair {
   return Keypair.fromSeed(Uint8Array.from(Buffer.from(plan.mintSecret!.slice(2), 'hex')))
+}
+
+/**
+ * The spoke leg's persisted plan, which is where this job's mint secret lives.
+ *
+ * Read from the journal rather than recomputed: the secret is random, and that is the point. A mint
+ * address derived from the public job id would let anyone who had merely asked for a quote create the
+ * mint first and choose its authority.
+ */
+function spokeLegPlan(job: Job): LegPlan {
+  const step = job.steps.find((candidate) => candidate.id === 'manager:solana')
+  if (!step?.prepared) throw new Error('The Solana leg has not been prepared, so this job has no mint yet')
+  const plan = decodePlan(step.prepared.operation, step.prepared.bytes)
+  if (plan.kind !== 'leg' || !plan.mintSecret) throw new Error('The Solana leg plan carries no mint secret')
+  return plan
+}
+
+/**
+ * This job's spoke deployment: the pinned programs over this job's own mint.
+ *
+ * Exported because a caller that has to read, dump or rebuild the spoke's accounts needs the same
+ * addresses the route resolves against, and deriving them a second time somewhere else is how two
+ * answers to the same question appear.
+ */
+export function spokeDeployment(job: Job): NttDeployment {
+  return new NttDeployment(SPOKE_MANAGER, SPOKE_TRANSCEIVER, SPOKE_CORE_BRIDGE, mintOf(spokeLegPlan(job)).publicKey)
+}
+
+/** The programs whose accounts make up the spoke's state, in the order a dump wants them. */
+export const SPOKE_PROGRAMS = [SPOKE_MANAGER, SPOKE_TRANSCEIVER, SPOKE_CORE_BRIDGE, TOKEN_PROGRAM] as const
+
+/**
+ * Attempt the spoke's release for a claim whatever its boundary says, so the pinned manager's own
+ * refusal is on the record rather than inferred from the route declining to try.
+ *
+ * Deliberately NOT part of fulfilment. The route's own submission stops short of a release the
+ * manager is holding, which is what keeps a queued launch recoverable; this is the probe that shows
+ * the constraint is the program's and not the adapter's politeness. `revertWhenNotReady` is true, so
+ * an early attempt comes back as a refusal rather than as a transaction that delivered nothing.
+ */
+export async function releaseSpokeClaim(infrastructure: RouteInfrastructure, job: Job, digest: Hex): Promise<void> {
+  const spoke = spokeDeployment(job)
+  const custody = associatedTokenAddress(spoke.mint, infrastructure.payer.publicKey)
+  const instruction = spoke.releaseInboundMint(
+    infrastructure.payer.publicKey, Uint8Array.from(Buffer.from(digest.slice(2), 'hex')), custody, true,
+  )
+  await send(infrastructure.connection, infrastructure.payer, [instruction])
 }
 
 /* ------------------------------------------------------------------ SPL helpers */
@@ -300,7 +347,21 @@ async function arcCost(client: PublicClient, hash: Hex): Promise<Atoms> {
   return ((receipt.gasUsed * receipt.effectiveGasPrice) / 10n ** 12n).toString()
 }
 
-export function fulfillmentRoute(infrastructure: RouteInfrastructure, options: { paymentName?: string; paymentVersion?: string } = {}): SolanaRoute {
+export interface FulfillmentRouteOptions {
+  paymentName?: string
+  paymentVersion?: string
+  /**
+   * The spoke's inbound rate limit for the Arc peer, in atoms. Defaults to the whole issuance, which
+   * is the configuration a launch wants: no claim of its own is ever queued.
+   *
+   * Set below an allocation to exercise the queue. It is part of the route version, because a job
+   * quoted against one limit and resumed against another is a job whose delivery behaviour changed
+   * underneath it, and the runner is right to refuse that.
+   */
+  spokeInboundLimit?: bigint
+}
+
+export function fulfillmentRoute(infrastructure: RouteInfrastructure, options: FulfillmentRouteOptions = {}): SolanaRoute {
   const { arc, payer, admin } = infrastructure
   const client = arc.publicClient
   /**
@@ -333,24 +394,7 @@ export function fulfillmentRoute(infrastructure: RouteInfrastructure, options: {
     if (/^0x0+$/.test(leg.manager)) throw new Error('The Arc bridge leg has not been registered for this job')
     return leg
   }
-  /**
-   * The spoke leg's persisted plan, which is where this job's mint secret lives.
-   *
-   * Read from the journal rather than recomputed: the secret is random, and that is the point. A mint
-   * address derived from the public job id would let anyone who had merely asked for a quote create
-   * the mint first and choose its authority.
-   */
-  const spokeLegPlan = (job: Job): LegPlan => {
-    const step = job.steps.find((candidate) => candidate.id === 'manager:solana')
-    if (!step?.prepared) throw new Error('The Solana leg has not been prepared, so this job has no mint yet')
-    const plan = decodePlan(step.prepared.operation, step.prepared.bytes)
-    if (plan.kind !== 'leg' || !plan.mintSecret) throw new Error('The Solana leg plan carries no mint secret')
-    return plan
-  }
-  /** The spoke deployment for this job: the pinned programs over this job's own mint. */
-  const spokeOf = (job: Job): NttDeployment => new NttDeployment(
-    SPOKE_MANAGER, SPOKE_TRANSCEIVER, SPOKE_CORE_BRIDGE, mintOf(spokeLegPlan(job)).publicKey,
-  )
+  const spokeOf = spokeDeployment
   const accountExists = async (address: PublicKey): Promise<boolean> => (await live().getAccountInfo(address, 'confirmed')) !== null
 
   /** Every core-bridge message this job's hub transceiver published, taken from the chain's logs. */
@@ -393,7 +437,7 @@ export function fulfillmentRoute(infrastructure: RouteInfrastructure, options: {
   }
 
   return {
-    version: `arc-solana-fulfillment-v1;evm=c636cc15b07969e4b44de7e466c999c07e7387a9;svm=${SOLANA_NTT.commit};factory=${infrastructure.factory};registry=${infrastructure.registry};distributor=${infrastructure.distributor};asset=${infrastructure.paymentAsset}`,
+    version: `arc-solana-fulfillment-v1;evm=c636cc15b07969e4b44de7e466c999c07e7387a9;svm=${SOLANA_NTT.commit};factory=${infrastructure.factory};registry=${infrastructure.registry};distributor=${infrastructure.distributor};asset=${infrastructure.paymentAsset};spokeInbound=${options.spokeInboundLimit?.toString() ?? 'issuance'}`,
     terms: {
       chainId: ARC_TESTNET.evmChainId, asset: infrastructure.paymentAsset, payTo: arc.account,
       name: options.paymentName ?? 'USDC-FIXTURE', version: options.paymentVersion ?? '2',
@@ -461,7 +505,7 @@ export function fulfillmentRoute(infrastructure: RouteInfrastructure, options: {
       }
     },
 
-    async observe({ job, step }: EffectContext, plan: StepPlan): Promise<EffectResult | 'absent' | 'pending'> {
+    async observe({ job, step }: EffectContext, plan: StepPlan): Promise<Observation> {
       const operation = operationOf(job, step)
       switch (plan.kind) {
         case 'payment': {
@@ -562,13 +606,24 @@ export function fulfillmentRoute(infrastructure: RouteInfrastructure, options: {
           const digest = Uint8Array.from(Buffer.from(plan.digest.slice(2), 'hex'))
           const inbox = spoke.at.inboxItem(digest)
           const account = await live().getAccountInfo(inbox, 'confirmed')
-          // Not yet redeemed, or redeemed and not yet released. Both mean this credit has not been
-          // delivered; both are safe to submit, because the program refuses a second release and the
+          // Not yet redeemed. Safe to submit: the program refuses a second release and the
           // submission resumes from whichever part of the delivery is missing.
           if (!account) return 'absent'
           const item = decodeInboxItem(account.data)
+          // The manager writes its inbound rate limit into the inbox item as a release boundary, so
+          // a claim it is holding and a claim merely not released yet are the same account in two
+          // states. Read against the Clock sysvar the manager compares against — the host's clock is
+          // not the figure, and on a clock-shifted validator it is not even close — and only when
+          // there is a boundary to read it against.
+          const clock = item.status === 'release_after' ? await readChainClock(live()) : 0n
+          const queued = spokeClaim(
+            plan, { amount: item.amount, recipient: item.recipient.toBase58(), status: item.status, releaseAfter: item.releaseAfter },
+            clock, Math.floor(Date.now() / 1000),
+          )
+          // Recorded on the job, which keeps the claim across a restart, keeps the launch unfulfilled
+          // and keeps the allocation counted as locked-and-not-minted rather than delivered.
+          if (queued) return { queued }
           if (item.status !== 'released') return 'absent'
-          if (item.amount !== BigInt(plan.amount)) throw new Error(`The released claim carries ${item.amount} atoms, not the bound allocation ${plan.amount}`)
           const custody = associatedTokenAddress(spoke.mint, new PublicKey(plan.custodian))
           const held = await readTokenBalance(live(), custody)
           if (held < BigInt(plan.amount)) throw new Error(`The credited account holds ${held} atoms, fewer than the ${plan.amount} this claim released`)
@@ -675,7 +730,10 @@ export function fulfillmentRoute(infrastructure: RouteInfrastructure, options: {
             const leg = await arcLeg(job)
             await send(live(), payer, [
               spoke.setPeer(payer.publicKey, admin.publicKey, ARC_CHAIN, evmToWormholeFormat(leg.manager), issuance, DECIMALS),
-              spoke.setInboundLimit(admin.publicKey, ARC_CHAIN, issuance),
+              // `setPeer` seeds the inbound limit at the peer's own figure; this is the limit the
+              // queue is decided by, and a launch wants it to be the whole issuance so no claim of
+              // its own is ever held. A smaller one is configuration, pinned into the version above.
+              spoke.setInboundLimit(admin.publicKey, ARC_CHAIN, options.spokeInboundLimit ?? issuance),
             ], [admin])
           }
           if (!await accountExists(spoke.at.transceiverPeer(ARC_CHAIN))) {
@@ -729,7 +787,25 @@ export function fulfillmentRoute(infrastructure: RouteInfrastructure, options: {
           if (!await accountExists(inbox)) {
             await send(live(), payer, [spoke.redeem(payer.publicKey, ARC_CHAIN, messageId, digest)])
           }
+          /**
+           * Stop here if the manager is holding the claim it has just written.
+           *
+           * The redeem and the release are two transactions, and the manager's inbound rate limit
+           * lives between them: the vote lands, and the boundary it wrote decides whether the mint
+           * may follow. Attempting the release anyway would fail this step *after* the redeem it did
+           * land — and a step that failed without submitting is exactly what the runner takes the
+           * sweep off, so the one retry that will eventually succeed would never run unattended.
+           *
+           * So the submission does what it can and returns. The observation that follows reads the
+           * same item, records the claim on the durable job, and the launch waits.
+           */
+          const item = decodeInboxItem((await live().getAccountInfo(inbox, 'confirmed'))!.data)
+          if (item.status === 'release_after' && item.releaseAfter !== null && await readChainClock(live()) < item.releaseAfter) return
           const custody = associatedTokenAddress(spoke.mint, new PublicKey(plan.custodian))
+          // `revertWhenNotReady` is true on purpose. A claim the manager is still holding must come
+          // back as a refusal, not as a transaction that succeeded and delivered nothing: the
+          // observation above is what decides a queued claim is not ready, and if the two ever
+          // disagree the right outcome is a failed step rather than a step marked complete.
           await send(live(), payer, [spoke.releaseInboundMint(payer.publicKey, digest, custody, true)])
           return
         }
@@ -789,21 +865,50 @@ export function fulfillmentRoute(infrastructure: RouteInfrastructure, options: {
   }
 }
 
+export interface RestartSpokeOptions {
+  signal?: NodeJS.Signals
+  /**
+   * Rebuild at a NEW genesis from these dumped accounts instead of reopening the existing ledger.
+   *
+   * This is the only way the spoke's clock can move: Agave clamps its vote-timestamp estimate to
+   * 150% of elapsed PoH measured from the `epoch_start_timestamp` a reopened ledger brings back, so
+   * a reopened ledger under an offset clock is pulled straight back to where it was. A new genesis
+   * carrying the accounts the pinned programs wrote is a validator that is honestly later, with the
+   * queue — and the boundary the manager wrote into it — coming across as bytes.
+   */
+  seedDirectory?: string
+  /** The ledger directory for a rebuilt genesis. Required with `seedDirectory`. */
+  ledger?: string
+  /** Extra environment for the validator process only; this is how the clock fixture is applied. */
+  environment?: Record<string, string>
+  /** Accounts to re-fund afterwards. SOL is the one thing a new genesis cannot carry over. */
+  fund?: Keypair[]
+}
+
 /**
- * Restart the spoke validator in place, keeping its ledger, so recovery can be exercised.
+ * Restart the spoke validator so recovery can be exercised: in place by default, keeping its ledger,
+ * or at a new genesis seeded from a dump when the clock has to move.
  *
  * The replacement client is written back onto the infrastructure record, because the route reads it
  * from there: after a SIGKILL the old client's sockets are gone, and a route still holding it would
  * report every account as unreachable rather than as present.
  */
-export async function restartSpoke(infrastructure: RouteInfrastructure, validator: ChildProcess | null, signal: NodeJS.Signals = 'SIGKILL'): Promise<ChildProcess> {
-  stopValidator(validator, signal)
+export async function restartSpoke(infrastructure: RouteInfrastructure, validator: ChildProcess | null, options: RestartSpokeOptions = {}): Promise<ChildProcess> {
+  if (options.seedDirectory && !options.ledger) throw new Error('A seeded rebuild needs its own ledger directory: solana-test-validator ignores --account-dir when the ledger exists.')
+  stopValidator(validator, options.signal ?? 'SIGKILL')
   await new Promise((done) => setTimeout(done, 3_000))
+  const ledger = options.ledger ?? infrastructure.ledger
   const next = startValidator(
     { cwd: SVM, deploy: DEPLOY, fixtures: join(SVM, 'programs/example-native-token-transfers/tests/fixtures'), accounts: join(SVM, 'tests/accounts/mainnet') },
-    infrastructure.ledger, { rpc: infrastructure.rpcPort, faucet: infrastructure.rpcPort + 101 }, false, infrastructure.admin.publicKey,
+    ledger, { rpc: infrastructure.rpcPort, faucet: infrastructure.rpcPort + 101 }, options.seedDirectory !== undefined,
+    infrastructure.admin.publicKey,
+    { seedDirectory: options.seedDirectory, environment: options.environment },
   )
+  infrastructure.ledger = ledger
   infrastructure.connection = new Connection(`http://127.0.0.1:${infrastructure.rpcPort}`, 'confirmed')
   await waitForHealth(infrastructure.connection)
+  for (const account of options.fund ?? []) {
+    await awaitConfirmed(infrastructure.connection, await infrastructure.connection.requestAirdrop(account.publicKey, 500_000_000_000))
+  }
   return next
 }

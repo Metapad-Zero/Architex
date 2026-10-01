@@ -13,12 +13,18 @@
  *   failed payment     an expired authorization and one signed by the wrong key, each refused with
  *                      nothing issued; then the real one, settled exactly once, with the token's own
  *                      nonce refusing the second submission on chain.
- *   interruption       a worker that submits the SPL credit and dies before recording it. The store
- *                      is closed and reopened, and the unattended sweep finishes the launch with no
+ *   a queued credit    the spoke's inbound rate limit holds this launch's own delivery. The claim is
+ *                      bound onto the durable job — amount, recipient, the boundary the manager
+ *                      wrote — the launch stays unfulfilled, the early release is refused on chain,
+ *                      and the locked allocation keeps reconciling as in flight rather than minted.
+ *   spoke restart      the validator killed with SIGKILL and its ledger reopened with the claim
+ *                      outstanding; then rebuilt at a genesis 24 hours later so the manager's own
+ *                      boundary passes and the claim is released, exactly once.
+ *   interruption       a worker that submits that release and dies before recording it. The store is
+ *                      closed and reopened, and the unattended sweep finishes the launch with no
  *                      client request and without crediting twice.
- *   spoke restart      the validator killed with SIGKILL and its ledger reopened mid-launch.
- *   replay             the identical paid request re-sent after completion, and the settled
- *                      authorization resubmitted directly to the token.
+ *   replay             the identical paid request re-sent after completion, the released claim
+ *                      submitted again, and the settled authorization resubmitted to the token.
  *
  * After every checkpoint both chains are read and compared: Arc token supply and locking-manager
  * custody against SPL mint supply and the spoke's custody account, neither derived from the other.
@@ -34,16 +40,21 @@ import { type ChildProcess } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { Keypair } from '@solana/web3.js'
+import { Connection, Keypair, PublicKey, SystemProgram } from '@solana/web3.js'
 import { encodePaymentSignatureHeader } from '@x402/core/http'
 import { privateKeyToAccount } from 'viem/accounts'
 import type { Hex } from 'viem'
+import { reviewReleaseBoundary, seedDifferences } from '../../src/lib/equilibriumArcSolana'
+import { SOLANA_NTT, TOKEN_PROGRAM } from '../../src/lib/equilibriumSolana'
 import { revertReason } from '../../scripts/solana/arcFork'
-import { closeRoute, fulfillmentRoute, openRoute, restartSpoke, type RouteInfrastructure } from '../../scripts/solana/fulfillRoute'
+import { clockShiftEnvironment, prepareClockShift } from '../../scripts/solana/clockShift'
+import { SPOKE_PROGRAMS, closeRoute, fulfillmentRoute, openRoute, releaseSpokeClaim, restartSpoke, spokeDeployment, type RouteInfrastructure } from '../../scripts/solana/fulfillRoute'
+import { readChainClock, refusalReason } from '../../scripts/solana/localValidator'
+import { describeSeed, dumpSpokeLedger, readSeeded, writeSeedDirectory } from '../../scripts/solana/spokeSeed'
 import { AUTHORIZATION_TYPES, paymentDomain, paymentRequirements } from './payment'
 import { publicJob, reconcile } from './runner'
 import { solanaAdapter } from './solanaAdapter'
-import { gateLedger, routePending } from './solanaRoute'
+import { decodePlan, gateLedger, outstandingClaims, routePending } from './solanaRoute'
 import { JobStore } from './store'
 import { createLaunchService } from './service'
 import type { Job, LaunchRequest, PromotionalTokenAdapter, SignedPayment } from './types'
@@ -68,11 +79,30 @@ const ARC_POOL_TOKENS = 100_111_111n
 const SOLANA_POOL_TOKENS = 200_222_222n
 const POOL_QUOTE = 10_333_333n
 
+/**
+ * The spoke's inbound rate limit for the Arc peer, set well below the Solana allocation so this
+ * launch's own credit is queued by the pinned manager rather than released on arrival.
+ *
+ * Nothing else about the queue is arranged. The limit is a peer configuration the manager reads, and
+ * everything that follows from it — the inbox item, the 24-hour boundary written against the Clock
+ * sysvar, the refusal before it, the release after it — is the program's.
+ */
+const SPOKE_INBOUND_LIMIT = 1_000_000n
+/** The pinned SVM program hard-codes this; it is not configurable and not shortened here. */
+const RATE_LIMIT_DURATION = 86_400
+/**
+ * Slack allowed when measuring the delay the manager applied, in seconds. The boundary is compared
+ * against a Clock reading taken a slot or two after the manager took its own, so the measured gap
+ * sits just under the duration. Narrow on purpose: wider and a shortened duration would pass.
+ */
+const DELAY_SLACK = 60
+
 /* ------------------------------------------------------------------ recording */
 
 interface Checkpoint { checkpoint: string; detail: string; at: string }
 const checkpoints: Checkpoint[] = []
 const fixtures: string[] = []
+const clockFixtures: string[] = []
 const refusals: { case: string; refusal: string }[] = []
 
 function record(checkpoint: string, detail: string): void {
@@ -83,9 +113,38 @@ function fixture(what: string): void {
   fixtures.push(what)
   record('FIXTURE', what)
 }
+/** Kept apart from the asset fixtures: a moved clock is the one thing a reader must not miss. */
+function clockFixture(what: string): void {
+  clockFixtures.push(what)
+  record('CLOCK FIXTURE', what)
+}
 function assert(condition: boolean, message: string): asserts condition {
   if (!condition) throw new Error(`Fulfilment assertion failed: ${message}`)
 }
+
+/**
+ * Wait until an account is readable at `finalized`, which is the only commitment a SIGKILL respects.
+ *
+ * The claim is waited for by address rather than by the signature that wrote it: the release happens
+ * inside the route's own submission, which returns nothing a caller could await, and the account is
+ * the durable fact anyway — it is what the rebuilt ledger has to carry across.
+ */
+async function awaitFinalizedAccount(connection: Connection, address: PublicKey, seconds = 120): Promise<void> {
+  const deadline = Date.now() + seconds * 1000
+  for (;;) {
+    if (await connection.getAccountInfo(address, 'finalized')) return
+    if (Date.now() > deadline) throw new Error(`${address.toBase58()} was not finalized on the local validator.`)
+    await new Promise((wait) => setTimeout(wait, 400))
+  }
+}
+
+/** What a passing run does NOT establish, carried into the record rather than left to the reader. */
+const NOT_EXECUTED = [
+  'Any public route. No canonical token, manager, transceiver, mint, inventory or transfer exists on Arc mainnet or testnet, Solana devnet or mainnet-beta, and no funds moved.',
+  'Any venue or AMM pool. The inventory steps place pool tokens and quote inventory into a per-operation holder and deliver the rest of each allocation to the request\'s recipient, atomically. Opening a market adapter is not part of this route.',
+  'Solana network fees as launch cost. They are paid in SOL by the operator\'s fee payer and reported as a zero launch cost rather than converted into the customer\'s six-decimal atoms.',
+  'The return leg. A launch only crosses towards the spoke; burning a representation back to Arc custody is exercised in scripts/solana/integrate.ts and is not part of a launch job.',
+]
 
 /* ------------------------------------------------------------------ the HTTP client */
 
@@ -152,7 +211,10 @@ async function main(): Promise<void> {
   rmSync(JOURNAL, { force: true })
   for (const suffix of ['-wal', '-shm']) rmSync(`${JOURNAL}${suffix}`, { force: true })
 
-  const ledger = mkdtempSync(join(tmpdir(), 'equilibrium-fulfil-'))
+  // Both ledgers this run may use: the one it starts on, and the genesis it rebuilds at to move the
+  // spoke clock. Collected so the cleanup removes whichever were created, in either outcome.
+  const ledgers = [mkdtempSync(join(tmpdir(), 'equilibrium-fulfil-'))]
+  const ledger = ledgers[0]
   const beneficiary = Keypair.generate().publicKey.toBase58()
 
   console.log(`Arc–Solana durable fulfilment harness on ${base}, journal ${JOURNAL}`)
@@ -166,7 +228,8 @@ async function main(): Promise<void> {
   fixture(`One development guardian key ${infrastructure.guardianSubstitution.replaced.join(', ')} → befa429d…0fbe substituted into the Arc core bridge guardian set ${infrastructure.guardianSubstitution.index}, matching the local validator's. The real Guardian set signed nothing here.`)
   record('infrastructure', `Arc fork ${infrastructure.arc.url} with the real core bridge; Solana validator on ${infrastructure.rpcPort} running the pinned NTT programs. Issuance factory ${infrastructure.factory}, leg registry ${infrastructure.registry}, distributor ${infrastructure.distributor}, settlement fixture ${infrastructure.paymentAsset}.`)
 
-  const route = fulfillmentRoute(infrastructure)
+  const route = fulfillmentRoute(infrastructure, { spokeInboundLimit: SPOKE_INBOUND_LIMIT })
+  record('spoke inbound limit', `the spoke's inbound rate limit for the Arc peer is set to ${SPOKE_INBOUND_LIMIT} atoms, below the ${SOLANA_ALLOCATION} this launch delivers, so the pinned manager queues the launch's own credit. The limit is pinned into the route version, so the job cannot be resumed against a different one.`)
   let store = new JobStore(JOURNAL, { leaseMs: 120_000 })
   let adapter: PromotionalTokenAdapter = solanaAdapter(route)
   // The served handler is read through a holder so a scenario can swap in an adapter that holds a
@@ -180,6 +243,42 @@ async function main(): Promise<void> {
       return Response.json({ mode: 'local', route: 'arc-solana', note: 'Fixture settlement asset; no public route.' })
     },
   })
+  /**
+   * The record, written from whatever the run actually reached.
+   *
+   * A closure rather than a block at the end, because the run can legitimately stop short: without
+   * the clock fixture the queued claim cannot be released on this host, and the evidence up to the
+   * boundary is worth keeping. `complete` says which of the two happened, so a reader never has to
+   * infer it from the absence of a section.
+   */
+  const writeRecord = (id: Hex, outcome: { complete: boolean; reconciliation?: unknown; endState?: unknown; notExecuted: string[] }) => {
+    const result = {
+      observedAt: new Date().toISOString(),
+      mode: 'local' as const,
+      complete: outcome.complete,
+      claim: 'Durable shared-supply launch fulfilment over the verified Arc–Solana route, including a credit the spoke\'s own inbound rate limit queued. An Anvil fork of Arc testnet carrying the real deployed Wormhole core bridge, with a locking NTT manager and transceiver deployed onto it per launch, exchanging its own published message bytes with the pinned NTT programs and the real mainnet core bridge binary on a local Solana validator. The paid quote, the job and its status were driven over HTTP. Not a public route, not a devnet, testnet or mainnet deployment, no funds moved.',
+      route: { version: route.version, terms: route.terms, port: PORT, journal: JOURNAL, spokeInboundLimit: SPOKE_INBOUND_LIMIT.toString(), rateLimitDuration: RATE_LIMIT_DURATION },
+      infrastructure: {
+        arcFork: infrastructure.arc.url, solanaRpc: `http://127.0.0.1:${infrastructure.rpcPort}`,
+        factory: infrastructure.factory, registry: infrastructure.registry, distributor: infrastructure.distributor,
+        settlementFixture: infrastructure.paymentAsset, quoteFixture: infrastructure.quoteAsset,
+        solanaQuoteFixtureMint: infrastructure.quoteMint.publicKey.toBase58(),
+        guardianSetIndex: infrastructure.guardianSubstitution.index,
+        guardianSetReplaced: infrastructure.guardianSubstitution.replaced,
+      },
+      job: publicJob(store.get(id)!),
+      endState: outcome.endState,
+      reconciliation: outcome.reconciliation,
+      refusals,
+      fixtures,
+      clockFixtures,
+      notExecuted: outcome.notExecuted,
+      publicRouteTested: false,
+      checkpoints,
+    }
+    const asJson = JSON.stringify(result, (_key, value: unknown) => (typeof value === 'bigint' ? value.toString() : value), 2)
+    writeFileSync(join(OUT, 'arc-solana-fulfillment.json'), `${asJson}\n`)
+  }
   const reopen = (options: { pending?: Set<string>; unavailable?: Set<string> } = {}) => {
     // Closing and reopening the journal is the restart: nothing carries over but the file, so a step
     // can only be resumed from what was durably recorded about it.
@@ -249,47 +348,182 @@ async function main(): Promise<void> {
     assert(store.get(jobId)!.state === 'awaiting_payment', 'a refused payment left the job past awaiting_payment')
     record('failed payment', `three refused authorizations — wrong signer, wrong amount, expired window — left the job awaiting payment with the authorization nonce unconsumed on chain: ${refusals.slice(-3).map((r) => r.refusal).join('; ')}`)
 
-    /* -------------------------------------------------------- 4. an interrupted worker */
+    /* -------------------------------------------------------- 4. the paid launch, credit queued */
 
-    // The credit is submitted and then reported unresolved, which is what a worker that dies between
-    // sending an effect and recording it leaves behind. Everything before it runs to completion.
-    reopen({ pending: new Set(['credit:solana']) })
-    const interrupted = await post(payload, await header(store.get(jobId)!))
-    assert(interrupted.status === 202, `an interrupted launch must answer 202, not ${interrupted.status}`)
-    const partial = store.get(jobId)!
-    assert(partial.state === 'partial', `the interrupted job is ${partial.state}, not partial`)
-    assert(partial.settlement !== undefined, 'the interrupted job has no settlement recorded, so the charge is not inspectable')
-    assert(partial.sweep === 'eligible', 'the interrupted job is not eligible for the unattended sweep')
-    const creditStep = partial.steps.find((step) => step.id === 'credit:solana')!
-    assert(creditStep.state === 'prepared', `the credit step is ${creditStep.state}, so this case is not testing an unrecorded effect`)
-    record('interrupted worker', `settled and issued, then the SPL credit was submitted and left unrecorded: ${partial.error ?? 'no error recorded'}. The job is partial, sweep-eligible, and its settlement is readable on its own.`)
+    const paid = await post(payload, await header(store.get(jobId)!))
+    assert(paid.status === 202, `a launch whose credit is queued must answer 202, not ${paid.status}`)
+    const queuedJob = store.get(jobId)!
+    assert(queuedJob.state === 'partial', `the queued job is ${queuedJob.state}, not partial`)
+    assert(queuedJob.settlement !== undefined, 'the queued job has no settlement recorded, so the charge is not inspectable')
+    assert(queuedJob.sweep === 'eligible', 'the queued job is not eligible for the unattended sweep')
+    const creditStep = queuedJob.steps.find((step) => step.id === 'credit:solana')!
+    assert(creditStep.state === 'prepared', `the credit step is ${creditStep.state}; this case exists to hold it short of complete`)
+    const claim = creditStep.claim
+    assert(claim !== undefined, 'the queued credit left no claim on the durable job, so a restart has nothing to resume from')
+    assert(claim.amount === SOLANA_ALLOCATION.toString(), `the bound claim carries ${claim.amount} atoms, not the ${SOLANA_ALLOCATION} allocation`)
+    assert(claim.recipient === infrastructure.payer.publicKey.toBase58(), `the claim is addressed to ${claim.recipient}, not this launch's custody owner`)
+    const creditPlan = decodePlan(creditStep.prepared!.operation, creditStep.prepared!.bytes)
+    assert(creditPlan.kind === 'credit' && claim.reference === creditPlan.digest,
+      'the claim reference is not the manager-message digest the step was planned against')
+    // The boundary is measured against the Clock sysvar the manager compared with, not derived from
+    // the duration: computing it as `releaseAfter - duration` would return the duration regardless.
+    const atQueue = reviewReleaseBoundary({
+      queueClock: BigInt(claim.observedClock), releaseAfter: BigInt(claim.releaseAfter),
+      observedClock: BigInt(claim.observedClock), duration: RATE_LIMIT_DURATION, slack: DELAY_SLACK,
+    })
+    assert(atQueue.matchesDuration,
+      `the manager put its boundary ${atQueue.programDelay} seconds past the Clock sysvar read at ${claim.observedClock}, not the ${RATE_LIMIT_DURATION} it declares`)
+    assert(!atQueue.releasable, 'the recorded claim is already releasable on the clock that queued it')
+    const freeWhileQueued = publicJob(queuedJob)
+    assert(freeWhileQueued.payment.settled && freeWhileQueued.payment.fulfillment === 'incomplete',
+      'the free record does not separate a settled charge from an unfulfilled launch')
+    assert(freeWhileQueued.supply.queued === SOLANA_ALLOCATION.toString(),
+      `the free record reports ${freeWhileQueued.supply.queued} atoms queued, not the ${SOLANA_ALLOCATION} claim`)
+    assert(freeWhileQueued.claims.length === 1 && freeWhileQueued.claims[0].released === false,
+      'the free record does not show the outstanding claim')
+    record('credit queued', `the paid launch settled once, issued ${ISSUANCE} atoms on Arc, built both legs and locked ${SOLANA_ALLOCATION} atoms — and the spoke's own inbound limit held the delivery. The job records the claim ${claim.reference} for ${claim.amount} atoms to ${claim.recipient}, releasable no earlier than ${claim.releaseAfter}, a measured ${atQueue.programDelay} seconds past the Clock sysvar at ${claim.observedClock} against the ${RATE_LIMIT_DURATION} the program declares. ${queuedJob.error ?? ''}`)
 
-    const duringOutage = await route.observeLedger(partial, routePending(partial))
-    assert(duringOutage.spokeSupply === SOLANA_ALLOCATION,
-      `the submitted credit minted ${duringOutage.spokeSupply} atoms on Solana, not the ${SOLANA_ALLOCATION} it was bound to`)
-    assert(duringOutage.hubCustody === SOLANA_ALLOCATION, 'Arc custody does not back the credit the spoke already minted')
-    record('unrecorded effect observed', `the credit did land: SPL supply ${duringOutage.spokeSupply} against observed Arc custody ${duringOutage.hubCustody}, while the job still records the step as merely prepared.`)
+    const whileQueued = await route.observeLedger(queuedJob, routePending(queuedJob))
+    assert(whileQueued.spokeSupply === 0n, `the queued claim minted ${whileQueued.spokeSupply} atoms on Solana before its boundary`)
+    assert(whileQueued.hubCustody === SOLANA_ALLOCATION, 'Arc custody does not back the claim the spoke is holding')
+    const queuedGate = await gateLedger(route, queuedJob)
+    assert(queuedGate.compared && queuedGate.reconciliation?.ok === true,
+      'the two ledgers do not reconcile with the claim outstanding, so a queue is being treated as an accounting event')
+    record('conservation with a claim outstanding', `nothing was created or destroyed while the claim waits: hub custody ${whileQueued.hubCustody} backs ${whileQueued.pendingToSpoke} atoms in flight against spoke supply ${whileQueued.spokeSupply}, with issuance ${whileQueued.issuance} and hub circulating ${whileQueued.hubCirculating}. Both halves read from their own chain.`)
 
-    /* -------------------------------------------------------- 5. a spoke restart */
+    /* -------------------------------------------------------- 5. the early release is refused */
+
+    // Straight at the program, with the runner and the route's own restraint out of the way: the
+    // refusal has to be the manager's, not the adapter declining to try.
+    let early = 'accepted, which it must not be'
+    try {
+      await releaseSpokeClaim(infrastructure, queuedJob, claim.reference)
+    } catch (error) {
+      early = refusalReason(error)
+    }
+    assert(!early.startsWith('accepted'), 'the pinned manager released a claim before its own boundary')
+    refusals.push({ case: 'the queued launch credit released before the manager\'s boundary', refusal: early })
+    const afterEarly = await route.observeLedger(queuedJob, routePending(queuedJob))
+    assert(afterEarly.spokeSupply === 0n, 'the refused early release minted anyway')
+    record('early release refused', `releasing this launch's claim before its boundary is refused by the pinned manager: ${early}. Spoke supply is still ${afterEarly.spokeSupply}.`)
+
+    // And unattended: the sweep reaches the job, finds the claim still held, and submits nothing.
+    reopen()
+    const sweptWhileQueued = await reconcile(store, adapter, Date.now, 5)
+    const stillQueued = store.get(jobId)!
+    const sweptClaim = stillQueued.steps.find((step) => step.id === 'credit:solana')!.claim!
+    assert(stillQueued.state === 'partial', `the sweep moved the queued job to ${stillQueued.state}`)
+    assert(sweptClaim.queuedAt === claim.queuedAt, 'the sweep reset when this launch started waiting')
+    assert(sweptClaim.releaseAfter === claim.releaseAfter, 'the sweep recorded a different boundary for the same claim')
+    assert((await route.observeLedger(stillQueued, routePending(stillQueued))).spokeSupply === 0n, 'the sweep credited a claim that is still held')
+    record('unattended sweep holds', `the reopened store's sweep found the claim still held and submitted nothing (${JSON.stringify(sweptWhileQueued)}). The claim keeps its first-seen ${sweptClaim.queuedAt} and the manager's boundary ${sweptClaim.releaseAfter}; spoke supply is still 0.`)
+
+    /* -------------------------------------------------------- 6. a spoke restart, claim outstanding */
 
     validator = await restartSpoke(infrastructure, validator)
-    record('spoke restart', 'the Solana validator was killed with SIGKILL mid-launch and its ledger reopened. The Arc fork stayed up throughout, so the custody backing the claim is a live read of a chain that never restarted.')
+    const afterRestart = store.get(jobId)!
+    const retainedOnChain = await route.observe({ job: afterRestart, step: creditStep }, await route.plan({ job: afterRestart, step: creditStep }))
+    assert(typeof retainedOnChain === 'object' && 'queued' in retainedOnChain, 'the reopened ledger lost the queued claim')
+    assert(retainedOnChain.queued.reference === claim.reference && retainedOnChain.queued.releaseAfter === claim.releaseAfter,
+      'the reopened ledger altered the claim or its boundary')
+    const acrossRestart = await route.observeLedger(afterRestart, routePending(afterRestart))
+    assert(acrossRestart.hubCustody === SOLANA_ALLOCATION, 'Arc stopped backing the claim across the spoke restart')
+    record('spoke restart', `the Solana validator was killed with SIGKILL with the claim outstanding and its ledger reopened: the claim ${retainedOnChain.queued.reference} came back with the same ${retainedOnChain.queued.releaseAfter} boundary. The Arc fork stayed up throughout and still holds ${acrossRestart.hubCustody} atoms of custody, so the backing is a live read of a chain that never restarted.`)
 
-    /* -------------------------------------------------------- 6. unattended recovery */
+    /* -------------------------------------------------------- 7. the boundary passes */
+
+    const shift = prepareClockShift()
+    if (!shift.available) {
+      const unreleased = `The eventual release of this launch's queued credit is NOT executed: ${shift.why}. Everything up to the boundary IS executed above — the claim bound to the durable job, the early release refused by the pinned manager, the sweep that submitted nothing, the spoke restart with the claim outstanding, and two-sided conservation throughout. The equivalent release on the Arc hub, whose delay is a constructor parameter and whose clock the fork exposes, is executed in scripts/solana/integrate.ts.`
+      record('not executed', unreleased)
+      writeRecord(jobId, { complete: false, endState: whileQueued, reconciliation: queuedGate.reconciliation, notExecuted: [unreleased, ...NOT_EXECUTED] })
+      throw new Error(`This harness cannot finish the launch without advancing the spoke clock: ${shift.why}. The evidence up to the manager's boundary is in output/equilibrium/arc-solana-fulfillment.json.`)
+    }
+
+    const seedDirectory = join(OUT, 'arc-solana-fulfillment-seed')
+    const spoke = spokeDeployment(store.get(jobId)!)
+    const inboxItem = spoke.at.inboxItem(Uint8Array.from(Buffer.from(claim.reference.slice(2), 'hex')))
+    const programNames = new Map([
+      [SOLANA_NTT.manager, 'NTT manager'], [SOLANA_NTT.transceiver, 'transceiver'],
+      [SOLANA_NTT.coreBridge, 'core bridge'], [TOKEN_PROGRAM.toBase58(), 'SPL token'],
+      [SystemProgram.programId.toBase58(), 'system'],
+    ])
+    // Rooted, not merely confirmed. A hard kill can only be survived by state the validator has
+    // already finalized, so the claim is waited for at that commitment before the ledger is dumped.
+    await awaitFinalizedAccount(infrastructure.connection, inboxItem)
+    const dumped = await dumpSpokeLedger(infrastructure.connection, [...SPOKE_PROGRAMS], [spoke.at.feeCollector])
+    const dumpedClaim = dumped.find((account) => account.pubkey === inboxItem.toBase58())
+    assert(dumpedClaim !== undefined, 'the dump does not contain this launch\'s queued claim')
+    writeSeedDirectory(seedDirectory, dumped)
+    record('spoke ledger dumped', `${dumped.length} accounts (${describeSeed(dumped, programNames)}) read at finalized commitment, including the queued claim at ${dumpedClaim.pubkey}. Executable accounts are excluded; the two NTT programs come back under the same ids and the same upgrade authority.`)
+
+    const advanceBy = RATE_LIMIT_DURATION + 60
+    clockFixture(`The spoke ledger is rebuilt at a new genesis from the ${dumped.length} accounts the pinned programs wrote, under a validator process whose CLOCK_REALTIME is offset by +${advanceBy} seconds (${shift.label}). CLOCK_MONOTONIC is untouched, so PoH runs at real speed. Nothing about the queue is simulated: this launch's claim, its ${RATE_LIMIT_DURATION}-second boundary and the release are the pinned manager's own, and the rebuilt accounts are compared byte for byte against the dump before anything is released.`)
+    const advancedLedger = mkdtempSync(join(tmpdir(), 'equilibrium-fulfil-advanced-'))
+    ledgers.push(advancedLedger)
+    validator = await restartSpoke(infrastructure, validator, {
+      seedDirectory, ledger: advancedLedger, environment: clockShiftEnvironment(shift, advanceBy),
+      fund: [infrastructure.payer, infrastructure.admin],
+    })
+    const differences = seedDifferences(dumped, await readSeeded(infrastructure.connection, dumped))
+    assert(differences.length === 0, `the rebuilt spoke ledger does not carry the accounts it was seeded from: ${differences.slice(0, 5).join('; ')}`)
+    const advancedClock = await readChainClock(infrastructure.connection)
+    const boundary = reviewReleaseBoundary({
+      queueClock: BigInt(claim.observedClock), releaseAfter: BigInt(claim.releaseAfter),
+      observedClock: advancedClock, duration: RATE_LIMIT_DURATION, slack: DELAY_SLACK,
+    })
+    assert(boundary.advancedBy >= BigInt(RATE_LIMIT_DURATION), `the clock fixture advanced the spoke by ${boundary.advancedBy} seconds, short of the ${RATE_LIMIT_DURATION} the queue requires`)
+    assert(boundary.releasable, 'the advanced spoke clock has not passed the boundary the manager wrote')
+    record('claim retained across a rebuilt ledger', `all ${dumped.length} seeded accounts came back byte-identical, including this launch's claim and its ${claim.releaseAfter} boundary. The spoke clock is now ${advancedClock}, ${boundary.advancedBy} seconds past the clock that queued the claim; the measured program delay is still ${boundary.programDelay}.`)
+
+    /* -------------------------------------------------------- 8. the release, interrupted */
+
+    // The release is submitted and then reported unresolved, which is what a worker that dies
+    // between sending an effect and recording it leaves behind.
+    reopen({ pending: new Set(['credit:solana']) })
+    const interruptedRelease = await reconcile(store, adapter, Date.now, 5)
+    const unrecorded = store.get(jobId)!
+    const unrecordedStep = unrecorded.steps.find((step) => step.id === 'credit:solana')!
+    assert(unrecorded.state === 'partial', `the interrupted release left the job ${unrecorded.state}, not partial`)
+    assert(unrecordedStep.state === 'prepared', `the credit step is ${unrecordedStep.state}, so this case is not testing an unrecorded effect`)
+    const duringOutage = await route.observeLedger(unrecorded, routePending(unrecorded))
+    assert(duringOutage.spokeSupply === SOLANA_ALLOCATION,
+      `the submitted release minted ${duringOutage.spokeSupply} atoms on Solana, not the ${SOLANA_ALLOCATION} it was bound to`)
+    assert(duringOutage.hubCustody === SOLANA_ALLOCATION, 'Arc custody does not back the credit the spoke already minted')
+    record('interrupted release', `the released claim did land — SPL supply ${duringOutage.spokeSupply} against observed Arc custody ${duringOutage.hubCustody} — while the job still records the step as merely prepared (${JSON.stringify(interruptedRelease)}).`)
+
+    /* -------------------------------------------------------- 9. unattended recovery */
 
     // No client request and no signature: the store is reopened and the sweep finishes the launch.
     reopen()
     const resumed = await reconcile(store, adapter, Date.now, 5)
     const recovered = store.get(jobId)!
     assert(recovered.state === 'complete', `the sweep left the job ${recovered.state}: ${recovered.error ?? 'no error'}`)
+    const releasedClaim = recovered.steps.find((step) => step.id === 'credit:solana')!.claim!
+    assert(releasedClaim.releasedAt !== undefined, 'the completed credit lost the record of the delay it waited out')
+    assert(releasedClaim.reference === claim.reference && releasedClaim.amount === claim.amount && releasedClaim.recipient === claim.recipient,
+      'the delivered claim is not the claim this launch queued')
     const afterRecovery = await route.observeLedger(recovered, routePending(recovered))
     assert(afterRecovery.spokeSupply === SOLANA_ALLOCATION,
       `recovery credited again: SPL supply is ${afterRecovery.spokeSupply}, not the ${SOLANA_ALLOCATION} bound to this launch`)
     const gate = await gateLedger(route, recovered)
     assert(gate.compared && gate.reconciliation?.ok === true, 'the completed launch does not reconcile across the two chains')
-    record('unattended recovery', `the reopened store's sweep finished the launch with no client request (${JSON.stringify(resumed)}) and credited nothing twice. Both observed ledgers reconcile: issuance ${afterRecovery.issuance}, hub circulating ${afterRecovery.hubCirculating}, hub custody ${afterRecovery.hubCustody}, spoke supply ${afterRecovery.spokeSupply}, spoke custody ${afterRecovery.spokeCustody}.`)
+    assert(outstandingClaims(recovered).length === 0, 'the completed launch still reports an outstanding claim')
+    record('unattended recovery', `the reopened store's sweep finished the launch with no client request (${JSON.stringify(resumed)}) and credited nothing twice. The claim queued at ${releasedClaim.queuedAt} is recorded released at ${releasedClaim.releasedAt}, and both observed ledgers reconcile: issuance ${afterRecovery.issuance}, hub circulating ${afterRecovery.hubCirculating}, hub custody ${afterRecovery.hubCustody}, spoke supply ${afterRecovery.spokeSupply}, spoke custody ${afterRecovery.spokeCustody}.`)
 
-    /* -------------------------------------------------------- 7. replay */
+    let releasedTwice = 'accepted, which it must not be'
+    try {
+      await releaseSpokeClaim(infrastructure, recovered, claim.reference)
+    } catch (error) {
+      releasedTwice = refusalReason(error)
+    }
+    assert(!releasedTwice.startsWith('accepted'), 'the released claim was accepted a second time by the manager')
+    refusals.push({ case: 'the released launch credit submitted to the manager a second time', refusal: releasedTwice })
+    assert((await route.observeLedger(store.get(jobId)!, routePending(store.get(jobId)!))).spokeSupply === SOLANA_ALLOCATION,
+      'the repeated release minted again')
+    record('released once', `the delivered claim resubmitted straight to the pinned manager was refused: ${releasedTwice}. Spoke supply is unchanged.`)
+
+    /* -------------------------------------------------------- 10. replay */
 
     const settledOnce = recovered.steps[0].result!.transaction
     const replayed = await post(payload, await header(recovered))
@@ -314,39 +548,10 @@ async function main(): Promise<void> {
     refusals.push({ case: 'the settled EIP-3009 authorization resubmitted directly to the token', refusal: onChainReplay })
     record('replay', `the completed request replayed over HTTP changed nothing, and the settled authorization resubmitted straight to the token was refused on chain: ${onChainReplay}`)
 
-    /* -------------------------------------------------------- 8. the record */
+    /* -------------------------------------------------------- 11. the record */
 
-    const final = publicJob(store.get(jobId)!)
     const endState = await route.observeLedger(store.get(jobId)!, routePending(store.get(jobId)!))
-    const result = {
-      observedAt: new Date().toISOString(),
-      mode: 'local' as const,
-      claim: 'Durable shared-supply launch fulfilment over the verified Arc–Solana route. An Anvil fork of Arc testnet carrying the real deployed Wormhole core bridge, with a locking NTT manager and transceiver deployed onto it per launch, exchanging its own published message bytes with the pinned NTT programs and the real mainnet core bridge binary on a local Solana validator. The paid quote, the job and its status were driven over HTTP. Not a public route, not a devnet, testnet or mainnet deployment, no funds moved.',
-      route: { version: route.version, terms: route.terms, port: PORT, journal: JOURNAL },
-      infrastructure: {
-        arcFork: infrastructure.arc.url, solanaRpc: `http://127.0.0.1:${infrastructure.rpcPort}`,
-        factory: infrastructure.factory, registry: infrastructure.registry, distributor: infrastructure.distributor,
-        settlementFixture: infrastructure.paymentAsset, quoteFixture: infrastructure.quoteAsset,
-        solanaQuoteFixtureMint: infrastructure.quoteMint.publicKey.toBase58(),
-        guardianSetIndex: infrastructure.guardianSubstitution.index,
-        guardianSetReplaced: infrastructure.guardianSubstitution.replaced,
-      },
-      job: final,
-      endState,
-      reconciliation: gate.reconciliation,
-      refusals,
-      fixtures,
-      notExecuted: [
-        'Any public route. No canonical token, manager, transceiver, mint, inventory or transfer exists on Arc mainnet or testnet, Solana devnet or mainnet-beta, and no funds moved.',
-        'The Solana inbound queue\'s eventual release. The pinned SVM program hard-codes a 24-hour RATE_LIMIT_DURATION against the Clock sysvar and the local validator\'s clock cannot be advanced on this host; this harness keeps the spoke inbound limit at the full issuance so no launch credit is queued. The equivalent hub release is executed in scripts/solana/integrate.ts.',
-        'Any venue or AMM pool. The inventory steps place pool tokens and quote inventory into a per-operation holder and deliver the rest of each allocation to the request\'s recipient, atomically. Opening a market adapter is not part of this route.',
-        'Solana network fees as launch cost. They are paid in SOL by the operator\'s fee payer and reported as a zero launch cost rather than converted into the customer\'s six-decimal atoms.',
-      ],
-      publicRouteTested: false,
-      checkpoints,
-    }
-    const asJson = JSON.stringify(result, (_key, value: unknown) => (typeof value === 'bigint' ? value.toString() : value), 2)
-    writeFileSync(join(OUT, 'arc-solana-fulfillment.json'), `${asJson}\n`)
+    writeRecord(jobId, { complete: true, reconciliation: gate.reconciliation, endState, notExecuted: NOT_EXECUTED })
     const listed = await get(jobId)
     assert(listed.status === 200, `the job status endpoint answered ${listed.status}`)
     console.log('\nAll checks passed. Record written to output/equilibrium/arc-solana-fulfillment.json')
@@ -354,7 +559,7 @@ async function main(): Promise<void> {
     await server.stop(true)
     store.close()
     closeRoute(anvil, validator)
-    if (!process.env.EQUILIBRIUM_SOLANA_KEEP_LEDGER) rmSync(ledger, { recursive: true, force: true })
+    if (!process.env.EQUILIBRIUM_SOLANA_KEEP_LEDGER) for (const directory of ledgers) rmSync(directory, { recursive: true, force: true })
   }
 }
 

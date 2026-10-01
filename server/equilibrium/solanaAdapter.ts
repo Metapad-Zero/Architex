@@ -20,7 +20,7 @@
  */
 import { assertRouteRequest, decodePlan, encodePlan, gateLedger, operationOf, planMatches, type SolanaRoute, type StepPlan } from './solanaRoute'
 import { hash } from './request'
-import { LaunchError, type EffectContext, type EffectResult, type PreparedEffect, type PromotionalTokenAdapter, type Mode } from './types'
+import { LaunchError, isQueued, type EffectContext, type Observation, type PreparedEffect, type PromotionalTokenAdapter, type Mode } from './types'
 
 /** Steps whose completion is only accepted when both observed ledgers reconcile. */
 const LEDGER_GATED = ['canonical', 'manager', 'debit', 'credit', 'pool']
@@ -78,9 +78,13 @@ export function solanaAdapter(route: SolanaRoute, options: SolanaAdapterOptions 
       return { operation, digest: hash(bytes), bytes }
     },
 
-    async observe(context: EffectContext, prepared: PreparedEffect): Promise<EffectResult | 'absent' | 'pending'> {
+    async observe(context: EffectContext, prepared: PreparedEffect): Promise<Observation> {
       const plan = decodePlan(prepared.operation, prepared.bytes)
       const observed = await route.observe(context, plan)
+      // A claim the destination holds, passed through ahead of the harness overrides below: it is
+      // what the chain says, and discarding it for a bare "unresolved" would lose the one record
+      // that the delivery landed and the one boundary that says when it can be completed.
+      if (isQueued(observed)) return observed
       // Held deliberately. Reported before the chain is consulted for a verdict, so a harness case
       // cannot accidentally depend on the effect having settled first.
       if (pending.has(context.step.id) && observed !== 'absent') return 'pending'

@@ -10,6 +10,10 @@
  *   a claim digest releases once              (the pinned NTT manager's inbox item)
  *   an inventory placement happens once       (`EquilibriumDistributor.placed`)
  *
+ * and the one rule that is a delay rather than a uniqueness constraint: a delivery over the spoke's
+ * inbound rate limit is approved with a release boundary and refused until the chain's own clock
+ * passes it. The double keeps that clock, so the queue can be waited out in a unit test.
+ *
  * and one rule it gets from the chain's absence of a rule: the hub's `transfer` is NOT idempotent, so
  * the double publishes a fresh message at the next sequence on every submission. That is what makes
  * the debit's recorded-sequence observation worth testing rather than assuming.
@@ -34,11 +38,11 @@ import { createLaunchService } from '../service'
 import { solanaAdapter } from '../solanaAdapter'
 import {
   assertRouteRequest, decodePlan, gateLedger, inventoryHolder, ledgerComparable, operationOf,
-  planMatches, routePending, solanaInventoryOwner,
-  type DebitPlan, type LegPlan, type RoutePending, type SolanaRoute, type StepPlan,
+  outstandingClaims, planMatches, routePending, solanaInventoryOwner, spokeClaim,
+  type CreditPlan, type DebitPlan, type LegPlan, type RoutePending, type SolanaRoute, type StepPlan,
 } from '../solanaRoute'
 import { JobStore } from '../store'
-import type { EffectContext, EffectResult, Job, LaunchRequest, SignedPayment, StepKind } from '../types'
+import { claimConflict, isQueued, type EffectContext, type EffectResult, type Job, type LaunchRequest, type Observation, type PromotionalTokenAdapter, type QueuedClaim, type SignedPayment, type StepKind } from '../types'
 
 /* ------------------------------------------------------------------ the request */
 
@@ -97,15 +101,33 @@ interface DoubleState {
   /** Published hub messages by sequence. `transfer` is not idempotent, so this only ever grows. */
   published: { sequence: bigint; amount: bigint; custodian: string }[]
   nextSequence: bigint
-  /** Inbox items by claim digest, and whether each has been released. */
-  claims: Map<Hex, { amount: bigint; released: boolean }>
+  /**
+   * Inbox items by claim digest, in the three states the pinned manager's `release_status` has.
+   * `release_after` is both the ordinary approved state and the rate-limited one; the boundary is
+   * what tells them apart, exactly as on chain.
+   */
+  claims: Map<Hex, { amount: bigint; recipient: string; status: 'not_approved' | 'release_after' | 'released'; releaseAfter: bigint | null; minted: bigint }>
+  /** The chain's own clock, which the manager compares its boundaries against. Tests advance it. */
+  clock: bigint
+  /** The spoke's inbound rate limit for the Arc peer. A delivery above it is queued, not lost. */
+  inboundLimit: bigint
   placements: Map<Hex, { tokens: bigint; quote: bigint; delivered: bigint }>
   /** How many times each irreversible effect was actually performed. */
   counts: Record<string, number>
 }
 
-function state(): DoubleState {
-  return { settled: new Map(), issued: new Map(), legs: new Map(), published: [], nextSequence: 7n, claims: new Map(), placements: new Map(), counts: {} }
+/** The pinned SVM program hard-codes this, and the double does not shorten it. */
+const RATE_LIMIT_DURATION = 86_400n
+const CLOCK = 1_800_000_000n
+
+function state(options: { inboundLimit?: bigint } = {}): DoubleState {
+  return {
+    settled: new Map(), issued: new Map(), legs: new Map(), published: [], nextSequence: 7n,
+    claims: new Map(), placements: new Map(), counts: {},
+    clock: CLOCK,
+    // High enough that nothing is queued unless a test asks for it.
+    inboundLimit: options.inboundLimit ?? 1_000_000_000_000_000n,
+  }
 }
 
 /** The ed25519 keypair a persisted mint secret names, as the route reconstructs it. */
@@ -118,8 +140,16 @@ interface DoubleOptions {
   stealSequence?: boolean
   /** Advance the emitter between preparing the debit and submitting it. */
   intrude?: boolean
-  /** Credit more than the claim carries, so the two ledgers stop reconciling. */
+  /** Mint more than the released claim authorizes, so the two ledgers stop reconciling. */
   overMint?: bigint
+  /**
+   * Attempt the release even while the manager is holding the claim.
+   *
+   * The route itself does not: the redeem and the release are separate transactions, and failing the
+   * step after the redeem landed is what takes the job out of the sweep. This is the probe that shows
+   * the refusal belongs to the program.
+   */
+  releaseWhenQueued?: boolean
 }
 
 /**
@@ -174,7 +204,7 @@ function double(recorded: DoubleState, options: DoubleOptions = {}): SolanaRoute
       }
     },
 
-    observe({ job, step }: EffectContext, plan: StepPlan): Promise<EffectResult | 'absent' | 'pending'> {
+    observe({ job, step }: EffectContext, plan: StepPlan): Promise<Observation> {
       const operation = operationOf(job, step)
       const done = (transaction: string, extra: Partial<EffectResult> = {}): EffectResult =>
         ({ operation, transaction, finalized: true, cost: step.budget, ...extra })
@@ -208,8 +238,13 @@ function double(recorded: DoubleState, options: DoubleOptions = {}): SolanaRoute
           return Promise.resolve(done(`arc:debit:${plan.expectedSequence}`, { address: '0xmanager', amount: plan.amount }))
         }
         case 'credit': {
-          const claim = recorded.claims.get(plan.digest)
-          if (!claim?.released) return Promise.resolve('absent')
+          const item = recorded.claims.get(plan.digest)
+          if (!item) return Promise.resolve('absent')
+          // The production decision, not a reimplementation of it: whether a redeemed-but-undelivered
+          // claim is queued is read off the boundary against the chain's clock by `spokeClaim`.
+          const queued = spokeClaim(plan, item, recorded.clock, Number(recorded.clock))
+          if (queued) return Promise.resolve({ queued })
+          if (item.status !== 'released') return Promise.resolve('absent')
           return Promise.resolve({ operation, transaction: `solana:inbox:${plan.digest}`, finalized: true, cost: '0', address: plan.custodian, amount: plan.amount })
         }
         case 'inventory': {
@@ -270,10 +305,29 @@ function double(recorded: DoubleState, options: DoubleOptions = {}): SolanaRoute
           return Promise.resolve()
         }
         case 'credit': {
-          const claim = recorded.claims.get(plan.digest)
-          if (claim?.released) throw new Error('The claim is already released')
+          // Redeem, then release — two instructions on chain, and the queue lives between them. The
+          // manager votes the authenticated message into an inbox item and sets its release boundary
+          // from its own inbound rate limit; `release_inbound_mint` is what mints, and it refuses
+          // both before that boundary and after the claim has already been delivered.
+          const amount = BigInt(plan.amount)
+          let item = recorded.claims.get(plan.digest)
+          if (!item) {
+            count('redeem')
+            const delayed = amount > recorded.inboundLimit
+            item = { amount, recipient: plan.custodian, status: 'release_after', releaseAfter: recorded.clock + (delayed ? RATE_LIMIT_DURATION : 0n), minted: 0n }
+            recorded.claims.set(plan.digest, item)
+          }
+          if (item.status === 'released') throw new Error('TransferAlreadyRedeemed: this claim was already released')
+          if (item.releaseAfter !== null && recorded.clock < item.releaseAfter) {
+            // Only a probe reaches the refusal. The route stops after the redeem it did land, so the
+            // step stays recoverable and the observation that follows records the claim.
+            if (!options.releaseWhenQueued) return Promise.resolve()
+            throw new Error(`CantReleaseYet: the manager holds this claim until ${item.releaseAfter}, and the clock is ${recorded.clock}`)
+          }
           count('credit')
-          recorded.claims.set(plan.digest, { amount: BigInt(plan.amount) + (options.overMint ?? 0n), released: true })
+          // `overMint` mints more than the claim authorizes, which is a far-side ledger the job's own
+          // figures cannot detect: only the two-sided comparison catches it.
+          recorded.claims.set(plan.digest, { ...item, status: 'released', minted: item.amount + (options.overMint ?? 0n) })
           return Promise.resolve()
         }
         case 'inventory': {
@@ -291,7 +345,7 @@ function double(recorded: DoubleState, options: DoubleOptions = {}): SolanaRoute
       const canonical = recorded.issued.get(operationOf(job, job.steps.find((s) => s.id === 'canonical:arc')!))
       const issuance = canonical ? BigInt(job.request.canonical.issuance) : 0n
       const hubCustody = recorded.published.reduce((total, message) => total + message.amount, 0n)
-      const spokeSupply = [...recorded.claims.values()].reduce((total, claim) => total + (claim.released ? claim.amount : 0n), 0n)
+      const spokeSupply = [...recorded.claims.values()].reduce((total, claim) => total + claim.minted, 0n)
       return Promise.resolve({ issuance, hubCustody, hubCirculating: issuance - hubCustody, spokeSupply, spokeCustody: 0n, pendingToSpoke: pending.toSpoke, pendingToHub: pending.toHub })
     },
   }
@@ -544,7 +598,7 @@ describe('the paid HTTP path', () => {
     expect(body.supply.custody).toBe(SOL_AMOUNT.toString())
     expect(body.supply.remote).toBe(SOL_AMOUNT.toString())
     expect(context.recorded.counts).toEqual({
-      settlement: 1, issuance: 1, 'leg:arc': 1, 'leg:solana': 1, debit: 1, credit: 1, 'inventory:arc': 1, 'inventory:solana': 1,
+      settlement: 1, issuance: 1, 'leg:arc': 1, 'leg:solana': 1, debit: 1, redeem: 1, credit: 1, 'inventory:arc': 1, 'inventory:solana': 1,
     })
   })
 
@@ -734,5 +788,233 @@ describe('interruption and restart', () => {
       'differs from the plan this route derives now',
     )
     expect(context.recorded.counts).toEqual({})
+  })
+})
+
+/* ------------------------------------------------------------------ the spoke's inbound queue */
+
+/**
+ * The claim the launch's own credit becomes when the spoke will not release it yet.
+ *
+ * A queue is the one destination answer that is neither "it happened" nor "it did not". Reading it as
+ * an absence is the expensive mistake: absence is the runner's licence to submit, and submitting a
+ * release the manager is holding either reverts or, with the revert flag off, succeeds while
+ * delivering nothing. Reading it as a result is the other expensive mistake: the launch would be
+ * reported fulfilled with the recipient holding nothing. So it is recorded as what it is.
+ */
+function queued(options: { path?: string; pending?: Set<string>; route?: DoubleOptions } = {}) {
+  return setup({ ...options, recorded: state({ inboundLimit: SOL_AMOUNT - 1n }) })
+}
+/** The claim bound onto a job's Solana credit, which is where a restart reads it from. */
+function boundClaim(job: Job): QueuedClaim {
+  const step = job.steps.find((candidate) => candidate.id === 'credit:solana')!
+  expect(step.claim).toBeDefined()
+  return step.claim!
+}
+/** The manager-message digest the credit step was planned against. */
+function creditDigest(job: Job): Hex {
+  const step = job.steps.find((candidate) => candidate.id === 'credit:solana')!
+  const plan = decodePlan(step.prepared!.operation, step.prepared!.bytes) as CreditPlan
+  return plan.digest
+}
+
+describe('a claim the spoke will not release yet', () => {
+  test('is bound onto the durable job instead of being read as an absence', async () => {
+    const context = queued()
+    const job = await launch(context)
+    expect(job.state).toBe('partial')
+    const step = job.steps.find((candidate) => candidate.id === 'credit:solana')!
+    expect(step.state).toBe('prepared')
+    const claim = boundClaim(job)
+    expect(claim.reference).toBe(creditDigest(job))
+    expect(claim.amount).toBe(SOL_AMOUNT.toString())
+    expect(claim.recipient).toBe(CUSTODIAN)
+    expect(claim.releaseAfter).toBe(Number(CLOCK + RATE_LIMIT_DURATION))
+    expect(claim.observedClock).toBe(Number(CLOCK))
+    expect(claim.releasedAt).toBeUndefined()
+    // Redeemed once, and nothing minted: the delivery landed, the release did not.
+    expect(context.recorded.counts.redeem).toBe(1)
+    expect(context.recorded.counts.credit).toBeUndefined()
+    // The steps after the credit are never reached, so nothing is distributed on a claim nobody holds.
+    expect(job.steps.find((candidate) => candidate.id === 'pool:solana')!.state).toBe('planned')
+    expect(job.error).toContain('releasable no earlier than')
+  })
+
+  test('leaves the charge settled and inspectable while the launch is unfulfilled', async () => {
+    const context = queued()
+    const job = await launch(context)
+    expect(job.settlement).toBeDefined()
+    const free = publicJob(job)
+    expect(free.payment.settled).toBe(true)
+    expect(free.payment.fulfillment).toBe('incomplete')
+    expect(free.settlement!.fulfillment).toBe('incomplete')
+    expect(free.supply.queued).toBe(SOL_AMOUNT.toString())
+    expect(free.supply.remote).toBe('0')
+    expect(free.supply.custody).toBe(SOL_AMOUNT.toString())
+    expect(free.claims).toHaveLength(1)
+    expect(free.claims[0]).toMatchObject({ step: 'credit:solana', chain: 'solana', amount: SOL_AMOUNT.toString(), released: false })
+    // The prepared transaction bytes stay in the store; a claim reference is a public chain handle.
+    expect(JSON.stringify(free)).not.toContain(spokeSecret(job).slice(2))
+  })
+
+  test('keeps two independently observed ledgers reconciling, because a queue is not an accounting event', async () => {
+    const context = queued()
+    const job = await launch(context)
+    expect(routePending(job)).toEqual({ toSpoke: SOL_AMOUNT, toHub: 0n })
+    const gate = await gateLedger(context.route, job)
+    expect(gate.compared).toBe(true)
+    expect(gate.reconciliation).toEqual({ conserved: true, backed: true, custodyClean: true, ok: true })
+    expect(gate.observed!.spokeSupply).toBe(0n)
+    expect(gate.observed!.hubCustody).toBe(SOL_AMOUNT)
+    expect(outstandingClaims(job).map((claim) => claim.step)).toEqual(['credit:solana'])
+  })
+
+  test('is refused by the program before its own boundary, and the sweep submits nothing', async () => {
+    const context = queued()
+    const job = await launch(context)
+    const step = job.steps.find((candidate) => candidate.id === 'credit:solana')!
+    const probe = double(context.recorded, { releaseWhenQueued: true })
+    await rejects(async () => probe.submit({ job, step }, await probe.plan({ job, step })), 'CantReleaseYet')
+    expect(context.recorded.counts.credit).toBeUndefined()
+
+    // Unattended, with the clock moved but still short of the boundary: still held, still untouched.
+    context.recorded.clock += RATE_LIMIT_DURATION - 10n
+    const swept = await reconcile(context.store, context.adapter, () => now * 1000, 5)
+    expect(swept.map(({ id, state }) => ({ id, state }))).toEqual([{ id: job.id, state: 'partial' }])
+    expect(swept[0].error).toContain('releasable no earlier than')
+    const after = boundClaim(context.store.get(job.id)!)
+    // First sighting kept, latest reading refreshed: how long this launch has waited is the figure.
+    expect(after.queuedAt).toBe(boundClaim(job).queuedAt)
+    expect(after.releaseAfter).toBe(boundClaim(job).releaseAfter)
+    expect(after.observedClock).toBe(Number(CLOCK + RATE_LIMIT_DURATION - 10n))
+    expect(context.recorded.counts.credit).toBeUndefined()
+    expect((await context.route.observeLedger(context.store.get(job.id)!, routePending(context.store.get(job.id)!))).spokeSupply).toBe(0n)
+  })
+
+  test('survives a closed and reopened journal with its identity intact', async () => {
+    const path = journal()
+    const context = queued({ path })
+    const job = await launch(context)
+    const before = boundClaim(job)
+    context.store.close()
+    const reopened = new JobStore(path, { leaseMs: 60_000 })
+    expect(boundClaim(reopened.get(job.id)!)).toEqual(before)
+    expect(reopened.resumable(now * 1000).map((resumable) => resumable.id)).toEqual([job.id])
+    reopened.close()
+  })
+
+  test('is released exactly once across a crash between submitting and recording', async () => {
+    const path = journal()
+    const recorded = state({ inboundLimit: SOL_AMOUNT - 1n })
+    const held = setup({ path, recorded })
+    const job = await launch(held)
+    expect(boundClaim(job).amount).toBe(SOL_AMOUNT.toString())
+    held.store.close()
+
+    // The boundary passes, and the worker dies between releasing the claim and recording it.
+    recorded.clock += RATE_LIMIT_DURATION + 1n
+    const crashing = setup({ path, recorded, pending: new Set(['credit:solana']) })
+    await reconcile(crashing.store, crashing.adapter, () => now * 1000, 5)
+    const unrecorded = crashing.store.get(job.id)!
+    expect(unrecorded.state).toBe('partial')
+    expect(unrecorded.steps.find((step) => step.id === 'credit:solana')!.state).toBe('prepared')
+    expect(recorded.counts.credit).toBe(1)
+    expect((await crashing.route.observeLedger(unrecorded, routePending(unrecorded))).spokeSupply).toBe(SOL_AMOUNT)
+    crashing.store.close()
+
+    // A fresh process, no client request and no signature: the sweep finishes it without minting again.
+    const recovering = setup({ path, recorded })
+    await reconcile(recovering.store, recovering.adapter, () => now * 1000, 5)
+    const complete = recovering.store.get(job.id)!
+    expect(complete.state).toBe('complete')
+    expect(recorded.counts.credit).toBe(1)
+    expect(recorded.counts.redeem).toBe(1)
+    const delivered = boundClaim(complete)
+    expect(delivered.releasedAt).toBeDefined()
+    expect(claimConflict(boundClaim(job), delivered)).toBeUndefined()
+    const free = publicJob(complete)
+    expect(free.supply.queued).toBe('0')
+    expect(free.claims[0].released).toBe(true)
+    expect(free.payment.fulfillment).toBe('complete')
+    expect((await gateLedger(recovering.route, complete)).reconciliation).toEqual({ conserved: true, backed: true, custodyClean: true, ok: true })
+    recovering.store.close()
+  })
+
+  test('a claim whose identity moved fails the step closed rather than waiting out a stranger', async () => {
+    const context = queued()
+    const job = await launch(context)
+    // A second observation reporting a different claim under the same step. Nothing the double can
+    // produce — which is the point: the job's own record is what catches it.
+    const shifted: PromotionalTokenAdapter = {
+      ...context.adapter,
+      async observe(effect, prepared) {
+        const observed = await context.adapter.observe(effect, prepared)
+        return isQueued(observed) ? { queued: { ...observed.queued, amount: '1' } } : observed
+      },
+    }
+    await rejects(runJob(context.store, shifted, job.id, undefined, () => now * 1000), 'reconcile this job before releasing anything')
+    expect(context.recorded.counts.credit).toBeUndefined()
+    // Untouched on the durable job: the recorded claim is still this launch's own.
+    expect(boundClaim(context.store.get(job.id)!).amount).toBe(SOL_AMOUNT.toString())
+  })
+
+  test('a replayed paid request over a queued launch charges nothing again and releases nothing', async () => {
+    const context = queued()
+    const paid = new Request('http://x/x402/equilibrium', {
+      method: 'POST', body: JSON.stringify(request()),
+      headers: { 'payment-signature': await header(quote(context.store, context.adapter, request(), now)) },
+    })
+    const first = await context.service(paid.clone())
+    expect(first.status).toBe(202)
+    const settlement = context.store.get(quote(context.store, context.adapter, request(), now).id)!.steps[0].result!.transaction
+    const second = await context.service(paid)
+    expect(second.status).toBe(202)
+    const body = await second.json() as ReturnType<typeof publicJob>
+    expect(body.steps[0].result!.transaction).toBe(settlement)
+    expect(body.supply.queued).toBe(SOL_AMOUNT.toString())
+    expect(context.recorded.counts.settlement).toBe(1)
+    expect(context.recorded.counts.redeem).toBe(1)
+    expect(context.recorded.counts.credit).toBeUndefined()
+
+    const conflicting = request()
+    conflicting.canonical = { ...conflicting.canonical, symbol: 'OTHER' }
+    const refused = await context.service(new Request('http://x/x402/equilibrium', { method: 'POST', body: JSON.stringify(conflicting) }))
+    expect(refused.status).toBe(409)
+    expect(await refused.json()).toMatchObject({ error: 'identity_conflict' })
+  })
+})
+
+describe('reading the spoke\'s inbox item', () => {
+  const plan: CreditPlan = { kind: 'credit', amount: SOL_AMOUNT.toString(), custodian: CUSTODIAN, digest: '0xfeed', sequence: '7' }
+  const item = { amount: SOL_AMOUNT, recipient: CUSTODIAN, status: 'release_after' as const, releaseAfter: CLOCK + RATE_LIMIT_DURATION }
+
+  test('an approved claim short of its boundary is queued, carrying the program\'s own figures', () => {
+    const claim = spokeClaim(plan, item, CLOCK, 1_700_000_000)
+    expect(claim).toEqual({
+      reference: '0xfeed', amount: SOL_AMOUNT.toString(), recipient: CUSTODIAN,
+      releaseAfter: Number(CLOCK + RATE_LIMIT_DURATION), observedClock: Number(CLOCK), queuedAt: 1_700_000_000,
+    })
+  })
+
+  test('a claim whose boundary has passed is not queued, so the runner is free to release it', () => {
+    expect(spokeClaim(plan, item, CLOCK + RATE_LIMIT_DURATION, 1_700_000_000)).toBeUndefined()
+    expect(spokeClaim(plan, { ...item, releaseAfter: CLOCK }, CLOCK, 1_700_000_000)).toBeUndefined()
+  })
+
+  test('a released claim is not queued', () => {
+    expect(spokeClaim(plan, { ...item, status: 'released', releaseAfter: null }, CLOCK, 1_700_000_000)).toBeUndefined()
+  })
+
+  test('a claim carrying another amount or addressed elsewhere is refused, not waited out', () => {
+    expect(() => spokeClaim(plan, { ...item, amount: SOL_AMOUNT + 1n }, CLOCK, 1)).toThrow('not the bound allocation')
+    expect(() => spokeClaim(plan, { ...item, recipient: BENEFICIARY }, CLOCK, 1)).toThrow('not this launch\'s custody account')
+  })
+
+  test('only the reference, amount and recipient are a claim\'s identity', () => {
+    const claim: QueuedClaim = { reference: '0xfeed', amount: '10', recipient: CUSTODIAN, releaseAfter: 20, observedClock: 1, queuedAt: 1 }
+    expect(claimConflict(claim, { ...claim, releaseAfter: 99, observedClock: 50 })).toBeUndefined()
+    expect(claimConflict(claim, { ...claim, reference: '0xbeef' })).toContain('references 0xbeef')
+    expect(claimConflict(claim, { ...claim, amount: '11' })).toContain('carries 11 atoms')
+    expect(claimConflict(claim, { ...claim, recipient: BENEFICIARY })).toContain(`addressed to ${BENEFICIARY}`)
   })
 })

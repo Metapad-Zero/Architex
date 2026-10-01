@@ -43,8 +43,53 @@ That is the whole design; the interesting part is that the chains do not all off
 | `pool:arc` | pool inventory and the rest of the Arc allocation | one `EquilibriumDistributor.place` call: both move together or neither does |
 | `manager:solana` | the derived mint, the burning manager config, the transceiver and the Arc peers | every account is a PDA or derived from the operation, and the observation requires the *last* one written, so an interrupted leg resumes from whichever part is missing |
 | `debit:solana` | the hub manager's `transfer` | **not idempotent.** The core-bridge sequence is read and persisted before submitting; an unpublished sequence means it never happened, and a different payload at that sequence fails the step closed rather than locking a second allocation. The sequence is re-read immediately before the transfer, so the window between the observation and the lock is closed too |
-| `credit:solana` | post the VAA, validate, redeem, release the mint | keyed by the NTT manager-message digest, which the spoke's own inbox item and replay guard use |
+| `credit:solana` | post the VAA, validate, redeem, release the mint | keyed by the NTT manager-message digest, which the spoke's own inbox item and replay guard use. The redeem and the release are separate transactions and the manager's inbound rate limit lives between them, so a delivery it is holding is [recorded as a claim](#a-claim-the-destination-will-not-release-yet) rather than retried |
 | `pool:solana` | inventory and the rest of the Solana allocation | one Solana transaction, so it is atomic, and the holder's funded token account is only reachable together with the rest |
+
+### A claim the destination will not release yet
+
+A bridge can answer a third thing. Besides "the effect landed" and "it did not", the pinned manager
+can hold an authenticated delivery: a transfer over the peer's inbound rate limit is voted into an
+inbox item and stamped `ReleaseAfter(now + 24 hours)` against the Clock sysvar, and
+`release_inbound_mint` refuses until that boundary passes.
+
+Both of the obvious readings are wrong, and expensively so.
+
+- Read as an **absence**, it becomes the runner's licence to submit — and absence is exactly what
+  authorizes locking or minting again. On this route the release would merely revert, but the same
+  mistake with `revert_when_not_ready` off is a transaction that succeeds and delivers nothing.
+- Read as a **result**, the launch is reported fulfilled while the recipient holds nothing.
+
+So it is recorded as what it is. `Step.claim` carries the destination's own handle for the claim — on
+Solana the manager-message digest its replay guard is keyed by — with the bound amount, the account
+the program will release to, the boundary the program wrote, and the chain clock that boundary was
+last read against. `queuedAt` keeps the first sighting, because how long this launch has been waiting
+is the figure a customer is owed; the clock reading is refreshed on every observation.
+
+What follows from the record:
+
+- The step stays `prepared` and the job `partial`, so nothing downstream treats the allocation as
+  delivered and the free record says `fulfillment: incomplete` beside a settlement that is complete.
+- The job stays in the unattended sweep. A claim is the one kind of unresolved step where retrying
+  later is progress rather than a repeat of the same failure, because the boundary will pass.
+- The route's own submission stops after the redeem it landed rather than attempting a release the
+  manager is holding. Failing there would fail a step that submitted something, and the runner takes
+  a step that submitted nothing *out* of the sweep — so the one retry that would have succeeded would
+  never run.
+- A second observation reporting a different reference, amount or recipient under the same step fails
+  the step closed. Either it is this launch's delivery or it is a claim this launch should not be
+  waiting out; only the first is safe. The boundary and the clock are expected to move and are
+  recorded rather than compared.
+- Conservation does not change. A queued allocation is locked on Arc and not minted on the spoke,
+  which is what `pendingToSpoke` already means — a queue is an explanation, not an accounting event.
+  The free record reports the queued figure next to the conservation figure, never inside it.
+- When the claim is finally released, its record is stamped `releasedAt` and kept. The delay is part
+  of what happened to the customer's launch, and it is gone from the chain once the claim releases.
+
+`spokeClaim` in `server/equilibrium/solanaRoute.ts` is the whole decision, and it is pure: an inbox
+item, the chain's clock, and the plan it is supposed to satisfy. The amount and the recipient are
+checked there rather than only at release, so a claim addressed elsewhere is refused instead of
+waited out.
 
 ### Addresses that are recoverable but not predictable
 
@@ -99,15 +144,29 @@ Each of these is a checkpoint in the record, with the refusal or the observed fi
 - **Failed payment.** An authorization signed by another key, one for less than the quoted total, and
   one whose window has closed are each refused, and the authorization nonce is still unconsumed on
   chain afterwards. A refused payment is a refusal, not a partly fulfilled launch.
-- **An interrupted worker.** The SPL credit is submitted and then reported unresolved, which is what a
-  worker that dies between sending an effect and recording it leaves behind. The job is `partial`,
-  sweep-eligible, and its settlement is readable on its own. The credit *did* land — the record shows
-  the observed SPL supply against the observed Arc custody while the job still calls the step prepared.
-- **A spoke restart.** The validator is killed with `SIGKILL` and its ledger reopened mid-launch. The
-  Arc fork stays up throughout, so the custody backing the claim is a live read of a chain that never
-  restarted.
+- **A queued credit.** The spoke's inbound rate limit for the Arc peer is set below the Solana
+  allocation, so the pinned manager holds this launch's own delivery. The redeem lands, the mint does
+  not, and the job records the claim: its digest, the bound amount, the custody account it is
+  addressed to, and the boundary the manager wrote against the Clock sysvar. The launch stays
+  `partial` with the charge settled and readable on its own, and the free record reports the queued
+  figure next to the conservation figure rather than folded into it.
+- **The early release refused.** Releasing the claim before that boundary is refused by the program,
+  not by the adapter. The unattended sweep reaches the job, finds the claim still held, submits
+  nothing, and keeps the claim's first sighting while refreshing the clock it was last read against.
+- **A spoke restart with the claim outstanding.** The validator is killed with `SIGKILL` and its
+  ledger reopened: the claim comes back with the same boundary. The Arc fork stays up throughout, so
+  the custody backing the claim is a live read of a chain that never restarted.
+- **The boundary passing.** The spoke's accounts are dumped at `finalized` commitment and the ledger
+  rebuilt at a new genesis under a validator whose `CLOCK_REALTIME` is offset past the manager's
+  24-hour duration. Every seeded account is compared byte for byte against the dump, including this
+  launch's claim and its boundary, before anything is released.
+- **An interrupted release.** The release is submitted and then reported unresolved, which is what a
+  worker that dies between sending an effect and recording it leaves behind. The release *did* land —
+  the record shows the observed SPL supply against the observed Arc custody while the job still calls
+  the step prepared.
 - **Unattended recovery.** The journal is closed and reopened and the sweep finishes the launch with
-  no client request and no signature, crediting nothing twice. Both ledgers reconcile.
+  no client request and no signature, crediting nothing twice. The delivered claim keeps the delay it
+  waited out, both ledgers reconcile, and the released claim resubmitted to the manager is refused.
 - **Replay.** The identical paid request re-sent answers 200 with the same settlement transaction and
   no new effect. The settled authorization resubmitted straight to the token is refused
   `AuthorizationAlreadyUsed()`.
@@ -136,12 +195,15 @@ nothing identifies them. That is the price of a leg that cannot be built atomica
   Arc testnet USDC cannot be used, because the payer this harness signs for holds none of it.
 - **Guardian authentication.** One development key is substituted into both core bridges. The real
   Guardian set signed nothing.
-- **The Solana inbound queue's eventual release, here.** This harness keeps the spoke inbound limit
-  at the full issuance so no launch credit is queued, and a durable job does not wait a day for one.
-  Both sides of the eventual release — the hub's and the spoke's own 24-hour queue, the latter over a
-  rebuilt ledger under an offset validator clock — are executed in the [integration
-  rehearsal](EQUILIBRIUM-ARC-SOLANA.md#the-24-hour-delayed-return-on-the-spoke). Binding a queued
-  claim into a launch job's own step machinery is separate work.
+- **An unassisted 24-hour wait.** The spoke's clock is moved by rebuilding its ledger at a new
+  genesis under an offset `CLOCK_REALTIME`; the claim, its boundary and the release are the pinned
+  manager's own, and the rebuilt accounts are proved byte-identical, but the passage of time is a
+  fixture and the record labels it as one. The fixture is macOS-only — it interposes
+  `DYLD_INSERT_LIBRARIES` — so on another host the harness stops at the boundary, writes the evidence
+  it did reach with `complete: false`, and says which prerequisite is missing.
+- **The return leg.** A launch only crosses towards the spoke. Burning a representation back to Arc
+  custody, including the hub's own queue, is exercised in the [integration
+  rehearsal](EQUILIBRIUM-ARC-SOLANA.md#the-24-hour-delayed-return-on-the-spoke).
 - **Any venue or AMM.** The inventory steps place pool tokens and quote inventory into a per-operation
   holder and deliver the rest of each allocation to the request's recipient. Opening a market adapter
   is separate work.

@@ -24,7 +24,7 @@ import type { Address, Hex } from 'viem'
 import { reconcileRoute, type ObservedRoute, type RouteReconciliation } from '../../src/lib/equilibriumArcSolana'
 import { SOLANA_NTT } from '../../src/lib/equilibriumSolana'
 import { hash } from './request'
-import { LaunchError, type Atoms, type EffectContext, type EffectResult, type Job, type LaunchRequest, type PaymentTerms, type Step, type StepKind } from './types'
+import { LaunchError, type Atoms, type EffectContext, type Job, type LaunchRequest, type Observation, type PaymentTerms, type QueuedClaim, type Step, type StepKind } from './types'
 
 /** The only two legs this route fulfils. Base and Robinhood are refused before a quote is priced. */
 export const ROUTE_CHAINS = ['arc', 'solana'] as const
@@ -225,7 +225,7 @@ export interface SolanaRoute {
   assertReady(request: LaunchRequest): void
   budgets(request: LaunchRequest): Record<StepKind, Atoms>
   plan(context: EffectContext): Promise<StepPlan>
-  observe(context: EffectContext, plan: StepPlan): Promise<EffectResult | 'absent' | 'pending'>
+  observe(context: EffectContext, plan: StepPlan): Promise<Observation>
   submit(context: EffectContext, plan: StepPlan): Promise<void>
   /**
    * Both halves of the ledger, each read from its own chain: Arc token supply and locking-manager
@@ -236,6 +236,51 @@ export interface SolanaRoute {
 }
 
 export interface RoutePending { toSpoke: bigint; toHub: bigint }
+
+/* ------------------------------------------------------------------ the spoke's inbound queue */
+
+/** The pinned SVM manager's inbox item, as much of it as a credit observation depends on. */
+export interface SpokeInboxItem {
+  amount: bigint
+  /** The owner the manager will release to, base58. */
+  recipient: string
+  status: 'not_approved' | 'release_after' | 'released'
+  /** The boundary the manager wrote against the Clock sysvar, present only while delayed. */
+  releaseAfter: bigint | null
+}
+
+/**
+ * What a redeemed-but-undelivered spoke claim means for the durable job.
+ *
+ * The pinned manager keeps the queue inside the inbox item: a delivery over the peer's inbound rate
+ * limit is approved with `ReleaseAfter(now + RATE_LIMIT_DURATION)` and `release_inbound_mint`
+ * refuses until the Clock sysvar passes it. From outside, a claim held by that boundary and a claim
+ * simply not released yet are the same account in two different states, and the difference decides
+ * whether submitting is progress or a pointless refusal — so it is read from the boundary against
+ * the chain's own clock, never the host's.
+ *
+ *  - no account                    the delivery never happened; the caller answers `absent`.
+ *  - approved, boundary in future  queued: the claim is authenticated and this is what to record.
+ *  - approved, boundary passed     releasable now; the caller answers `absent` so the runner submits.
+ *  - released                      delivered; the caller reports the result.
+ *
+ * The amount and the recipient are checked against the bound allocation here rather than only on
+ * release, because a claim addressed elsewhere is not something this launch should wait out.
+ */
+export function spokeClaim(plan: CreditPlan, item: SpokeInboxItem, chainClock: bigint, at: number): QueuedClaim | undefined {
+  if (item.amount !== BigInt(plan.amount)) {
+    throw new Error(`The spoke claim ${plan.digest} carries ${item.amount} atoms, not the bound allocation ${plan.amount}`)
+  }
+  if (item.recipient !== plan.custodian) {
+    throw new Error(`The spoke claim ${plan.digest} is addressed to ${item.recipient}, not this launch's custody account ${plan.custodian}`)
+  }
+  if (item.status !== 'release_after' || item.releaseAfter === null) return undefined
+  if (chainClock >= item.releaseAfter) return undefined
+  return {
+    reference: plan.digest, amount: plan.amount, recipient: plan.custodian,
+    releaseAfter: Number(item.releaseAfter), observedClock: Number(chainClock), queuedAt: at,
+  }
+}
 
 /* ------------------------------------------------------------------ the conservation gate */
 
@@ -256,6 +301,18 @@ export function routePending(job: Job, completing?: string): RoutePending {
     if (done(`debit:${destination.chain}`) && !done(`credit:${destination.chain}`)) toSpoke += BigInt(destination.amount)
   }
   return { toSpoke, toHub: 0n }
+}
+
+/**
+ * Claims this job holds and has not delivered, which is the subset of `toSpoke` with a reason.
+ *
+ * The conservation figure does not change when a credit is queued rather than merely unsubmitted —
+ * either way the atoms are locked on Arc and not minted on the spoke — and that is the point: a
+ * queue is not an accounting event. What it is is an explanation, so it is read off the job's own
+ * recorded claims and reported next to the figure rather than folded into it.
+ */
+export function outstandingClaims(job: Job): (QueuedClaim & { step: string })[] {
+  return job.steps.filter((step) => step.claim && step.state !== 'complete').map((step) => ({ step: step.id, ...step.claim! }))
 }
 
 /**
