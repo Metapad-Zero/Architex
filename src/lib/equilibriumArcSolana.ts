@@ -196,3 +196,117 @@ export function describeRoute(route: ObservedRoute): string {
     `in flight to hub ${route.pendingToHub}`,
   ].join(', ')
 }
+
+/* ------------------------------------------------------------------ spoke ledger seeding */
+
+/**
+ * `rentEpoch` for a rent-exempt account, as `u64::MAX`.
+ *
+ * It is a string because that is the only way to carry it. `18446744073709551615` does not survive
+ * a JSON round trip through a JavaScript number — it comes back as `18446744073709552000`, which
+ * `solana-test-validator` then refuses to parse as a `u64`. So the seed files are assembled as text
+ * with this value spliced in, rather than handed to `JSON.stringify`.
+ */
+export const RENT_EXEMPT_EPOCH = '18446744073709551615'
+
+/**
+ * One account in the shape `solana account --output json` writes and
+ * `solana-test-validator --account-dir` reads back.
+ *
+ * This is how a ledger is rebuilt from the accounts the pinned programs themselves wrote, rather
+ * than by replaying the transactions that wrote them. Nothing here interprets an account: the data
+ * is carried as the bytes it was read as.
+ */
+export interface SeedAccount {
+  pubkey: string
+  lamports: number
+  owner: string
+  data: Uint8Array
+}
+
+export function seedAccountJson(account: SeedAccount): string {
+  const data = Buffer.from(account.data).toString('base64')
+  return `${JSON.stringify({
+    pubkey: account.pubkey,
+    account: {
+      lamports: account.lamports,
+      data: [data, 'base64'],
+      owner: account.owner,
+      executable: false,
+      rentEpoch: 0,
+      space: account.data.length,
+    },
+  }, null, 2)}\n`.replace('"rentEpoch": 0', `"rentEpoch": ${RENT_EXEMPT_EPOCH}`)
+}
+
+export function parseSeedAccount(text: string): SeedAccount {
+  const parsed = JSON.parse(text) as {
+    pubkey: string
+    account: { lamports: number; data: [string, string]; owner: string; space: number }
+  }
+  const [encoded, encoding] = parsed.account.data
+  if (encoding !== 'base64') throw new Error(`Seed account ${parsed.pubkey} is ${encoding}, not base64.`)
+  const data = Uint8Array.from(Buffer.from(encoded, 'base64'))
+  if (data.length !== parsed.account.space) {
+    throw new Error(`Seed account ${parsed.pubkey} declares ${parsed.account.space} bytes but carries ${data.length}.`)
+  }
+  return { pubkey: parsed.pubkey, lamports: parsed.account.lamports, owner: parsed.account.owner, data }
+}
+
+/**
+ * Every account the rebuilt ledger must reproduce byte for byte, and whether it did.
+ *
+ * A reseeded ledger is only worth anything if it carries the same state as the one it came from.
+ * The interesting case is the one this exists for: a queued claim whose release boundary must be
+ * the boundary the pinned program wrote, not one the harness chose. Reporting the differing
+ * accounts rather than a bare false is what makes a failure diagnosable.
+ */
+export function seedDifferences(before: SeedAccount[], after: SeedAccount[]): string[] {
+  const seen = new Map(after.map((account) => [account.pubkey, account]))
+  const differences: string[] = []
+  for (const source of before) {
+    const landed = seen.get(source.pubkey)
+    if (!landed) { differences.push(`${source.pubkey}: absent from the rebuilt ledger`); continue }
+    if (landed.owner !== source.owner) differences.push(`${source.pubkey}: owner ${source.owner} → ${landed.owner}`)
+    if (landed.data.length !== source.data.length) {
+      differences.push(`${source.pubkey}: ${source.data.length} bytes → ${landed.data.length}`)
+    } else if (!source.data.every((byte, index) => byte === landed.data[index])) {
+      const at = source.data.findIndex((byte, index) => byte !== landed.data[index])
+      differences.push(`${source.pubkey}: data differs from byte ${at}`)
+    }
+  }
+  return differences
+}
+
+/* ------------------------------------------------------------------ the queue's release boundary */
+
+/**
+ * The arithmetic a labelled clock fixture has to survive being asked about.
+ *
+ * `releaseAfter` is the boundary the pinned manager wrote into its own queue entry; `queuedAt` is
+ * the spoke clock when it wrote it; `observedClock` is the spoke clock on the advanced ledger. The
+ * point of separating them is that the delay is then the *program's*, read back off chain, and the
+ * fixture is only the difference between two observed clocks. Neither figure is assumed.
+ */
+export interface ReleaseBoundary {
+  queuedAt: bigint
+  releaseAfter: bigint
+  observedClock: bigint
+}
+
+export interface ReleaseBoundaryReview {
+  /** The delay the program applied, in seconds, derived from its own two timestamps. */
+  programDelay: bigint
+  /** How much later the advanced ledger's clock is than the clock that queued the claim. */
+  advancedBy: bigint
+  /** Whether the program will now release: its own boundary has passed on the observed clock. */
+  releasable: boolean
+}
+
+export function reviewReleaseBoundary(boundary: ReleaseBoundary): ReleaseBoundaryReview {
+  return {
+    programDelay: boundary.releaseAfter - boundary.queuedAt,
+    advancedBy: boundary.observedClock - boundary.queuedAt,
+    releasable: boundary.observedClock >= boundary.releaseAfter,
+  }
+}

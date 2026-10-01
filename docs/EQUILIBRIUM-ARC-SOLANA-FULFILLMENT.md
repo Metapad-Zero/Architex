@@ -136,10 +136,12 @@ nothing identifies them. That is the price of a leg that cannot be built atomica
   Arc testnet USDC cannot be used, because the payer this harness signs for holds none of it.
 - **Guardian authentication.** One development key is substituted into both core bridges. The real
   Guardian set signed nothing.
-- **The Solana inbound queue's eventual release.** The pinned SVM program hard-codes 24 hours against
-  the Clock sysvar and the local validator's clock cannot be advanced on this host. This harness keeps
-  the spoke inbound limit at the full issuance so no launch credit is queued; the equivalent hub
-  release is executed in the [integration rehearsal](EQUILIBRIUM-ARC-SOLANA.md).
+- **The Solana inbound queue's eventual release, here.** This harness keeps the spoke inbound limit
+  at the full issuance so no launch credit is queued, and a durable job does not wait a day for one.
+  Both sides of the eventual release — the hub's and the spoke's own 24-hour queue, the latter over a
+  rebuilt ledger under an offset validator clock — are executed in the [integration
+  rehearsal](EQUILIBRIUM-ARC-SOLANA.md#the-24-hour-delayed-return-on-the-spoke). Binding a queued
+  claim into a launch job's own step machinery is separate work.
 - **Any venue or AMM.** The inventory steps place pool tokens and quote inventory into a per-operation
   holder and deliver the rest of each allocation to the request's recipient. Opening a market adapter
   is separate work.

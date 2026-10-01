@@ -27,25 +27,29 @@ import { type ChildProcess } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { Connection, Keypair, PublicKey } from '@solana/web3.js'
+import { Connection, Keypair, PublicKey, SystemProgram } from '@solana/web3.js'
 import type { Abi, Address, Hex } from 'viem'
 import {
-  SOLANA_NTT, bytes32, decodeTransceiverMessage, encodeNttManagerMessage, managerMessageDigest,
-  toHex, trimAmount, type NttManagerMessage, type VaaBody,
+  SOLANA_NTT, TOKEN_PROGRAM, bytes32, decodeTransceiverMessage, encodeNttManagerMessage,
+  managerMessageDigest, toHex, trimAmount, type NttManagerMessage, type VaaBody,
 } from '../../src/lib/equilibriumSolana'
 import {
-  decodePostedMessage, describeRoute, evmToWormholeFormat, reconcileRoute,
-  type ObservedRoute,
+  decodePostedMessage, describeRoute, evmToWormholeFormat, reconcileRoute, reviewReleaseBoundary,
+  seedDifferences, type ObservedRoute,
 } from '../../src/lib/equilibriumArcSolana'
 import {
   ARC_TESTNET, artifact, call, connect, deploy, dumpState, increaseTime, linkLibraries, loadState,
   overrideGuardianSet, publishedMessage, revertReason, startAnvil, stopAnvil, waitForAnvil,
 } from './arcFork'
-import { BURNING, LOCKING, NttDeployment, decodeConfig, decodeInboxItem, fetchAccount } from './nttClient'
 import {
-  awaitConfirmed, awaitFinalized, postVaa, refusalReason, send, startValidator, stopValidator,
-  waitForHealth,
+  BURNING, LOCKING, NttDeployment, decodeConfig, decodeInboxItem, decodeOutboxItem, fetchAccount,
+} from './nttClient'
+import {
+  awaitConfirmed, awaitFinalized, postVaa, readChainClock, refusalReason, send, startValidator,
+  stopValidator, waitForHealth,
 } from './localValidator'
+import { clockShiftEnvironment, prepareClockShift } from './clockShift'
+import { describeSeed, dumpSpokeLedger, readSeeded, writeSeedDirectory } from './spokeSeed'
 import {
   DEV_GUARDIAN_ADDRESS, postVaaInstruction, secp256k1Instruction, serializeVaa, signVaa,
   verifySignaturesInstruction,
@@ -603,20 +607,198 @@ async function main(): Promise<void> {
       held.sequence, held.nonce, held.consistencyLevel, held.payload,
     ))
     await send(connection, payer, [spoke.receiveWormholeMessage(payer.publicKey, heldPosted.posted, ARC_CHAIN, heldMessage.message.id)])
-    await send(connection, payer, [spoke.redeem(payer.publicKey, ARC_CHAIN, heldMessage.message.id, heldDigest)])
+    const heldRedeem = await send(connection, payer, [spoke.redeem(payer.publicKey, ARC_CHAIN, heldMessage.message.id, heldDigest)])
     const heldItem = decodeInboxItem(await fetchAccount(connection, spoke.at.inboxItem(heldDigest)))
-    const now = BigInt(Math.floor(Date.now() / 1000))
-    assert(heldItem.status === 'release_after' && heldItem.releaseAfter !== null && heldItem.releaseAfter > now, 'the over-limit claim was not delayed on Solana')
+    // The chain's own clock, not the host's: it is the figure the manager compared against, and the
+    // one the advanced ledger below has to be shown to have moved past.
+    const clockAtQueue = await readChainClock(connection)
+    assert(heldItem.status === 'release_after' && heldItem.releaseAfter !== null && heldItem.releaseAfter > clockAtQueue,
+      'the over-limit claim was not delayed on Solana')
+    const queuedAt = heldItem.releaseAfter - BigInt(RATE_LIMIT_DURATION)
+    assert(clockAtQueue - queuedAt >= 0n && clockAtQueue - queuedAt < 60n,
+      `the queue boundary ${heldItem.releaseAfter} is not ${RATE_LIMIT_DURATION} seconds after the clock that wrote it (${clockAtQueue})`)
     await expectSvmRefusal('rate limit: the delayed Solana claim released early', () =>
       send(connection, stranger, [spoke.releaseInboundMint(stranger.publicKey, heldDigest, recipientAta, true)]))
     const inFlight = await reconcile('a rate-limited claim left in flight', DELAYED, 0n)
     assert(inFlight.hubCustody === DELAYED && inFlight.spokeSupply === 0n, 'the delayed claim is not backed by observed Arc custody')
-    record('claim in flight', `a ${DELAYED} atom claim held by the spoke's inbound limit until ${heldItem.releaseAfter?.toString() ?? 'unknown'} is refused early and backed by ${inFlight.hubCustody} atoms of observed Arc custody. Conservation holds with the claim outstanding: ${describeRoute(inFlight)}`)
-    record('not executed', 'The Solana side of the eventual release is NOT executed. The pinned SVM program hard-codes a 24-hour RATE_LIMIT_DURATION and reads the Clock sysvar, whose unix timestamp on solana-test-validator tracks the host clock; --warp-slot did not bring a validator up on this host. The equivalent release IS executed above on the Arc hub, whose delay is a constructor parameter and whose clock the fork exposes.')
+    record('claim in flight', `a ${DELAYED} atom claim held by the spoke's inbound limit until ${heldItem.releaseAfter} is refused early and backed by ${inFlight.hubCustody} atoms of observed Arc custody. The manager wrote that boundary ${heldItem.releaseAfter - queuedAt} seconds past the Clock sysvar it read at ${clockAtQueue}. Conservation holds with the claim outstanding: ${describeRoute(inFlight)}`)
+
+    /* ------------------------------------------- 13. the delay elapses, and the claim comes home */
+
+    // The spoke's clock has to reach a boundary the pinned program put 24 hours away, and Agave will
+    // not be told what time it is: the Clock sysvar is the stake-weighted median of the vote
+    // timestamps, clamped to 150% of elapsed PoH, so it cannot be pushed from outside, and
+    // `--warp-slot` panics in solana-test-validator 2.1.22 before the RPC port opens. What it is
+    // ultimately derived from is CLOCK_REALTIME inside the validator's own process — the genesis
+    // creation time, the epoch start timestamp and every vote timestamp. A new genesis under an
+    // offset CLOCK_REALTIME is therefore a validator that is honestly 24 hours later, with nothing
+    // about the queue simulated.
+    //
+    // It has to be a new genesis. The clamp is measured from the `epoch_start_timestamp` a reopened
+    // ledger brings back with it, so an existing ledger restarted under the offset would be pulled
+    // straight back to where it was. A new genesis is only useful if the queue comes with it, so the
+    // accounts the pinned programs wrote are dumped and reloaded as bytes, and `seedDifferences`
+    // proves the rebuilt ledger carries the same ones — including this claim's own boundary.
+    const shift = prepareClockShift()
+    let delayedReturn: Record<string, unknown> = { executed: false, why: shift.available ? '' : shift.why }
+
+    if (!shift.available) {
+      record('not executed', `The Solana side of the eventual release is NOT executed: ${shift.why}. The equivalent release IS executed above on the Arc hub, whose delay is a constructor parameter and whose clock the fork exposes.`)
+    } else {
+      const seedDirectory = join(ROOT, 'output/equilibrium/arc-solana-seed')
+      const programNames = new Map([
+        [spoke.manager.toBase58(), 'NTT manager'], [spoke.transceiver.toBase58(), 'transceiver'],
+        [spoke.coreBridge.toBase58(), 'core bridge'], [TOKEN_PROGRAM.toBase58(), 'SPL token'],
+        [SystemProgram.programId.toBase58(), 'system'],
+      ])
+      // A hard kill can only be survived by rooted state, and the dump is read at `finalized` for
+      // the same reason: an account only rooted in the dying process is not state the queue kept.
+      await awaitFinalized(connection, heldRedeem)
+      const dumped = await dumpSpokeLedger(
+        connection, [spoke.manager, spoke.transceiver, spoke.coreBridge, TOKEN_PROGRAM], [spoke.at.feeCollector])
+      const dumpedItem = dumped.find((account) => account.pubkey === spoke.at.inboxItem(heldDigest).toBase58())
+      assert(dumpedItem !== undefined, 'the dump does not contain the queued claim')
+      writeSeedDirectory(seedDirectory, dumped)
+      record('spoke ledger dumped', `${dumped.length} accounts (${describeSeed(dumped, programNames)}) read at finalized commitment, including the queued claim at ${dumpedItem.pubkey}. Executable accounts are excluded; the two NTT programs come back from --upgradeable-program under the same ids and the same upgrade authority.`)
+
+      stopValidator(validator, 'SIGKILL')
+      validator = null
+      await new Promise((done) => setTimeout(done, 3_000))
+      // Read while the spoke is down, from a chain that never restarted. The backing for a claim
+      // nobody can credit right now is the part worth checking across the failure.
+      const whileRebuilding = await observeHub()
+      assert(whileRebuilding.hubCustody === DELAYED, 'Arc custody did not hold the delayed claim while the spoke was rebuilt')
+
+      const advanceBy = RATE_LIMIT_DURATION + 60
+      clockFixture(`The spoke ledger is rebuilt at a new genesis from the ${dumped.length} accounts the pinned programs wrote, under a validator process whose CLOCK_REALTIME is offset by +${advanceBy} seconds (${shift.label}). CLOCK_MONOTONIC is untouched, so PoH runs at real speed. Nothing about the queue is simulated: the claim, its ${RATE_LIMIT_DURATION}-second boundary and the release are the pinned manager's own, and the rebuilt accounts are compared byte for byte against the dump before anything is released.`)
+      const advancedLedger = mkdtempSync(join(tmpdir(), 'equilibrium-arc-svm-advanced-'))
+      validator = startValidator(VALIDATOR_AT, advancedLedger, { rpc: RPC_PORT, faucet: FAUCET_PORT }, true, admin.publicKey, {
+        seedDirectory, environment: clockShiftEnvironment(shift, advanceBy),
+      })
+      connection = new Connection(RPC_URL, 'confirmed')
+      await waitForHealth(connection)
+      // Only the fee payers are re-funded. They are system accounts holding nothing but SOL, which
+      // is the one thing a new genesis cannot carry across and the one thing no claim depends on.
+      for (const account of [payer, stranger]) {
+        await awaitConfirmed(connection, await connection.requestAirdrop(account.publicKey, 500_000_000_000))
+      }
+      await awaitConfirmed(connection, await connection.requestAirdrop(admin.publicKey, 10_000_000_000))
+
+      const differences = seedDifferences(dumped, await readSeeded(connection, dumped))
+      assert(differences.length === 0, `the rebuilt spoke ledger does not carry the accounts it was seeded from: ${differences.slice(0, 5).join('; ')}`)
+      const advancedClock = await readChainClock(connection)
+      const boundary = reviewReleaseBoundary({ queuedAt, releaseAfter: heldItem.releaseAfter, observedClock: advancedClock })
+      assert(boundary.programDelay === BigInt(RATE_LIMIT_DURATION), `the rebuilt claim's delay is ${boundary.programDelay}, not ${RATE_LIMIT_DURATION} seconds`)
+      assert(boundary.advancedBy >= BigInt(RATE_LIMIT_DURATION), `the clock fixture advanced the spoke by ${boundary.advancedBy} seconds, short of the ${RATE_LIMIT_DURATION} the queue requires`)
+      assert(boundary.releasable, 'the advanced spoke clock has not passed the boundary the manager wrote')
+      const retained = decodeInboxItem(await fetchAccount(connection, spoke.at.inboxItem(heldDigest)))
+      assert(retained.status === 'release_after' && retained.releaseAfter === heldItem.releaseAfter && retained.amount === heldItem.amount,
+        'the rebuilt ledger lost or altered the queued claim')
+      const stillPending = await reconcile('claim retained across the rebuilt ledger', DELAYED, 0n)
+      record('queued claim retained', `the ${retained.amount} atom claim came across the rebuilt ledger with the same ${retained.releaseAfter} boundary and all ${dumped.length} seeded accounts byte-identical. The spoke clock is now ${advancedClock}, ${boundary.advancedBy} seconds past the clock that queued it; Arc held ${stillPending.hubCustody} atoms of custody throughout and never restarted.`)
+
+      /* the release the harness could not reach before */
+
+      await send(connection, payer, [spoke.releaseInboundMint(payer.publicKey, heldDigest, recipientAta, true)])
+      const released = await reconcile('delayed claim released', 0n, 0n)
+      assert(released.spokeSupply === DELAYED, `the released claim credited ${released.spokeSupply} atoms, not ${DELAYED}`)
+      assert(decodeInboxItem(await fetchAccount(connection, spoke.at.inboxItem(heldDigest))).status === 'released',
+        'the credited claim is not marked released')
+      await expectSvmRefusal('rate limit: the released Solana claim credited twice', () =>
+        send(connection, stranger, [spoke.releaseInboundMint(stranger.publicKey, heldDigest, recipientAta, true)]))
+      record('delayed release', `the pinned manager released its own 24-hour queue entry exactly once on the advanced clock and refused the repeat: ${describeRoute(released)}`)
+
+      /* and the return leg, across a crash, back onto Arc custody */
+
+      // Section 11 left the hub's inbound limit for Solana at a million atoms to make it queue, and
+      // this claim is larger than that. Reopening it to the full issuance is what makes the release
+      // below the hub manager's ordinary un-queued path; the hub's own queue was already released on
+      // its own clock fixture above, and proving it twice would prove nothing new.
+      await call(arc, hubManager, managerContract, 'setInboundLimit', [ISSUANCE, SOLANA_CHAIN])
+
+      const returnItem = Keypair.generate()
+      const returnBurn = spoke.transferBurn(
+        payer.publicKey, recipientAta, payer.publicKey, returnItem.publicKey,
+        DELAYED, ARC_CHAIN, evmToWormholeFormat(arcRecipient), false,
+      )
+      const burned = await send(connection, payer,
+        [approve(recipientAta, returnBurn.sessionAuthority, payer.publicKey, DELAYED), returnBurn.instruction], [returnItem])
+      const burnedItem = decodeOutboxItem(await fetchAccount(connection, returnItem.publicKey))
+      assert(burnedItem.released === 0n, 'the burn published its message before it was asked to')
+      const midReturn = await reconcile('delayed claim burned, message not yet published', 0n, DELAYED)
+      assert(midReturn.spokeSupply === 0n && midReturn.hubCustody === DELAYED,
+        'the return burn did not retire the representation while Arc kept its backing')
+      await awaitFinalized(connection, burned)
+
+      // Killed between burning and publishing, which is the window in which a worker loses the only
+      // record that the burn happened. The same ledger is reopened, under the same offset, so the
+      // advanced clock is a property of the harness's launcher and not of one process's luck.
+      stopValidator(validator, 'SIGKILL')
+      validator = null
+      await new Promise((done) => setTimeout(done, 3_000))
+      validator = startValidator(VALIDATOR_AT, advancedLedger, { rpc: RPC_PORT, faucet: FAUCET_PORT }, false, admin.publicKey, {
+        environment: clockShiftEnvironment(shift, advanceBy),
+      })
+      connection = new Connection(RPC_URL, 'confirmed')
+      await waitForHealth(connection)
+      const recoveredItem = decodeOutboxItem(await fetchAccount(connection, returnItem.publicKey))
+      assert(recoveredItem.amount.amount === burnedItem.amount.amount && recoveredItem.released === 0n,
+        'the restart lost the unpublished return, or published it unattended')
+      assert((await connection.getAccountInfo(spoke.at.wormholeMessage(returnItem.publicKey), 'confirmed')) === null,
+        'the restart published the return message by itself')
+      await reconcile('spoke restarted, return still unpublished', 0n, DELAYED)
+
+      await send(connection, payer, [spoke.releaseWormholeOutbound(payer.publicKey, returnItem.publicKey, true)])
+      const returnedLate = decodePostedMessage(await fetchAccount(connection, spoke.at.wormholeMessage(returnItem.publicKey)))
+      assert(returnedLate.emitter.equals(spoke.at.emitter) && returnedLate.emitterChain === SOLANA_CHAIN,
+        'the recovered return was not published by the transceiver emitter')
+      const lateDecoded = decodeTransceiverMessage(returnedLate.payload)
+      assert(sameBytes(lateDecoded.sourceNttManager, solanaManagerPeer), 'the recovered return does not come from the Solana manager')
+      assert(sameBytes(lateDecoded.recipientNttManager, evmToWormholeFormat(hubManager)), 'the recovered return is not addressed to the Arc hub manager')
+      assert(sameBytes(lateDecoded.managerPayload.payload.to, evmToWormholeFormat(arcRecipient)), 'the recovered return is addressed elsewhere')
+      await expectSvmRefusal('restart: the recovered return published twice', () =>
+        send(connection, stranger, [spoke.releaseWormholeOutbound(stranger.publicKey, returnItem.publicKey, true)]))
+
+      const lateBody = vaaBody(
+        returnedLate.vaaTime, SOLANA_CHAIN, bytes32(spoke.at.emitter),
+        returnedLate.sequence, returnedLate.nonce, returnedLate.consistencyLevel, returnedLate.payload,
+      )
+      const lateVaa = toHex(serializeVaa(signVaa(lateBody)))
+      await call(arc, hubTransceiver, transceiverContract, 'receiveMessage', [lateVaa])
+      const lateDigest: Hex = `0x${Buffer.from(managerMessageFrom(returnedLate.payload).digest(SOLANA_CHAIN)).toString('hex')}`
+      const notQueued = await arc.publicClient.readContract({ address: hubManager, abi: managerAbi, functionName: 'getInboundQueuedTransfer', args: [lateDigest] })
+      assert(notQueued.txTimestamp === 0n, 'the delayed return was queued on Arc rather than released, so the custody read below is not a release')
+      const home = await reconcile('delayed return complete', 0n, 0n)
+      assert(home.hubCustody === 0n && home.spokeSupply === 0n && home.hubCirculating === ISSUANCE,
+        'the delayed return did not bring the whole issuance back to Arc')
+      await expectArcRefusal('replay: the recovered Solana return delivered twice to Arc', () =>
+        call(arc, hubTransceiver, transceiverContract, 'receiveMessage', [lateVaa]))
+      record('delayed return', `the ${DELAYED} atom claim queued for 24 hours was released on the advanced spoke clock, burned, survived a SIGKILL between the burn and the publish, published sequence ${returnedLate.sequence} exactly once, and released ${DELAYED} atoms of real Arc custody. Observed on both chains: ${describeRoute(home)}. The hub side is a live read of a fork that never restarted.`)
+
+      delayedReturn = {
+        executed: true,
+        amount: DELAYED.toString(),
+        rateLimitDuration: RATE_LIMIT_DURATION,
+        queuedAtSpokeClock: queuedAt.toString(),
+        releaseAfter: heldItem.releaseAfter.toString(),
+        programDelaySeconds: boundary.programDelay.toString(),
+        advancedSpokeClock: advancedClock.toString(),
+        advancedBySeconds: boundary.advancedBy.toString(),
+        clockOffsetSeconds: advanceBy,
+        seededAccounts: dumped.length,
+        seedDifferences: differences,
+        returnSequence: Number(returnedLate.sequence),
+        returnPayload: toHex(returnedLate.payload),
+        refusedEarly: true,
+        refusedTwiceOnSpoke: true,
+        refusedTwiceOnHub: true,
+        guardian: `one development key, address 0x${DEV_GUARDIAN_ADDRESS}, substituted into guardian set ${substituted.index} on both core bridges`,
+      }
+    }
 
     /* ---------------------------------------------------------- the record */
 
-    const endState = await observe(DELAYED, 0n)
+    const endState = await observe(delayedReturn.executed === true ? 0n : DELAYED, 0n)
     const result = {
       observedAt: new Date().toISOString(),
       mode: 'local' as const,
@@ -649,14 +831,21 @@ async function main(): Promise<void> {
         { direction: 'arc→solana', sequence: Number(second.sequence), bytes: second.payload.length, payload: toHex(second.payload) },
         { direction: 'solana→arc', sequence: Number(queuedPost.sequence), bytes: queuedPost.payload.length, payload: toHex(queuedPost.payload) },
         { direction: 'arc→solana', sequence: Number(held.sequence), bytes: held.payload.length, payload: toHex(held.payload) },
+        ...(delayedReturn.executed === true
+          ? [{ direction: 'solana→arc' as const, sequence: delayedReturn.returnSequence as number, bytes: ((delayedReturn.returnPayload as string).length - 2) / 2, payload: delayedReturn.returnPayload as string }]
+          : []),
       ],
+      delayedReturn,
       endState,
       reconciliation: reconcileRoute(endState),
       modelledHubSide: false,
       observed: 'Arc token total supply and locking-manager custody; Solana SPL mint supply, recipient balance and custody balance; the published message bytes of every transfer in both directions.',
       clockFixtures,
       notExecuted: [
-        'The Solana inbound queue\'s eventual release: the pinned program hard-codes 24 hours against the Clock sysvar and the local validator\'s clock cannot be advanced on this host. The equivalent hub release is executed.',
+        ...(delayedReturn.executed === true
+          ? []
+          : [`The Solana inbound queue's eventual release: ${delayedReturn.why as string}. The equivalent hub release is executed.`]),
+        'Guardian authentication. One development key is substituted into guardian set 0 on both core bridges; the real Guardian set signed nothing, in either direction, including the delayed return.',
         'Any public route. No deployment, transfer, pool or funding exists on Arc mainnet or testnet, Solana devnet or mainnet-beta.',
       ],
       publicRouteTested: false,
