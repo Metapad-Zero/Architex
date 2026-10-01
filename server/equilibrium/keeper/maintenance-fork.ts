@@ -21,8 +21,16 @@ import type { KeeperChain, KeeperConfig } from './types'
 export const MAINTENANCE_TOKENS = 100_000_000n
 export const MAINTENANCE_REQUEST = { requestId: 'keeper-refill-001', tokens: '500000000', quote: '3000000' }
 
-export async function maintenanceForkEnvironment() {
+export async function maintenanceForkEnvironment(options: { tokenRefill?: boolean } = {}) {
   const env = await forkEnvironment({ arcPort: 18765, basePort: 18766, baseUsdc: 0n })
+  async function stopForks() {
+    const exits = [env.arc.process, env.base.process].map((child) => new Promise<void>((resolve) => {
+      if (child.exitCode !== null || child.signalCode !== null) resolve()
+      else child.once('exit', () => resolve())
+    }))
+    env.stop()
+    await Promise.all(exits)
+  }
   mkdirSync('output', { recursive: true })
   const dir = mkdtempSync(join(process.cwd(), 'output', 'keeper-maintenance-'))
   const path = join(dir, 'combined.sqlite')
@@ -42,6 +50,10 @@ export async function maintenanceForkEnvironment() {
       returns: { maxPerTransfer: '500000000' },
       refill: { attestation: { kind: 'local-attester' }, maxPerTransfer: '6000000', maxTotal: '12000000' },
       operatorGas: { arc: '100000000000000000', base: '1000000000000000' },
+    }
+    if (options.tokenRefill) {
+      settings.tokenRefill = { maxPerTransfer: '500000000', maxTotal: '2000000000' }
+      settings.operatorGas!.arc = '1000000000000000000'
     }
     const routes = transferRoutes(env.config, settings, jobs.db, (id) => jobs.get(id), { EQUILIBRIUM_FORK_ATTESTER_KEY: FORK_ATTESTER_KEY })
     const adapter = evmAdapter(env.config, jobs.db)
@@ -92,6 +104,7 @@ export async function maintenanceForkEnvironment() {
         maxTokenPerTransfer: MAINTENANCE_REQUEST.tokens, maxTokenTotal: MAINTENANCE_REQUEST.tokens,
         maxQuotePerTransfer: MAINTENANCE_REQUEST.quote, maxQuoteTotal: MAINTENANCE_REQUEST.quote },
     }
+    if (options.tokenRefill) config.maintenance!.maxTokenTotal = '2000000000'
     const index = Number(await clients.arc.readContract({ address: env.config.arc.core, abi: coreAbi, functionName: 'getCurrentGuardianSetIndex' }))
     return {
       env, jobs, dir, path, config, launch, clients, operator, settings,
@@ -99,7 +112,7 @@ export async function maintenanceForkEnvironment() {
       keys: { EQUILIBRIUM_OPERATOR_KEY: DEV.operator, EQUILIBRIUM_FORK_GUARDIAN_KEY: DEV.guardian, EQUILIBRIUM_FORK_ATTESTER_KEY: FORK_ATTESTER_KEY },
       async nonces() { return { arc: await clients.arc.getTransactionCount({ address: operator.address, blockTag: 'pending' }), base: await clients.base.getTransactionCount({ address: operator.address, blockTag: 'pending' }) } },
       async balance(chain: KeeperChain, asset: 'token' | 'quote') { return clients[chain].readContract({ address: config[chain][asset], abi: erc20Abi, functionName: 'balanceOf', args: [config[chain].keeper] }) },
-      stop() { jobs.close(); env.stop(); rmSync(dir, { recursive: true, force: true }) },
+      async stop() { jobs.close(); await stopForks(); rmSync(dir, { recursive: true, force: true }) },
     }
-  } catch (cause) { jobs.close(); env.stop(); rmSync(dir, { recursive: true, force: true }); throw cause }
+  } catch (cause) { jobs.close(); await stopForks(); rmSync(dir, { recursive: true, force: true }); throw cause }
 }

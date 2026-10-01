@@ -25,24 +25,28 @@ export interface MaintenanceContext {
   transferSettingsText: string
   env?: Record<string, string | undefined>
 }
-export interface MaintenanceRequest { requestId: string; tokens: string; quote: string }
+export interface MaintenanceRequest { requestId: string; tokens: string; quote: string; tokenDirection?: 'base-to-arc' | 'arc-to-base' }
 interface Row { id: string; binding: string; request: string; state: string; tokens: string; quote: string; token_transfer: string | null; quote_transfer: string | null }
 export interface MaintenanceOptions {
   /** Fork-only crash seam, after an actual transfer send and before its result is stored. */
   afterBroadcast?: (step: string) => void
+  /** Fork-only hard-crash probes around sends, receipt persistence and cost persistence. */
+  checkpoint?: (point: string, operation: Hex) => void
+  /** Short lease only for foreground fork crash tests; public runs use the standard lease. */
+  transferLeaseMs?: number
 }
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase()
 const fail = (message: string): never => { throw new KeeperError('invalid_configuration', message) }
 
 export function createMaintenance(context: MaintenanceContext, store: KeeperStore, launchOf: (id: Hex) => Job | undefined, options: MaintenanceOptions = {}) {
   const env = context.env ?? process.env
+  if ((options.afterBroadcast || options.checkpoint || options.transferLeaseMs !== undefined) && (JSON.parse(context.keeperConfigText) as KeeperFileConfig).mode !== 'fork') fail('Maintenance crash seams are fork-only.')
   const config = fromFile(JSON.parse(context.keeperConfigText) as KeeperFileConfig, env)
   const adapter = adapterFromFile(JSON.parse(context.adapterConfigText) as EvmFileConfig, env)
   const settings = JSON.parse(context.transferSettingsText) as TransferSettings
   const scope = config.maintenance ?? fail('The keeper maintenance rail is closed: no approved maintenance scope.')
   if (config.mode !== 'fork' && config.mode !== 'testnet') fail('Maintenance supports only fork or bounded testnet mode.')
   if (config.mode !== adapter.mode) fail('Keeper and transfer modes must match.')
-  if (options.afterBroadcast && config.mode !== 'fork') fail('Maintenance crash seams are fork-only.')
   const operatorGas = settings.operatorGas ?? fail('Maintenance requires explicit transfer gas caps on both chains.')
   const refillSettings = settings.refill ?? fail('Maintenance requires the approved CCTP refill rail.')
   const cctp = refillSettings.cctp ?? CCTP_TESTNET
@@ -58,8 +62,8 @@ export function createMaintenance(context: MaintenanceContext, store: KeeperStor
       || !same(c.quote, a.usdc) || !same(c.quote, cctp[chain].usdc) || c.quoteAtomsPerNative !== a.usdcAtomsPerNative || c.finality !== a.finality) fail(`${chain} keeper and approved transfer configuration differ.`)
   }
   const keeper = createKeeper(config, store)
-  const routes = transferRoutes(adapter, settings, store.db, launchOf, env)
-  const transfers = new TransferStore(store.db)
+  const routes = transferRoutes(adapter, settings, store.db, launchOf, env, { checkpoint: options.checkpoint })
+  const transfers = new TransferStore(store.db, options.transferLeaseMs ?? 30_000)
   const binding = hash(['keeper-maintenance-v1', JSON.parse(context.keeperConfigText), JSON.parse(context.adapterConfigText), settings])
   const rows = () => store.db.query<Row, []>('SELECT * FROM keeper_maintenance ORDER BY rowid').all()
   const rowOf = (id: string) => store.db.query<Row, [string]>('SELECT * FROM keeper_maintenance WHERE id=?').get(id)
@@ -117,6 +121,7 @@ export function createMaintenance(context: MaintenanceContext, store: KeeperStor
     async observe(t, step, effect) { zeroFeeReturn(t.id, step.id, effect); return routes.returns.observe(t, step, effect) },
     async broadcast(t, step, effect) { zeroFeeReturn(t.id, step.id, effect); await routes.returns.broadcast(t, step, effect) },
   })
+  const tokenRefill = routes.tokenRefill ? guarded(routes.tokenRefill) : undefined
   const baseRefill = routes.refill!
   const refill: TransferRoute<RefillRequest> = guarded({
     ...baseRefill,
@@ -153,11 +158,13 @@ export function createMaintenance(context: MaintenanceContext, store: KeeperStor
   })
 
   function parse(raw: MaintenanceRequest): MaintenanceRequest {
-    if (!raw || typeof raw !== 'object' || Object.keys(raw).some((key) => !['requestId', 'tokens', 'quote'].includes(key))) fail('Expected a maintenance request with requestId, tokens and quote.')
+    if (!raw || typeof raw !== 'object' || Object.keys(raw).some((key) => !['requestId', 'tokens', 'quote', 'tokenDirection'].includes(key))) fail('Expected a maintenance request with requestId, tokens, quote and optional tokenDirection.')
+    if (raw.tokenDirection !== undefined && raw.tokenDirection !== 'base-to-arc' && raw.tokenDirection !== 'arc-to-base') fail('Invalid tokenDirection.')
+    if (raw.tokenDirection === 'arc-to-base' && !tokenRefill) fail('Arc→Base token refill is closed: no approved transfer bounds.')
     if (typeof raw.requestId !== 'string' || !/^[a-zA-Z0-9_-]{8,60}$/.test(raw.requestId)) fail('Invalid maintenance requestId.')
     if (![raw.tokens, raw.quote].every((value) => typeof value === 'string' && /^(0|[1-9]\d{0,19})$/.test(value)) || BigInt(raw.tokens) + BigInt(raw.quote) === 0n) fail('Maintenance amounts must be decimal atoms, with at least one positive amount.')
     if (BigInt(raw.tokens) > BigInt(scope.maxTokenPerTransfer) || BigInt(raw.quote) > BigInt(scope.maxQuotePerTransfer)) fail('Maintenance exceeds the approved per-transfer bounds.')
-    return { requestId: raw.requestId, tokens: raw.tokens, quote: raw.quote }
+    return { requestId: raw.requestId, tokens: raw.tokens, quote: raw.quote, ...(raw.tokenDirection ? { tokenDirection: raw.tokenDirection } : {}) }
   }
 
   function reserve(request: MaintenanceRequest): Row {
@@ -210,14 +217,20 @@ export function createMaintenance(context: MaintenanceContext, store: KeeperStor
     await guard()
     reserve(request)
     if (BigInt(request.tokens) > 0n) {
-      const transfer = await createTransfer(transfers, returns, { kind: 'return', source: 'executor', requestId: `${request.requestId}-tokens`, launch: scope.launch, amount: request.tokens, recipient: config.arc.keeper }, Math.floor(Date.now() / 1000))
-      store.db.query('UPDATE keeper_maintenance SET token_transfer=? WHERE id=?').run(transfer.id, request.requestId)
-      if ((await runTransfer(transfers, returns, transfer.id, Date.now, options.afterBroadcast)).state !== 'complete') return status(request.requestId)!
+      if (request.tokenDirection === 'arc-to-base') {
+        const transfer = await createTransfer(transfers, tokenRefill!, { kind: 'token-refill', requestId: `${request.requestId}-tokens`, launch: scope.launch, amount: request.tokens, recipient: config.base.keeper }, Math.floor(Date.now() / 1000))
+        store.db.query('UPDATE keeper_maintenance SET token_transfer=? WHERE id=?').run(transfer.id, request.requestId)
+        if ((await runTransfer(transfers, tokenRefill!, transfer.id, Date.now, options.afterBroadcast, options.checkpoint)).state !== 'complete') return status(request.requestId)!
+      } else {
+        const transfer = await createTransfer(transfers, returns, { kind: 'return', source: 'executor', requestId: `${request.requestId}-tokens`, launch: scope.launch, amount: request.tokens, recipient: config.arc.keeper }, Math.floor(Date.now() / 1000))
+        store.db.query('UPDATE keeper_maintenance SET token_transfer=? WHERE id=?').run(transfer.id, request.requestId)
+        if ((await runTransfer(transfers, returns, transfer.id, Date.now, options.afterBroadcast, options.checkpoint)).state !== 'complete') return status(request.requestId)!
+      }
     }
     if (BigInt(request.quote) > 0n) {
       const transfer = await createTransfer(transfers, refill, { kind: 'refill', requestId: `${request.requestId}-quote`, from: 'arc', to: 'base', amount: request.quote, maxFee: '0' }, Math.floor(Date.now() / 1000))
       store.db.query('UPDATE keeper_maintenance SET quote_transfer=? WHERE id=?').run(transfer.id, request.requestId)
-      if ((await runTransfer(transfers, refill, transfer.id, Date.now, options.afterBroadcast)).state !== 'complete') return status(request.requestId)!
+      if ((await runTransfer(transfers, refill, transfer.id, Date.now, options.afterBroadcast, options.checkpoint)).state !== 'complete') return status(request.requestId)!
     }
     await routes.sender.settleGas('arc'); await routes.sender.settleGas('base')
     if (BigInt(costs([rowOf(request.requestId)!]).reserved) !== 0n) throw new Error('Maintenance has unaccounted sends; reconcile before trading.')
@@ -247,6 +260,7 @@ Mode **${config.mode}**${config.mode === 'fork' ? ' — local fork rehearsal, no
 Existing launch: ${scope.launch}. No issuance, pool reseeding or holder inventory changes.
 
 - Token route: Base executor ${adapter.base.executor} → authenticated NTT burn/Arc unlock → Arc keeper ${config.arc.keeper}.
+- Token refill: ${tokenRefill ? `Arc executor ${adapter.arc.executor} → canonical NTT lock → authenticated Base mint directly to Base keeper ${config.base.keeper}. Transfer bounds ${settings.tokenRefill!.maxPerTransfer} per transfer / ${settings.tokenRefill!.maxTotal} total.` : 'Arc→Base rail closed; explicit transfer bounds required.'}
 - USDC route: Arc executor ${adapter.arc.executor} → authenticated CCTP V2 burn/mint → Base executor ${adapter.base.executor} → replay-protected deposit to Base keeper ${config.base.keeper}.
 - Canonical/spoke assets: Arc ${config.arc.token}, Base ${config.base.token}.
 - NTT managers: Arc ${L?.hub.proxy ?? 'unavailable'}, Base ${L?.spokeManager.proxy ?? 'unavailable'}.
@@ -260,7 +274,7 @@ Existing launch: ${scope.launch}. No issuance, pool reseeding or holder inventor
 
 Maintenance refuses local or on-chain exposure. Pending maintenance blocks new keeper cycles. It resumes the same prepared executor operations after restart. Costs are counted once by mined transaction, separate from trading profit; transferred principal is neither profit nor cost.
 
-${config.mode === 'fork' ? 'Fork substitutions: local Wormhole Guardian and CCTP attester sets, threshold 1; Arc USDC stand-in; development-key fork gas. Base starts at zero USDC and receives it through CCTP. These do not prove public attestations, Arc precompile settlement or real Base L1 fees.\n\n' : ''}Only Base→Arc token maintenance is available here. Arc→Base token refill remains closed; the keeper continues to refuse a depleted Base token inventory.
+${config.mode === 'fork' ? 'Fork substitutions: local Wormhole Guardian and CCTP attester sets, threshold 1; Arc USDC stand-in; development-key fork gas. Base starts at zero USDC and receives it through CCTP. These do not prove public attestations, Arc precompile settlement or real Base L1 fees.\n\n' : ''}Token direction is bound to the maintenance identity. Depleted source inventory refuses; pending claims remain reserved and block trading.
 
 Requires both exact keeper approval ${keeperApprovalDigest(context.keeperPreview, context.keeperConfigText)} and separate transfer approval ${transferApprovalDigest(context.adapterConfigText, context.transferSettingsText)}. Launch approval is unchanged and authorizes no maintenance. No public authorization is inherited from a fork preview.
 

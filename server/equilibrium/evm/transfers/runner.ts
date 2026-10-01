@@ -26,7 +26,7 @@ export async function createTransfer<R>(store: TransferStore, route: TransferRou
  * bytes are persisted before anything is sent, a pending effect is never treated as absent, and a
  * worker that lost its lease stops before it can send or record anything.
  */
-export async function runTransfer<R>(store: TransferStore, route: TransferRoute<R>, id: Hex, now: () => number = Date.now, afterBroadcast?: (step: string) => void): Promise<Transfer<R>> {
+export async function runTransfer<R>(store: TransferStore, route: TransferRoute<R>, id: Hex, now: () => number = Date.now, afterBroadcast?: (step: string) => void, checkpoint?: (point: string, operation: Hex) => void): Promise<Transfer<R>> {
   const owner = randomUUID()
   const t = store.claim(id, owner, now()) as Transfer<R>
   // Keep the lease alive while a chain call is outstanding; a lost lease stops the worker before it sends.
@@ -63,7 +63,9 @@ export async function runTransfer<R>(store: TransferStore, route: TransferRoute<
       }
       if (observed.operation !== step.prepared.operation || observed.finalized !== true) throw new Error('Finalized result does not match its operation')
       route.validate(t, step, observed)
+      checkpoint?.('before-receipt-write', step.prepared.operation)
       step.result = observed; step.state = 'complete'; save()
+      checkpoint?.('after-receipt-write', step.prepared.operation)
     }
     t.state = 'complete'; save(); return t
   } catch (cause) {

@@ -1,0 +1,59 @@
+{
+  "mode": "fork",
+  "arc": {
+    "chain": "arc",
+    "rpc": "http://127.0.0.1:18765",
+    "chainId": 5042002,
+    "keeper": "0xf57971edebb18bfc75638465a10d623d90bd5e7e",
+    "token": "0xd65922182ec702Aed5f8a6ef430D1407DBCaA484",
+    "quote": "0x3600000000000000000000000000000000000000",
+    "pool": "0xDf09440AE5CE77DfB39A7eaFCBa30cF063e84480",
+    "venue": "architex-pair",
+    "finality": 0,
+    "fromBlock": "64824601",
+    "quoteAtomsPerNative": "1000000",
+    "opStackL1Fee": false
+  },
+  "base": {
+    "chain": "base",
+    "rpc": "http://127.0.0.1:18766",
+    "chainId": 84532,
+    "keeper": "0x4720960b18ffe44b284eef86357ecfa6f935891e",
+    "token": "0xA5698219d8c818a4e0D5bc3F83a18f5FF6D4F7bD",
+    "quote": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+    "pool": "0xA50DC344f4FE8d52a441CADd2Cf06C4848A8f3Ad",
+    "venue": "uniswap-v3-pool",
+    "finality": 0,
+    "fromBlock": "47513001",
+    "quoteAtomsPerNative": "5000000000",
+    "priorityFeeWei": "1000000",
+    "opStackL1Fee": true
+  },
+  "policy": {
+    "maxTokens": "200000000",
+    "minEdge": "1000",
+    "buffer": "1000",
+    "spendCap": "5000000",
+    "lossCap": "2000000",
+    "recoveryReserve": "1000000",
+    "recoveryCost": "10000",
+    "maxLegCost": "100000",
+    "maxQuoteAgeSeconds": 600,
+    "maxBlockLag": 20,
+    "maxHeadAgeSeconds": 3600,
+    "legTtlSeconds": 600,
+    "slippageBps": 50,
+    "maxOpenCycles": 1
+  },
+  "maintenance": {
+    "launch": "0x6378b1682b2279336092dfd29ce8099dc5ed5e6389f95233d3705bf0759bb184",
+    "executors": {
+      "arc": "0x9c409262efa8e122e00b1c6efaf5e1135325b7ca",
+      "base": "0xbf0fe883bbaa0565af4b02fa9d6a6a85c96a2924"
+    },
+    "maxTokenPerTransfer": "500000000",
+    "maxTokenTotal": "2000000000",
+    "maxQuotePerTransfer": "3000000",
+    "maxQuoteTotal": "3000000"
+  }
+}

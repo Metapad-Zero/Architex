@@ -214,14 +214,19 @@ suite('transfer sender: numeric gas ledger, chain binding and process-safe reser
     expect([child.status, (child.stdout + child.stderr).slice(-900)]).toEqual([78, (child.stdout + child.stderr).slice(-900)])
     expect(await nonce()).toBe(before)
     const db = new JobStore(path)
-    const sender = executorSender({ ...config, operatorGas: { arc: '1', base: (10n ** 18n).toString() } }, db.db)
-    const orphan = db.db.query<{ worst: string }, []>('SELECT worst FROM evm_transfer_gas').get()!
+    const orphan = db.db.query<{ worst: string; tx: string }, []>('SELECT worst,tx FROM evm_transfer_gas').get()!
+    const sender = executorSender({ ...config, operatorGas: { arc: '1', base: orphan.worst } }, db.db)
     await sender.settleGas('base')
     // Never mined, so it stays at worst case: the ledger over-counts rather than under-counts.
     expect(sender.committed('base')).toBe(BigInt(orphan.worst))
     const plan = planFor('kill-before')
     await sender.broadcast(plan, prepared(plan).digest)
     expect(await nonce()).toBe(before + 1)
+    // Same transaction and one reservation even when the cap cannot cover a second send.
+    expect(count(db, 'SELECT COUNT(*) AS n FROM evm_transfer_gas')).toBe(1)
+    const settled = db.db.query<{ tx: string; actual: string }, []>('SELECT tx,actual FROM evm_transfer_gas').get()!
+    expect(settled.tx).toBe(orphan.tx)
+    expect(sender.committed('base')).toBe(BigInt(settled.actual))
     expect((await client().getLogs({ address: executor, event: executorAbi.find((x) => x.type === 'event' && x.name === 'Executed')!, args: { operation: plan.operation }, fromBlock: 0n })).length).toBe(1)
     db.close()
   }, 120_000)

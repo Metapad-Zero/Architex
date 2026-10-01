@@ -91,6 +91,7 @@ try {
         assertMaySend()
         const result = command === 'maintenance-reconcile' ? await maintenance.reconcile() : await maintenance.run({
           requestId: flag('request-id') ?? '', tokens: flag('tokens') ?? '0', quote: flag('quote') ?? '0',
+          ...(flag('token-direction') ? { tokenDirection: flag('token-direction') as 'arc-to-base' | 'base-to-arc' } : {}),
         })
         say({ result, totals: maintenance.totals() })
       }

@@ -1,0 +1,813 @@
+{
+  "issue": "49TH-38",
+  "mode": "fork",
+  "baseRevision": "4f48dfa6953d105d175ba15e9aa2af25628dfb34",
+  "generatedAt": "2026-10-01T00:54:34.633Z",
+  "pins": {
+    "arc": {
+      "chainId": 5042002,
+      "block": "64824600"
+    },
+    "base": {
+      "chainId": 84532,
+      "block": "47513000"
+    }
+  },
+  "substitutions": [
+    "Local Guardian and CCTP attester sets, threshold 1",
+    "Arc USDC stand-in and development-key gas only on loopback forks",
+    "Existing issued canonical inventory staged by operator transfer, excluded from refill costs",
+    "Crash worker lease accelerated to 200ms; public default remains 30000ms",
+    "Anvil omits real Base L1 fees; live fee calculation remains unproven",
+    "Fee refusal overrides only the Arc messageFee read on loopback"
+  ],
+  "request": {
+    "requestId": "keeper-forward-001",
+    "tokens": "500000000",
+    "quote": "0",
+    "tokenDirection": "arc-to-base"
+  },
+  "initial": {
+    "id": "keeper-forward-001",
+    "state": "complete",
+    "request": {
+      "requestId": "keeper-forward-001",
+      "tokens": "500000000",
+      "quote": "0",
+      "tokenDirection": "arc-to-base"
+    },
+    "transfers": [
+      {
+        "id": "0xae548c714995f6436c0a1562ffcde8a84c79dbca7f7ae52bcc85b7975de4713f",
+        "kind": "token-refill",
+        "version": "evm-token-refill-v1:6abfc28abb407147",
+        "state": "complete",
+        "request": {
+          "kind": "token-refill",
+          "requestId": "keeper-forward-001-tokens",
+          "launch": "0x6378b1682b2279336092dfd29ce8099dc5ed5e6389f95233d3705bf0759bb184",
+          "amount": "500000000",
+          "recipient": "0x4720960b18ffe44b284eef86357ecfa6f935891e"
+        },
+        "steps": [
+          {
+            "id": "lock:arc",
+            "chain": "arc",
+            "state": "complete",
+            "result": {
+              "operation": "0xdca545100ac7d7272445b9609e3c254c352544bcebd4e02a71a06af7cae964f2",
+              "transaction": "0x7c06e8ba2aa1499206e0981c4e60885ea74006ab14d238fe1b7de1844b769a6b",
+              "finalized": true,
+              "cost": "833",
+              "amount": "500000000",
+              "by": "executor",
+              "details": {
+                "to": "0x4720960b18ffe44b284eef86357ecfa6f935891e",
+                "digest": "0xee5eca0e0792cb109fc5998520555bbbf8c1f4eeaec5b9489fe3570b02f1dec4",
+                "sequence": "4"
+              }
+            }
+          },
+          {
+            "id": "mint:base",
+            "chain": "base",
+            "state": "complete",
+            "result": {
+              "operation": "0x367da2032b498b9765a8d567b1b89094a787a7486cb1ca77b848ba524acc910c",
+              "transaction": "0x3d0cb4ef8ff456a178d771a242e60acccb594be0209291a7a1c70be33270ebdb",
+              "finalized": true,
+              "cost": "6651",
+              "amount": "500000000",
+              "by": "executor",
+              "details": {
+                "to": "0x4720960b18ffe44b284eef86357ecfa6f935891e",
+                "digest": "0xee5eca0e0792cb109fc5998520555bbbf8c1f4eeaec5b9489fe3570b02f1dec4"
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "costs": {
+      "realized": "7484",
+      "reserved": "0"
+    }
+  },
+  "crashes": [
+    {
+      "point": "before-send",
+      "step": "lock:arc",
+      "operation": "0x08f92ee72130761f75c84c604e87e5a17e2a2dbe700bd968ea0f6d8c81b57a96",
+      "transfer": "0xcd6362efccfcded2470536c36a7b17f171b4b1fe89a864b9e5a226b6b6dc0e5a",
+      "exitCode": 86,
+      "reservedAtCrash": {
+        "realized": "0",
+        "reserved": "18133"
+      },
+      "finalCosts": {
+        "realized": "7315",
+        "reserved": "0"
+      },
+      "noncesBefore": {
+        "arc": 15,
+        "base": 10
+      },
+      "noncesAfter": {
+        "arc": 16,
+        "base": 11
+      }
+    },
+    {
+      "point": "after-send",
+      "step": "lock:arc",
+      "operation": "0x8850d3956dc3da290b5f9c0e62ef4f2467c8e2ff76f6091fddd6d4e49a63b24c",
+      "transfer": "0x021d8e318d0b167b3fc1b5ec6fa2d6456fa84b12c80b30e9ca5739057336b58f",
+      "exitCode": 86,
+      "reservedAtCrash": {
+        "realized": "0",
+        "reserved": "18133"
+      },
+      "finalCosts": {
+        "realized": "7303",
+        "reserved": "0"
+      },
+      "noncesBefore": {
+        "arc": 16,
+        "base": 11
+      },
+      "noncesAfter": {
+        "arc": 17,
+        "base": 12
+      }
+    },
+    {
+      "point": "before-cost-write",
+      "step": "lock:arc",
+      "operation": "0x7af2eb8901974fe7641b9471a2dbf72dd7a3df9d0586b5eae06852b5fb69cc90",
+      "transfer": "0x0a94587c9390181af53b8cc5d06cca1849a9b886b791a0acdbe32c81d296c43a",
+      "exitCode": 86,
+      "reservedAtCrash": {
+        "realized": "0",
+        "reserved": "17925"
+      },
+      "finalCosts": {
+        "realized": "7213",
+        "reserved": "0"
+      },
+      "noncesBefore": {
+        "arc": 17,
+        "base": 12
+      },
+      "noncesAfter": {
+        "arc": 18,
+        "base": 13
+      }
+    },
+    {
+      "point": "after-cost-write",
+      "step": "lock:arc",
+      "operation": "0x9e2c2c31737540e9e48a223c4c8e20a00af585ca6c12b10e3431712ed64d0fc1",
+      "transfer": "0xe9d95ee748f118ca81e76041a6d6d6d41f730cd13d43f63b05748a40947239fe",
+      "exitCode": 86,
+      "reservedAtCrash": {
+        "realized": "582",
+        "reserved": "0"
+      },
+      "finalCosts": {
+        "realized": "7067",
+        "reserved": "0"
+      },
+      "noncesBefore": {
+        "arc": 18,
+        "base": 13
+      },
+      "noncesAfter": {
+        "arc": 19,
+        "base": 14
+      }
+    },
+    {
+      "point": "before-receipt-write",
+      "step": "lock:arc",
+      "operation": "0xf230f7df219436e03df024fa0941487695a867524fae638dcf38ba18771ff00d",
+      "transfer": "0xe396ba62195739494a1a0ea2620cbb863f28f48e255ac310042a310c649cf36a",
+      "exitCode": 86,
+      "reservedAtCrash": {
+        "realized": "535",
+        "reserved": "0"
+      },
+      "finalCosts": {
+        "realized": "7077",
+        "reserved": "0"
+      },
+      "noncesBefore": {
+        "arc": 19,
+        "base": 14
+      },
+      "noncesAfter": {
+        "arc": 20,
+        "base": 15
+      }
+    },
+    {
+      "point": "after-receipt-write",
+      "step": "lock:arc",
+      "operation": "0x5763f06ae65badc490695da242eb4765c33efe2a76c7132763cca50e994b65e2",
+      "transfer": "0xdadf48670c93c4ab7c1d6f7c0626414331405201ade3edcb69c9fb50632ac6bd",
+      "exitCode": 86,
+      "reservedAtCrash": {
+        "realized": "487",
+        "reserved": "0"
+      },
+      "finalCosts": {
+        "realized": "7008",
+        "reserved": "0"
+      },
+      "noncesBefore": {
+        "arc": 20,
+        "base": 15
+      },
+      "noncesAfter": {
+        "arc": 21,
+        "base": 16
+      }
+    },
+    {
+      "point": "before-send",
+      "step": "mint:base",
+      "operation": "0x37bfc0b4f3b8c201ea0ab6ef2cc9b8dd217bf8f4ab79879d747a684b71375cf2",
+      "transfer": "0x7c89f25268874832fe95e0b4546400731e12de6e5773d87dc2fc77a2b1ca95d9",
+      "exitCode": 86,
+      "reservedAtCrash": {
+        "realized": "458",
+        "reserved": "15920"
+      },
+      "finalCosts": {
+        "realized": "6958",
+        "reserved": "0"
+      },
+      "noncesBefore": {
+        "arc": 21,
+        "base": 16
+      },
+      "noncesAfter": {
+        "arc": 22,
+        "base": 17
+      }
+    },
+    {
+      "point": "after-send",
+      "step": "mint:base",
+      "operation": "0x1446e27fb7665f28cbc395b9d793deb8057600cd0ff57525ff769440ee45fff1",
+      "transfer": "0xdc7531e87b186aa79ed6e469f291d64bfea3b81db5f9bf11099437985bf24aaa",
+      "exitCode": 86,
+      "reservedAtCrash": {
+        "realized": "427",
+        "reserved": "15861"
+      },
+      "finalCosts": {
+        "realized": "6825",
+        "reserved": "0"
+      },
+      "noncesBefore": {
+        "arc": 22,
+        "base": 17
+      },
+      "noncesAfter": {
+        "arc": 23,
+        "base": 18
+      }
+    },
+    {
+      "point": "before-cost-write",
+      "step": "mint:base",
+      "operation": "0xfadecf263d6da97bd1f30f0807f3505e9f4aa6041e3f18ccc9cacdd8866c9843",
+      "transfer": "0x26d37f0f9291538762fe9a8be8914e023a66b3801db4aa7b306f6996255b9125",
+      "exitCode": 86,
+      "reservedAtCrash": {
+        "realized": "399",
+        "reserved": "15990"
+      },
+      "finalCosts": {
+        "realized": "6856",
+        "reserved": "0"
+      },
+      "noncesBefore": {
+        "arc": 23,
+        "base": 18
+      },
+      "noncesAfter": {
+        "arc": 24,
+        "base": 19
+      }
+    },
+    {
+      "point": "after-cost-write",
+      "step": "mint:base",
+      "operation": "0x8f4eef2f927991735c28c72e544132a9bddecba95bc18e3efd1b6d98a3a632a8",
+      "transfer": "0xf8b1544a784f42d6176743bdafac6a51dbcd2dd2038b46b4f5afb4f4f6b7b019",
+      "exitCode": 86,
+      "reservedAtCrash": {
+        "realized": "6727",
+        "reserved": "0"
+      },
+      "finalCosts": {
+        "realized": "6727",
+        "reserved": "0"
+      },
+      "noncesBefore": {
+        "arc": 24,
+        "base": 19
+      },
+      "noncesAfter": {
+        "arc": 25,
+        "base": 20
+      }
+    },
+    {
+      "point": "before-receipt-write",
+      "step": "mint:base",
+      "operation": "0x6d0be5d98ab63a6cc64b8887ecd6abb3bf1ec81403ce22a2ca5b9c01f273fa55",
+      "transfer": "0x0566e56390e37024301c9e6d8a87056ffb7a871b33f3c5630ec02011463450fe",
+      "exitCode": 86,
+      "reservedAtCrash": {
+        "realized": "6768",
+        "reserved": "0"
+      },
+      "finalCosts": {
+        "realized": "6768",
+        "reserved": "0"
+      },
+      "noncesBefore": {
+        "arc": 25,
+        "base": 20
+      },
+      "noncesAfter": {
+        "arc": 26,
+        "base": 21
+      }
+    },
+    {
+      "point": "after-receipt-write",
+      "step": "mint:base",
+      "operation": "0x7ca05d730bc2aa3e2d7e114ea233df5bb6d60b4592714531cbca2ee10445a9c0",
+      "transfer": "0xf4ffe4b07bb8a239ea287f6559304b486b0c7b062c6f102bfe5147c34f5a2acc",
+      "exitCode": 86,
+      "reservedAtCrash": {
+        "realized": "6729",
+        "reserved": "0"
+      },
+      "finalCosts": {
+        "realized": "6729",
+        "reserved": "0"
+      },
+      "noncesBefore": {
+        "arc": 26,
+        "base": 21
+      },
+      "noncesAfter": {
+        "arc": 27,
+        "base": 22
+      }
+    }
+  ],
+  "receiptCosts": [
+    {
+      "transfer": "0x0b782e9122e3b044147368707734eefe33b916922ebb2426a95f7e9785b12f70",
+      "chain": "arc",
+      "transaction": "0xa36f4d992380718551a4986b9f0436eb0e5deb80d54d48ae958cb81101ae4ec8",
+      "operation": "0x86951b9a36ce384de7a3680dbee93440bdcc28b7041016a997cb62bf6d02c122",
+      "gasUsed": "201813",
+      "effectiveGasPrice": "4632632669",
+      "l1Fee": "0",
+      "cost": "935",
+      "executionLogs": 1
+    },
+    {
+      "transfer": "0x0b782e9122e3b044147368707734eefe33b916922ebb2426a95f7e9785b12f70",
+      "chain": "base",
+      "transaction": "0xcbb603b0a54888655748a2580ed3f007eb1baab2031c06482a2b0ded8dbc45c5",
+      "operation": "0xd486b6d946bc35e8403a5a6a986c49c86ba48ab3382af697de4bc6ae80716bba",
+      "gasUsed": "247696",
+      "effectiveGasPrice": "5826148",
+      "l1Fee": "0",
+      "cost": "7216",
+      "executionLogs": 1
+    },
+    {
+      "transfer": "0xae548c714995f6436c0a1562ffcde8a84c79dbca7f7ae52bcc85b7975de4713f",
+      "chain": "arc",
+      "transaction": "0x7c06e8ba2aa1499206e0981c4e60885ea74006ab14d238fe1b7de1844b769a6b",
+      "operation": "0xdca545100ac7d7272445b9609e3c254c352544bcebd4e02a71a06af7cae964f2",
+      "gasUsed": "199001",
+      "effectiveGasPrice": "4184662857",
+      "l1Fee": "0",
+      "cost": "833",
+      "executionLogs": 1
+    },
+    {
+      "transfer": "0xae548c714995f6436c0a1562ffcde8a84c79dbca7f7ae52bcc85b7975de4713f",
+      "chain": "base",
+      "transaction": "0x3d0cb4ef8ff456a178d771a242e60acccb594be0209291a7a1c70be33270ebdb",
+      "operation": "0x367da2032b498b9765a8d567b1b89094a787a7486cb1ca77b848ba524acc910c",
+      "gasUsed": "230596",
+      "effectiveGasPrice": "5768491",
+      "l1Fee": "0",
+      "cost": "6651",
+      "executionLogs": 1
+    },
+    {
+      "transfer": "0xcd6362efccfcded2470536c36a7b17f171b4b1fe89a864b9e5a226b6b6dc0e5a",
+      "chain": "arc",
+      "transaction": "0x68b35d88bf18cb419a80728132950080bdc0e8d87886080de2c0bc98e8629527",
+      "operation": "0x08f92ee72130761f75c84c604e87e5a17e2a2dbe700bd968ea0f6d8c81b57a96",
+      "gasUsed": "201813",
+      "effectiveGasPrice": "3791861259",
+      "l1Fee": "0",
+      "cost": "766",
+      "executionLogs": 1
+    },
+    {
+      "transfer": "0xcd6362efccfcded2470536c36a7b17f171b4b1fe89a864b9e5a226b6b6dc0e5a",
+      "chain": "base",
+      "transaction": "0x10f271a62d7accf92edad8d6177d95f1330a98e981b769be96cefecc80d3bbee",
+      "operation": "0x6283f483c689c44b80297eef26193572a9a09838ae009615ca16bdcec20b329c",
+      "gasUsed": "227784",
+      "effectiveGasPrice": "5749440",
+      "l1Fee": "0",
+      "cost": "6549",
+      "executionLogs": 1
+    },
+    {
+      "transfer": "0x021d8e318d0b167b3fc1b5ec6fa2d6456fa84b12c80b30e9ca5739057336b58f",
+      "chain": "arc",
+      "transaction": "0xcccccba7080bf01cf3ba6570ba0a7ac6382c83d922be4bdb944714876faabdd3",
+      "operation": "0x8850d3956dc3da290b5f9c0e62ef4f2467c8e2ff76f6091fddd6d4e49a63b24c",
+      "gasUsed": "201813",
+      "effectiveGasPrice": "3447573885",
+      "l1Fee": "0",
+      "cost": "696",
+      "executionLogs": 1
+    },
+    {
+      "transfer": "0x021d8e318d0b167b3fc1b5ec6fa2d6456fa84b12c80b30e9ca5739057336b58f",
+      "chain": "base",
+      "transaction": "0xa154aec71ff950663d3b2d214dcf1c9497d10fff61be3112f1499776b39194ad",
+      "operation": "0xdab77a131d6a33aeb9ce1d7a711f9b6d7cac99fd2e2df8e70b34b8383e0b35ec",
+      "gasUsed": "230584",
+      "effectiveGasPrice": "5730464",
+      "l1Fee": "0",
+      "cost": "6607",
+      "executionLogs": 1
+    },
+    {
+      "transfer": "0x0a94587c9390181af53b8cc5d06cca1849a9b886b791a0acdbe32c81d296c43a",
+      "chain": "arc",
+      "transaction": "0x42a94701525eb76d6d4f22ca0f73ce85ab90155253f16a1981dbed0f05605874",
+      "operation": "0x7af2eb8901974fe7641b9471a2dbf72dd7a3df9d0586b5eae06852b5fb69cc90",
+      "gasUsed": "199013",
+      "effectiveGasPrice": "3145743418",
+      "l1Fee": "0",
+      "cost": "627",
+      "executionLogs": 1
+    },
+    {
+      "transfer": "0x0a94587c9390181af53b8cc5d06cca1849a9b886b791a0acdbe32c81d296c43a",
+      "chain": "base",
+      "transaction": "0x1ab04217958c52da2a9b1267c53a26630d8b9f4363d213dc5a490474c9525a99",
+      "operation": "0x8da4729c81903e5f255d44a175c841dd58f96df16e2c734a9c614f1e2881da30",
+      "gasUsed": "230596",
+      "effectiveGasPrice": "5711564",
+      "l1Fee": "0",
+      "cost": "6586",
+      "executionLogs": 1
+    },
+    {
+      "transfer": "0xe9d95ee748f118ca81e76041a6d6d6d41f730cd13d43f63b05748a40947239fe",
+      "chain": "arc",
+      "transaction": "0xdaabc88bf1229b85536c9c8d6b585eefbe1f57a64508193c307094bc964f471e",
+      "operation": "0x9e2c2c31737540e9e48a223c4c8e20a00af585ca6c12b10e3431712ed64d0fc1",
+      "gasUsed": "201813",
+      "effectiveGasPrice": "2881084082",
+      "l1Fee": "0",
+      "cost": "582",
+      "executionLogs": 1
+    },
+    {
+      "transfer": "0xe9d95ee748f118ca81e76041a6d6d6d41f730cd13d43f63b05748a40947239fe",
+      "chain": "base",
+      "transaction": "0xfc8bab31e8591d285259ff83646a012fcdf8cb289631a55117fbcab479179b2e",
+      "operation": "0x473f255b1dc58369f17d3ae7e1311523b8d4698864953969c388c1aa36aea906",
+      "gasUsed": "227808",
+      "effectiveGasPrice": "5692740",
+      "l1Fee": "0",
+      "cost": "6485",
+      "executionLogs": 1
+    },
+    {
+      "transfer": "0xe396ba62195739494a1a0ea2620cbb863f28f48e255ac310042a310c649cf36a",
+      "chain": "arc",
+      "transaction": "0xae10fdc3925d796028f5ba6350ac04446ae5b34ff283f18bca803e0e4d82411a",
+      "operation": "0xf230f7df219436e03df024fa0941487695a867524fae638dcf38ba18771ff00d",
+      "gasUsed": "201813",
+      "effectiveGasPrice": "2649112132",
+      "l1Fee": "0",
+      "cost": "535",
+      "executionLogs": 1
+    },
+    {
+      "transfer": "0xe396ba62195739494a1a0ea2620cbb863f28f48e255ac310042a310c649cf36a",
+      "chain": "base",
+      "transaction": "0xec153612c657daa950e94aa56c63216afe0a6b8b88acf22db285c329549e4b54",
+      "operation": "0xacce04b645a31535c946faa8c53223b80b271c8e6307181f319a792a94da110a",
+      "gasUsed": "230596",
+      "effectiveGasPrice": "5673991",
+      "l1Fee": "0",
+      "cost": "6542",
+      "executionLogs": 1
+    },
+    {
+      "transfer": "0xdadf48670c93c4ab7c1d6f7c0626414331405201ade3edcb69c9fb50632ac6bd",
+      "chain": "arc",
+      "transaction": "0x4ccd13bce3fd1d386b75f601f6722a8db3e694ff722d08d274bd3670982d989f",
+      "operation": "0x5763f06ae65badc490695da242eb4765c33efe2a76c7132763cca50e994b65e2",
+      "gasUsed": "199013",
+      "effectiveGasPrice": "2445746552",
+      "l1Fee": "0",
+      "cost": "487",
+      "executionLogs": 1
+    },
+    {
+      "transfer": "0xdadf48670c93c4ab7c1d6f7c0626414331405201ade3edcb69c9fb50632ac6bd",
+      "chain": "base",
+      "transaction": "0x09b4c3cd06d3e2d08633fef814077a2a280025dcf123bade7c0ae726ff86e164",
+      "operation": "0x0522cae02be4c17f2c3f9e26f404ab5a3c9ccc02c29de4b54888c5544287dd50",
+      "gasUsed": "230608",
+      "effectiveGasPrice": "5655317",
+      "l1Fee": "0",
+      "cost": "6521",
+      "executionLogs": 1
+    },
+    {
+      "transfer": "0x7c89f25268874832fe95e0b4546400731e12de6e5773d87dc2fc77a2b1ca95d9",
+      "chain": "arc",
+      "transaction": "0x2415e22c8033864ab7f054b527e6a1724adc3ab2537bada556dd3cf49564ba94",
+      "operation": "0xb116b2bab67062e7a6ed89cda1967e8d91227bd6eb72d4d4a33822497f8002c9",
+      "gasUsed": "201813",
+      "effectiveGasPrice": "2267425920",
+      "l1Fee": "0",
+      "cost": "458",
+      "executionLogs": 1
+    },
+    {
+      "transfer": "0x7c89f25268874832fe95e0b4546400731e12de6e5773d87dc2fc77a2b1ca95d9",
+      "chain": "base",
+      "transaction": "0xaa2d12fe6591cbc1146ac5d9b01d85a2f34d22c7f95af54ea8a48221810677f9",
+      "operation": "0x37bfc0b4f3b8c201ea0ab6ef2cc9b8dd217bf8f4ab79879d747a684b71375cf2",
+      "gasUsed": "230596",
+      "effectiveGasPrice": "5636718",
+      "l1Fee": "0",
+      "cost": "6500",
+      "executionLogs": 1
+    },
+    {
+      "transfer": "0xdc7531e87b186aa79ed6e469f291d64bfea3b81db5f9bf11099437985bf24aaa",
+      "chain": "arc",
+      "transaction": "0x3b560c8abce7c7ef01e224716300721847c22ed7a2f819ab389415d3b172a914",
+      "operation": "0x9d542ebd39baadd8aa1d456c58506532b42fb88914bad18e5edad77afdf16c51",
+      "gasUsed": "201813",
+      "effectiveGasPrice": "2111129206",
+      "l1Fee": "0",
+      "cost": "427",
+      "executionLogs": 1
+    },
+    {
+      "transfer": "0xdc7531e87b186aa79ed6e469f291d64bfea3b81db5f9bf11099437985bf24aaa",
+      "chain": "base",
+      "transaction": "0x3a269840e01edaef6b889b36173d82279821990f1e962dbf3daf3b4ca69764e3",
+      "operation": "0x1446e27fb7665f28cbc395b9d793deb8057600cd0ff57525ff769440ee45fff1",
+      "gasUsed": "227760",
+      "effectiveGasPrice": "5618193",
+      "l1Fee": "0",
+      "cost": "6398",
+      "executionLogs": 1
+    },
+    {
+      "transfer": "0x26d37f0f9291538762fe9a8be8914e023a66b3801db4aa7b306f6996255b9125",
+      "chain": "arc",
+      "transaction": "0x298c1204870941e5a641244a7d10780c82ff4e01769c87e96a879f31ad7fe770",
+      "operation": "0x91755b4478271a71288c37a12582459ccf0abac7efd3d072a6b935447bb3b869",
+      "gasUsed": "201813",
+      "effectiveGasPrice": "1974106725",
+      "l1Fee": "0",
+      "cost": "399",
+      "executionLogs": 1
+    },
+    {
+      "transfer": "0x26d37f0f9291538762fe9a8be8914e023a66b3801db4aa7b306f6996255b9125",
+      "chain": "base",
+      "transaction": "0xc210ad71c8032999b5e07cf1ca7caccf75bb7963f894b70a8003bbe7185d4188",
+      "operation": "0xfadecf263d6da97bd1f30f0807f3505e9f4aa6041e3f18ccc9cacdd8866c9843",
+      "gasUsed": "230596",
+      "effectiveGasPrice": "5599742",
+      "l1Fee": "0",
+      "cost": "6457",
+      "executionLogs": 1
+    },
+    {
+      "transfer": "0xf8b1544a784f42d6176743bdafac6a51dbcd2dd2038b46b4f5afb4f4f6b7b019",
+      "chain": "arc",
+      "transaction": "0x20e9fefa2c623dc6f04e7f6438a5c92aedf0f7b787b9a95ccdf3dfe0f9e597e0",
+      "operation": "0x70ffaec7457fcdc9240d615159230fce55a7cbcc0de1086ea80ee7eec79dc282",
+      "gasUsed": "199013",
+      "effectiveGasPrice": "1853981613",
+      "l1Fee": "0",
+      "cost": "369",
+      "executionLogs": 1
+    },
+    {
+      "transfer": "0xf8b1544a784f42d6176743bdafac6a51dbcd2dd2038b46b4f5afb4f4f6b7b019",
+      "chain": "base",
+      "transaction": "0xd6f3d7becacd2002fa310420dc85ea043c00500f20197ddca749cfc347a949a6",
+      "operation": "0x8f4eef2f927991735c28c72e544132a9bddecba95bc18e3efd1b6d98a3a632a8",
+      "gasUsed": "227808",
+      "effectiveGasPrice": "5581365",
+      "l1Fee": "0",
+      "cost": "6358",
+      "executionLogs": 1
+    },
+    {
+      "transfer": "0x0566e56390e37024301c9e6d8a87056ffb7a871b33f3c5630ec02011463450fe",
+      "chain": "arc",
+      "transaction": "0x15be76ca90f6107374d8df2a7a8861c9e7b034ab817bd1f80dc0569d18e262e4",
+      "operation": "0x321a01544350769dbd0f4bdb36a368f4013f10478027577f2d65d68247cb6d53",
+      "gasUsed": "201813",
+      "effectiveGasPrice": "1748650191",
+      "l1Fee": "0",
+      "cost": "353",
+      "executionLogs": 1
+    },
+    {
+      "transfer": "0x0566e56390e37024301c9e6d8a87056ffb7a871b33f3c5630ec02011463450fe",
+      "chain": "base",
+      "transaction": "0x9e1c5867ef3b086d11a849337ce758d46365baf51df65aa211da91d4946088d6",
+      "operation": "0x6d0be5d98ab63a6cc64b8887ecd6abb3bf1ec81403ce22a2ca5b9c01f273fa55",
+      "gasUsed": "230596",
+      "effectiveGasPrice": "5563061",
+      "l1Fee": "0",
+      "cost": "6415",
+      "executionLogs": 1
+    },
+    {
+      "transfer": "0xf4ffe4b07bb8a239ea287f6559304b486b0c7b062c6f102bfe5147c34f5a2acc",
+      "chain": "arc",
+      "transaction": "0x325c2174a335a139c13b8137ce2b99ba994d3a34e622990f8353e22ed978e8c9",
+      "operation": "0x13a25ccfa784dba5b7ca98249db0015c95031b734fe166e3ed5f8d23b392ec43",
+      "gasUsed": "201813",
+      "effectiveGasPrice": "1656327979",
+      "l1Fee": "0",
+      "cost": "335",
+      "executionLogs": 1
+    },
+    {
+      "transfer": "0xf4ffe4b07bb8a239ea287f6559304b486b0c7b062c6f102bfe5147c34f5a2acc",
+      "chain": "base",
+      "transaction": "0x959397020b62b4a4623e2d56cba07e69bebb02694bada04f8e24340086fd5191",
+      "operation": "0x7ca05d730bc2aa3e2d7e114ea233df5bb6d60b4592714531cbca2ee10445a9c0",
+      "gasUsed": "230608",
+      "effectiveGasPrice": "5544830",
+      "l1Fee": "0",
+      "cost": "6394",
+      "executionLogs": 1
+    }
+  ],
+  "independentMaintenanceCost": "91330",
+  "supplyBefore": {
+    "arcBlock": "64824613",
+    "baseBlock": "47513008",
+    "issuance": "1000000000000",
+    "custody": "10000000000",
+    "remote": "10000000000",
+    "inFlight": "0",
+    "outsideCustody": "990000000000",
+    "circulating": "1000000000000",
+    "conserved": true
+  },
+  "supplyPending": {
+    "arcBlock": "64824614",
+    "baseBlock": "47513007",
+    "issuance": "1000000000000",
+    "custody": "10010000000",
+    "remote": "10000000000",
+    "inFlight": "10000000",
+    "outsideCustody": "989990000000",
+    "circulating": "999990000000",
+    "conserved": true
+  },
+  "supply": {
+    "arcBlock": "64824627",
+    "baseBlock": "47513024",
+    "issuance": "1000000000000",
+    "custody": "10630000000",
+    "remote": "10630000000",
+    "inFlight": "0",
+    "outsideCustody": "989370000000",
+    "circulating": "1000000000000",
+    "conserved": true
+  },
+  "finalTotals": {
+    "trading": {
+      "loss": "0",
+      "net": "0",
+      "closed": 0
+    },
+    "maintenance": {
+      "realized": "91330",
+      "reserved": "0"
+    },
+    "combinedNet": "-91330"
+  },
+  "checks": {
+    "authenticatedDebitCredit": true,
+    "independentFinalizedSupply": true,
+    "depletedInventoryRefused": true,
+    "pendingBlocksTrading": true,
+    "boundedGasAndCosts": true,
+    "nonzeroProtocolFeeRefused": true,
+    "replayRejected": true,
+    "forgedAndUnauthorizedRejected": true,
+    "allTwelveProcessCrashesRecovered": true,
+    "completedRestartSendsNothing": true,
+    "conflictingDirectionRefused": true,
+    "racingCumulativeCapReservedOnce": true,
+    "freshClaimAuthenticationRefused": true
+  },
+  "keeperApproval": "a0436281e4ee735c7bac1931c03a886d2642331c808b7dc3fe07db21a871eaac",
+  "transferApproval": "7243b9455ec878dd7f6f07bc4c253c84e33e31ab777335677ae5b3c5713a4057",
+  "keeperManifest": [
+    {
+      "file": "server/equilibrium/keeper/bytecode.json",
+      "sha256": "03efc8463f271ffdab31c2e62664670f268077654c613c8840b95676789461ff"
+    },
+    {
+      "file": "server/equilibrium/keeper/approval.ts",
+      "sha256": "38afbfdb2a33faf27783b02642df876e431e5ccbc7a07fa00d2b731a7260e468"
+    },
+    {
+      "file": "server/equilibrium/keeper/cli.ts",
+      "sha256": "df368d55e1eb91c6c233d0de177dfacde2719ba5e55afc3996f9a2070b48efa9"
+    },
+    {
+      "file": "server/equilibrium/keeper/config.ts",
+      "sha256": "27e4d8725d9bfe22517ccdaef95c318af90444fee90c59af891cfc03d4b7cb93"
+    },
+    {
+      "file": "server/equilibrium/keeper/contracts.ts",
+      "sha256": "15fd2405dbdace6e767da770d111bd7f5b2c30f6bb36f966ac1a5e41184e64e9"
+    },
+    {
+      "file": "server/equilibrium/keeper/fees.ts",
+      "sha256": "01f2ae9552bf5d302d5d2a57b79b343a572f71c27665127cac621226ebab09ca"
+    },
+    {
+      "file": "server/equilibrium/keeper/keeper.ts",
+      "sha256": "ae21c615b1b75876490c0e8f681654c7f4ca8958f94f8e02e844a397fbb9abc2"
+    },
+    {
+      "file": "server/equilibrium/keeper/policy.ts",
+      "sha256": "0a04f7cd8b9d4b6a7eb48930e91808f06f0df12392a1ae5be9bc2bdd9930a95b"
+    },
+    {
+      "file": "server/equilibrium/keeper/preview.ts",
+      "sha256": "e89e5142af1138f29eaeea1fb4d9934ad91be569a9c86c2253ac528e2f8d8565"
+    },
+    {
+      "file": "server/equilibrium/keeper/quotes.ts",
+      "sha256": "210f624489b97482ea93873a65f5a7c7484cf71fa673b35ca27644065f8ca739"
+    },
+    {
+      "file": "server/equilibrium/keeper/run.ts",
+      "sha256": "7b1aa484940b75252c0070fe43926a7a84c3d01afa680904797fcd626104de77"
+    },
+    {
+      "file": "server/equilibrium/keeper/store.ts",
+      "sha256": "a1f6cf657621557fa2dfbf2066f2af8aa7058d864ea72ac975d5dca67f8d2d86"
+    },
+    {
+      "file": "server/equilibrium/keeper/types.ts",
+      "sha256": "bb2eb28d61dc8cd7534f4296822d3dfb93cce8007e2567d545f58a478cfbdbeb"
+    },
+    {
+      "file": "server/equilibrium/keeper/maintenance.ts",
+      "sha256": "cf2afe6652b4a78278a3ec737e23773089a05320d992e15cfee335428090d65e"
+    },
+    {
+      "file": "contracts/equilibrium/EquilibriumKeeper.sol",
+      "sha256": "a8fcc48cc78515b65042582e45ab85c8869d2e1cfe3492fda92318a20e017541"
+    },
+    {
+      "file": "scripts/equilibrium-keeper-bytecode.ts",
+      "sha256": "94c71963b81922b3750ac37fe826adc03da6428700d71d67f269e0745df08574"
+    }
+  ]
+}

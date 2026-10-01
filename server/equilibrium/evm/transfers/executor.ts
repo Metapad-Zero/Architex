@@ -1,6 +1,6 @@
 import type { Database } from 'bun:sqlite'
 import {
-  BaseError, ContractFunctionRevertedError, ContractFunctionZeroDataError, createPublicClient, createWalletClient, defineChain, encodeFunctionData, http, keccak256,
+  BaseError, ContractFunctionRevertedError, ContractFunctionZeroDataError, createPublicClient, createWalletClient, defineChain, encodeFunctionData, http, keccak256, parseTransaction,
   type Address, type Hex, type PublicClient, type TransactionReceipt, type WalletClient,
 } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
@@ -31,7 +31,7 @@ export interface SenderConfig {
   operatorGas?: { arc: string; base: string }
 }
 /** Test seams around the one irreversible call: signed and recorded but not yet sent, and sent but not yet accounted. */
-export interface SenderOptions { beforeSend?: (tx: Hex) => void; afterSend?: (tx: Hex) => void }
+export interface SenderOptions { beforeSend?: (tx: Hex) => void; afterSend?: (tx: Hex) => void; checkpoint?: (point: string, operation: Hex) => void }
 
 const ZERO: Hex = `0x${'0'.repeat(64)}`
 const OPERATION_DONE = '0x3a140fc2'
@@ -75,6 +75,9 @@ export function executorSender(config: SenderConfig, db: Database, options: Send
   }
   db.exec(`CREATE TABLE IF NOT EXISTS evm_transfer_broadcasts (operation TEXT NOT NULL, chain TEXT NOT NULL, tx TEXT NOT NULL, sent_at INTEGER NOT NULL, PRIMARY KEY (operation, tx));
     CREATE TABLE IF NOT EXISTS evm_transfer_gas (id INTEGER PRIMARY KEY AUTOINCREMENT, chain TEXT NOT NULL, operation TEXT NOT NULL, worst TEXT NOT NULL, tx TEXT, actual TEXT, reserved_at INTEGER NOT NULL);`)
+  db.transaction(() => {
+    if (!db.query<{ name: string }, []>('PRAGMA table_info(evm_transfer_gas)').all().some((c) => c.name === 'signed')) db.exec('ALTER TABLE evm_transfer_gas ADD COLUMN signed TEXT;')
+  }).immediate()
   const sending: Record<EvmChain, Promise<unknown>> = { arc: Promise.resolve(), base: Promise.resolve() }
 
   async function finalizedBlock(chain: EvmChain): Promise<bigint> {
@@ -137,7 +140,12 @@ export function executorSender(config: SenderConfig, db: Database, options: Send
     }
     for (const row of db.query<{ id: number; tx: string }, [string]>('SELECT id, tx FROM evm_transfer_gas WHERE chain=? AND tx IS NOT NULL AND actual IS NULL').all(chain)) {
       const receipt = await clients[chain].getTransactionReceipt({ hash: row.tx as Hex }).catch(() => null)
-      if (receipt && receipt.blockNumber <= finalized) db.query('UPDATE evm_transfer_gas SET actual=? WHERE id=?').run(weiOf(receipt).toString(), row.id)
+      if (receipt && receipt.blockNumber <= finalized) {
+        const operation = db.query<{ operation: Hex }, [number]>('SELECT operation FROM evm_transfer_gas WHERE id=?').get(row.id)!.operation
+        options.checkpoint?.('before-cost-write', operation)
+        db.query('UPDATE evm_transfer_gas SET actual=? WHERE id=?').run(weiOf(receipt).toString(), row.id)
+        options.checkpoint?.('after-cost-write', operation)
+      }
     }
   }
 
@@ -205,6 +213,30 @@ export function executorSender(config: SenderConfig, db: Database, options: Send
         const current = await executed(p, await client.getBlockNumber({ cacheTime: 0 }))
         if (current === digest) return
         if (current !== ZERO) throw new Error('Operation already bound to other bytes')
+        // A crash before the send leaves signed bytes and the worst-case reservation intact.
+        // Replay that exact transaction; a second reservation would strand the first cost forever.
+        const recovery = db.query<{ id: number; tx: Hex; signed: Hex }, [string, string]>(
+          'SELECT id,tx,signed FROM evm_transfer_gas WHERE chain=? AND operation=? AND actual IS NULL AND tx IS NOT NULL AND signed IS NOT NULL ORDER BY id LIMIT 1').get(p.chain, p.operation)
+        if (recovery) {
+          if (keccak256(recovery.signed) !== recovery.tx) throw new Error('Persisted transfer transaction changed.')
+          const signed = parseTransaction(recovery.signed)
+          if (signed.chainId !== p.chainId || signed.to?.toLowerCase() !== p.executor.toLowerCase()
+            || signed.data !== encodeFunctionData({ abi: executorAbi, functionName: 'execute', args: args(p, digest) }) || (signed.value ?? 0n) !== BigInt(p.value)) throw new Error('Persisted transfer transaction differs from its bound plan.')
+          const cap = config.operatorGas?.[p.chain]
+          if (cap !== undefined && committed(p.chain) > BigInt(cap)) throw new LaunchError(409, 'gas_cap', `${p.chain} reserved transfer gas exceeds the approved ${cap} wei. Nothing was sent.`)
+          const known = await client.getTransaction({ hash: recovery.tx }).then(() => true, () => false)
+          if (!known) {
+            options.checkpoint?.('before-send', p.operation)
+            await client.sendRawTransaction({ serializedTransaction: recovery.signed })
+            options.checkpoint?.('after-send', p.operation)
+          }
+          const receipt = await client.waitForTransactionReceipt({ hash: recovery.tx, timeout: config.receiptTimeoutMs ?? 120_000 })
+          options.checkpoint?.('before-cost-write', p.operation)
+          db.query('UPDATE evm_transfer_gas SET actual=? WHERE id=?').run(weiOf(receipt).toString(), recovery.id)
+          options.checkpoint?.('after-cost-write', p.operation)
+          if (receipt.status !== 'success') throw new Error(`Persisted transfer reverted in ${recovery.tx}; reconcile before retrying.`)
+          return
+        }
         let gas: bigint
         try {
           await client.simulateContract({ account, address: p.executor, abi: executorAbi, functionName: 'execute', args: args(p, digest), value: BigInt(p.value) })
@@ -232,10 +264,14 @@ export function executorSender(config: SenderConfig, db: Database, options: Send
             signed = await account.signTransaction(request)
             const hashed = keccak256(signed)
             // Recorded before the irreversible call: a process that dies after it is settled from the receipt.
-            db.query('UPDATE evm_transfer_gas SET tx=? WHERE id=?').run(hashed, reservation)
-            db.query('INSERT OR IGNORE INTO evm_transfer_broadcasts(operation, chain, tx, sent_at) VALUES(?,?,?,?)').run(p.operation, p.chain, hashed, Date.now())
+            db.transaction(() => {
+              db.query('UPDATE evm_transfer_gas SET tx=?,signed=? WHERE id=?').run(hashed, signed!, reservation)
+              db.query('INSERT OR IGNORE INTO evm_transfer_broadcasts(operation, chain, tx, sent_at) VALUES(?,?,?,?)').run(p.operation, p.chain, hashed, Date.now())
+            }).immediate()
             options.beforeSend?.(hashed)
+            options.checkpoint?.('before-send', p.operation)
             tx = await client.sendRawTransaction({ serializedTransaction: signed })
+            options.checkpoint?.('after-send', p.operation)
             options.afterSend?.(tx)
           } catch (cause) {
             // Another worker's execution landed first, or the RPC refused before accepting anything.
@@ -253,7 +289,9 @@ export function executorSender(config: SenderConfig, db: Database, options: Send
           }
         }
         const receipt = await client.waitForTransactionReceipt({ hash: tx!, timeout: config.receiptTimeoutMs ?? 120_000 })
+        options.checkpoint?.('before-cost-write', p.operation)
         db.query('UPDATE evm_transfer_gas SET actual=? WHERE id=?').run(weiOf(receipt).toString(), reservation)
+        options.checkpoint?.('after-cost-write', p.operation)
         if (receipt.status !== 'success' && await executed(p, receipt.blockNumber) !== digest) throw new Error(`${p.operation} execution reverted in ${tx}`)
       }
       const next = sending[p.chain].then(run, run)

@@ -266,7 +266,7 @@ export async function rehearseMaintenance(options: { writeArtifacts?: boolean } 
     }
     if (options.writeArtifacts !== false) writeFileSync('output/equilibrium-keeper-maintenance-evidence.json', JSON.stringify(evidence, null, 2) + '\n')
     return evidence
-  } finally { store.close(); fixture.stop() }
+  } finally { store.close(); await fixture.stop() }
 }
 
 if (import.meta.main) {

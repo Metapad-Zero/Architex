@@ -6,7 +6,7 @@ import type { Atoms, PreparedEffect } from '../../types'
  * on Base, unlock from Arc custody) and the USDC quote-inventory refill (CCTP burn, attested mint).
  * They are separate from launch jobs: their own store rows, operation ids, gas caps and approval.
  */
-export type TransferKind = 'return' | 'refill'
+export type TransferKind = 'return' | 'refill' | 'token-refill'
 export type EvmChain = 'arc' | 'base'
 
 export interface TransferStep {
@@ -47,6 +47,9 @@ export type ReturnRequest =
 
 /** Move USDC quote inventory between the executors with CCTP V2 standard (hard-finality) transfers. */
 export interface RefillRequest { kind: 'refill'; requestId: string; from: EvmChain; to: EvmChain; amount: Atoms; maxFee: Atoms }
+
+/** Move existing canonical executor inventory into its authenticated Base representation. */
+export interface TokenRefillRequest { kind: 'token-refill'; requestId: string; launch: Hex; amount: Atoms; recipient: Address }
 
 /** One route implementation. Every effect is one executor operation, or an observation of someone else's. */
 export interface TransferRoute<R> {

@@ -9,11 +9,14 @@ import { CCTP_TESTNET, iris, localAttester, type CctpChain } from './cctp'
 import { executorSender, type SenderOptions } from './executor'
 import { refillRoute } from './refill'
 import { returnRoute, type ReturnConfig } from './returns'
+import { tokenRefillRoute, type TokenRefillConfig } from './token-refill'
 import type { EvmChain } from './types'
 
 /** Transfer settings, kept apart from the launch configuration so the launch approval stays untouched. */
 export interface TransferSettings {
   returns: ReturnConfig
+  /** Arc→Base token rail is closed unless explicitly bounded. */
+  tokenRefill?: TokenRefillConfig
   /** USDC quote refill. Absent means the refill rail is closed. */
   refill?: {
     /** Defaults to Circle's documented testnet deployment. */
@@ -42,7 +45,8 @@ export function transferRoutes(adapter: EvmAdapterConfig, settings: TransferSett
     } else attestation = iris(r.attestation.api)
     refill = refillRoute(adapter, { cctp: r.cctp ?? CCTP_TESTNET, attestation, maxPerTransfer: r.maxPerTransfer, maxTotal: r.maxTotal }, sender, db)
   }
-  return { sender, returns: returnRoute(adapter, settings.returns, sender, db, launchOf), refill }
+  return { sender, returns: returnRoute(adapter, settings.returns, sender, db, launchOf), refill,
+    tokenRefill: settings.tokenRefill ? tokenRefillRoute(adapter, settings.tokenRefill, sender, db, launchOf) : undefined }
 }
 
 /**
@@ -54,6 +58,7 @@ export const TRANSFER_FILES = [
   'server/equilibrium/evm/transfers/cctp.ts', 'server/equilibrium/evm/transfers/cli.ts', 'server/equilibrium/evm/transfers/config.ts', 'server/equilibrium/evm/transfers/executor.ts',
   'server/equilibrium/evm/transfers/ntt.ts', 'server/equilibrium/evm/transfers/refill.ts', 'server/equilibrium/evm/transfers/returns.ts', 'server/equilibrium/evm/transfers/runner.ts', 'server/equilibrium/evm/transfers/store.ts',
   'server/equilibrium/evm/transfers/types.ts',
+  'server/equilibrium/evm/transfers/token-refill.ts',
   ...CODE_FILES,
 ] as const
 
