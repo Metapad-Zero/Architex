@@ -159,12 +159,32 @@ describe('EQUILIBRIUM Robinhood fulfillment adapter (no forks)', () => {
     ledger(moved.id, 'used_outside_job', '60000000', 'owed')
     const text = (message('req-unit-moved') as string[])[1]
     expect(text).toContain('used outside the job in 0xevidence: 60000000 USDC atoms reached the Arc executor')
-    expect(text).toContain('refund owed to the payer; no refund has been sent')
+    expect(text).toContain(`refund owed to ${payer}; no refund has been sent`)
     expect(text).not.toContain('Nothing was charged')
     const other = released('req-unit-other-terms', 'authorization nonce spent by other terms')
     ledger(other.id, 'spent_by_other_authorization', '0', 'none')
-    expect((message('req-unit-other-terms') as string[])[1]).toContain('nothing is attributed to this job')
-    expect(adapter.ledger(moved.id)).toMatchObject({ outcome: 'used_outside_job', received: '60000000', fees_spent: '0', residual: '60000000', refund: 'owed' })
+    expect((message('req-unit-other-terms') as string[])[1]).toContain('none of that transfer reached the executor. Nothing is attributed to this job')
+    // Other terms that did reach the executor: held for the payer, never this job's payment.
+    const stray = released('req-unit-stray', 'authorization nonce spent by other terms')
+    ledger(stray.id, 'spent_by_other_authorization', '30000000', 'owed')
+    const strayText = (message('req-unit-stray') as string[])[1]
+    expect(strayText).toContain('which moved 30000000 USDC atoms to the Arc executor. That is not this job\'s payment')
+    expect(strayText).toContain('no refund has been sent. It is held for this job')
+    // Each refund state has its own sentence, and only an unfinished one says the residual is held.
+    const op = adapter.route.layout.op(`job:${moved.id}:refund:arc`)
+    const refundText = () => (message('req-unit-moved') as string[])[1]
+    store.db.query('INSERT INTO robinhood_ops(operation, name, side, digest, bytes, created_at) VALUES(?,?,?,?,?,?)').run(op, `job:${moved.id}:refund:arc`, 'arc', '0x00', '{}', 0)
+    expect(adapter.refundStatus(moved.id)).toEqual({ state: 'prepared', transaction: null, block: null })
+    expect(refundText()).toContain('is prepared and may already have been sent; its outcome is unknown')
+    store.db.query('UPDATE robinhood_ops SET tx=? WHERE operation=?').run('0xrefund', op)
+    expect(adapter.refundStatus(moved.id)).toEqual({ state: 'uncertain', transaction: '0xrefund', block: null })
+    expect(refundText()).toContain('was sent in 0xrefund and has not executed yet; its outcome is unknown. It stays held')
+    store.db.query("UPDATE robinhood_payment_ledger SET refund='submitted', refund_tx='0xrefund', refund_block='12' WHERE job=?").run(moved.id)
+    expect(refundText()).toContain('refunded to 0x0000000000000000000000000000000000000abc in 0xrefund at Arc block 12, not yet final. It stays held')
+    store.db.query("UPDATE robinhood_payment_ledger SET refund='refunded' WHERE job=?").run(moved.id)
+    expect(refundText()).toContain('final at Arc block 12. Nothing of it remains on the executor.')
+    expect(refundText()).not.toContain('held')
+    expect(adapter.ledger(moved.id)).toMatchObject({ outcome: 'used_outside_job', received: '60000000', fees_spent: '0', residual: '60000000', refund: 'refunded' })
     // Refunds need an owed residual; neither case reaches a chain.
     const refused = async (job: string) => { try { await adapter.refund(job); return null } catch (cause) { return cause instanceof LaunchError ? cause.code : String(cause) } }
     expect(await refused(expired.id)).toBe('nothing_to_refund')

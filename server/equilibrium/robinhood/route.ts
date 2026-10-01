@@ -67,7 +67,15 @@ export interface Transfer {
 }
 export type Progress = TransferState | 'awaiting_finality' | 'awaiting_attestation'
 /** Test seam: runs right after a transaction is handed to the RPC, before anything about it is recorded. */
-export interface RouteOptions { afterSend?: (name: string, tx: Hex) => void }
+export interface RouteOptions {
+  afterSend?: (name: string, tx: Hex) => void
+  /**
+   * Runs for every send, after the operation is known to be neither executed nor pending and before
+   * gas estimation. It may refuse by throwing. A returned function is called only if the attempt
+   * then fails before anything was handed to the RPC, so whatever the guard recorded can be undone.
+   */
+  guard?: (side: Side, name: string, operation: Hex, calls: Plan['calls']) => Promise<(() => void) | void>
+}
 
 const LOCKING = 0
 const BURNING = 1
@@ -104,7 +112,7 @@ export function layout(config: Pick<RobinhoodRouteConfig, 'arc' | 'robinhood' | 
   return { op, canonicalInit, canonical, hub: manager(config.arc, canonical, LOCKING, op('manager:arc'), 0), spokeInit, spoke, spokeManager: manager(config.robinhood, spoke, BURNING, op('manager:robinhood'), 1) }
 }
 
-interface Plan { side: Side; chainId: number; executor: Address; operation: Hex; calls: { target: Address; value: string; data: Hex }[]; value: string }
+export interface Plan { side: Side; chainId: number; executor: Address; operation: Hex; calls: { target: Address; value: string; data: Hex }[]; value: string }
 const call = (target: Address, data: Hex, value = 0n) => ({ target, value: value.toString(), data })
 const create = (init: Hex) => ({ target: zeroAddress as Address, value: '0', data: init })
 
@@ -176,12 +184,7 @@ export function robinhoodRoute(config: RobinhoodRouteConfig, db: Database, optio
     return { operation, digest: row.digest, bytes: row.bytes }
   }
 
-  /**
-   * `guard` runs inside this side's send queue, after the operation is known to be neither executed
-   * nor pending and before anything is sent, so a check of executor funds cannot interleave with
-   * another send from this process.
-   */
-  async function execute(name: string, side: Side, build: () => Promise<Plan['calls']> | Plan['calls'], guard?: (calls: Plan['calls']) => Promise<void>): Promise<TransactionReceipt> {
+  async function execute(name: string, side: Side, build: () => Promise<Plan['calls']> | Plan['calls']): Promise<TransactionReceipt> {
     const { operation, digest, bytes } = await persist(name, side, build)
     const p = JSON.parse(bytes) as Plan
     const args = [operation, digest, p.calls.map((x) => ({ target: x.target, value: BigInt(x.value), data: x.data }))] as const
@@ -191,11 +194,12 @@ export function robinhoodRoute(config: RobinhoodRouteConfig, db: Database, optio
       if (current !== ZERO) throw new LaunchError(409, 'operation_conflict', `${name} already executed with other bytes (${current}).`)
       // A crashed or stale worker's copy may still be in the mempool: wait for it instead of paying for a second send.
       if (await digestOf(side, operation, 'pending') === digest) return landed(side, operation, name)
-      await guard?.(p.calls)
+      const abandon = await options.guard?.(side, name, operation, p.calls)
       let gas: bigint
       try {
         gas = await clients[side].estimateContractGas({ account, address: p.executor, abi: executorAbi, functionName: 'execute', args, value: BigInt(p.value) })
       } catch (cause) {
+        abandon?.()
         const revert = cause instanceof BaseError ? cause.walk((e) => e instanceof ContractFunctionRevertedError) : null
         if (revert instanceof ContractFunctionRevertedError && revert.data?.errorName === 'OperationDone') return executedReceipt(side, operation)
         throw cause

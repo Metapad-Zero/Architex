@@ -41,12 +41,16 @@ const labelled = (response: Response) => {
 const attributed = (view: ReturnType<typeof publicJob>) => {
   const l = adapter.ledger(view.id)
   if (!l) return view
+  const refund = adapter.refundStatus(view.id)!
   const held = l.refund === 'owed' || l.refund === 'submitted' ? l.residual : '0'
+  // Only a ledger with no refund prepared or sent is refundable; anything else is resumed, never re-planned.
+  const refundable = refund.state === 'owed'
   return { ...view, error: adapter.explain(view.id) ?? view.error,
-    funds: { ...view.funds, paid: l.received, feesSpent: l.fees_spent, unallocatedHeld: held, determinate: true, refundable: l.refund === 'owed', refundableAmount: l.refund === 'owed' ? l.residual : '0', unresolvedEffects: [],
-      note: l.received === '0' ? `Released (${l.outcome}): nothing reached the executor under this job's authorization.` : `Released (${l.outcome}): ${l.received} reached the executor outside the job; residual ${l.residual}, refund ${l.refund}. No other job may spend it.` },
+    // Only the job's own authorization counts as its payment; other terms' funds are held for the payer, never paid.
+    funds: { ...view.funds, paid: l.outcome === 'used_outside_job' ? l.received : '0', heldForPayer: held, feesSpent: l.fees_spent, unallocatedHeld: held, determinate: true, refundable, refundableAmount: refundable ? l.residual : '0', unresolvedEffects: [],
+      note: l.received === '0' ? `Released (${l.outcome}): nothing reached the executor under this job's authorization.` : `Released (${l.outcome}): ${l.received} reached the executor outside the job; residual ${l.residual}, refund ${refund.state}.${held === '0' ? '' : ' No other job may spend it.'}` },
     attribution: { outcome: l.outcome, authorized: l.authorized, received: l.received, feesSpent: l.fees_spent, residual: l.residual, evidence: { transaction: l.evidence_tx, block: l.evidence_block },
-      refund: { state: l.refund, transaction: l.refund_tx, block: l.refund_block } } }
+      refund } }
 }
 /** Chain-read supply. Before the job deploys the spoke there is none to read, and that is reported, not hidden. */
 const supply = () => adapter.route.supply().then((s) => JSON.parse(JSON.stringify(s, (_, v: unknown) => (typeof v === 'bigint' ? v.toString() : v))) as unknown,
