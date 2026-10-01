@@ -1,0 +1,73 @@
+{
+  "mode": "fork",
+  "arc": {
+    "chain": "arc",
+    "rpc": "http://127.0.0.1:18945",
+    "chainId": 5042002,
+    "keeper": "0xd03a83a999370e99dceb3e77376b4367d1bb8ac1",
+    "token": "0xf3bD6d6592192B6fbEc2Ae7bEd646E9234C24CD0",
+    "quote": "0x3600000000000000000000000000000000000000",
+    "pool": "0x0535E1d0D70E42eB7F658C360dd28508B45a0c3b",
+    "venue": "architex-pair",
+    "finality": 2,
+    "fromBlock": "64824601",
+    "quoteAtomsPerNative": "1000000",
+    "priorityFeeWei": "0",
+    "valuation": {
+      "numerator": "100",
+      "denominator": "100",
+      "source": "49TH-40 explicit valuation fixture",
+      "expiresAt": 1790906731
+    },
+    "feeInput": {
+      "kind": "fork-fixture",
+      "l1UpperWei": "0",
+      "source": "49TH-40 synthetic L1 upper allowance; not a Robinhood fee model",
+      "expiresAt": 1790906731
+    }
+  },
+  "robinhood": {
+    "chain": "robinhood",
+    "rpc": "http://127.0.0.1:18946",
+    "chainId": 4663,
+    "keeper": "0xba2475f665aa37ada676869b9a88f9823797ee4a",
+    "token": "0xba4c755d71baa5f43262b5C685AD62718F744e09",
+    "quote": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+    "pool": "0x5aECEd2e63cf81DFbf6E164e213B9c80Ec79DC8A",
+    "venue": "uniswap-v3-pool",
+    "finality": 2,
+    "fromBlock": "77003402",
+    "quoteAtomsPerNative": "5000000000",
+    "priorityFeeWei": "0",
+    "valuation": {
+      "numerator": "98",
+      "denominator": "100",
+      "source": "49TH-40 explicit valuation fixture",
+      "expiresAt": 1790906731
+    },
+    "feeInput": {
+      "kind": "fork-fixture",
+      "l1UpperWei": "1000000000000",
+      "source": "49TH-40 synthetic L1 upper allowance; not a Robinhood fee model",
+      "expiresAt": 1790906731
+    }
+  },
+  "policy": {
+    "maxTokens": "2000000000",
+    "minEdge": "1000000",
+    "buffer": "500000",
+    "spendCap": "5000000000",
+    "lossCap": "200000000",
+    "recoveryReserve": "1500000000",
+    "recoveryCost": "2000000",
+    "maxLegCost": "1000000",
+    "maxQuoteAgeSeconds": 600,
+    "maxBlockLag": 40,
+    "maxHeadAgeSeconds": 3600,
+    "legTtlSeconds": 600,
+    "slippageBps": 50,
+    "maxOpenCycles": 1,
+    "operatingCap": "30000000"
+  },
+  "receiptTimeoutMs": 10000
+}

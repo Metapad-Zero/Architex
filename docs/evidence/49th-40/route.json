@@ -1,0 +1,49 @@
+{
+  "mode": "fork",
+  "environment": "mixed:arc-testnet-fork+robinhood-mainnet-fork",
+  "arc": {
+    "side": "arc",
+    "rpc": "http://127.0.0.1:18945",
+    "chainId": 5042002,
+    "wormholeChainId": 71,
+    "core": "0xBB73cB66C26740F31d1FabDC6b7A46a038A300dd",
+    "transceiverStructs": "0x7ac0e82c82503b9b648c52a25ed27a6ebd01e869",
+    "executor": "0xbf0fe883bbaa0565af4b02fa9d6a6a85c96a2924",
+    "confirmations": 2,
+    "fromBlock": "64824601n",
+    "priorityFeeWei": "0n"
+  },
+  "robinhood": {
+    "side": "robinhood",
+    "rpc": "http://127.0.0.1:18946",
+    "chainId": 4663,
+    "wormholeChainId": 72,
+    "core": "0x141fBa8AD5D61bdaB45A047cF60b5Ad9784987FB",
+    "transceiverStructs": "0x7ac0e82c82503b9b648c52a25ed27a6ebd01e869",
+    "executor": "0xbf0fe883bbaa0565af4b02fa9d6a6a85c96a2924",
+    "confirmations": 2,
+    "fromBlock": "77003402n",
+    "venue": {
+      "factory": "0x1f7d7550b1b028f7571e69a784071f0205fd2efa",
+      "quoterV2": "0x33e885ed0ec9bf04ecfb19341582aadcb4c8a9e7",
+      "fee": 3000,
+      "tickSpacing": 60
+    },
+    "quote": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+    "priorityFeeWei": "0n"
+  },
+  "vaa": {
+    "arc": 0,
+    "robinhood": 7
+  },
+  "limits": {
+    "outbound": "10000000000000n",
+    "inbound": "10000000000000n"
+  },
+  "asset": {
+    "id": "49th-40-robinhood-keeper",
+    "name": "Equilibrium",
+    "symbol": "EQL",
+    "issuance": "1000000000000n"
+  }
+}
