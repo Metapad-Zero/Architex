@@ -283,20 +283,39 @@ export function seedDifferences(before: SeedAccount[], after: SeedAccount[]): st
 /**
  * The arithmetic a labelled clock fixture has to survive being asked about.
  *
- * `releaseAfter` is the boundary the pinned manager wrote into its own queue entry; `queuedAt` is
- * the spoke clock when it wrote it; `observedClock` is the spoke clock on the advanced ledger. The
- * point of separating them is that the delay is then the *program's*, read back off chain, and the
- * fixture is only the difference between two observed clocks. Neither figure is assumed.
+ * Every figure here is read, and none is derived from another. `releaseAfter` comes out of the
+ * manager's own queue entry; `queueClock` and `observedClock` are two readings of the `Clock`
+ * sysvar, before the fixture and after it. That is what lets the delay under test be the
+ * *program's* — if it were computed as `releaseAfter - duration` it would come back as `duration`
+ * whatever the program had written, and a shortened duration would read as a passing check.
+ *
+ * `duration` is `RATE_LIMIT_DURATION` as the pinned program declares it, and is only ever compared
+ * against the measured gap.
  */
 export interface ReleaseBoundary {
-  queuedAt: bigint
+  /** The `Clock` sysvar as read on chain immediately after the claim was queued. */
+  queueClock: bigint
+  /** The boundary the pinned manager wrote into its own queue entry. */
   releaseAfter: bigint
+  /** The `Clock` sysvar as read on chain on the advanced ledger. */
   observedClock: bigint
+  /** The delay the pinned program declares, in seconds. */
+  duration: number
+  /**
+   * Seconds of slack allowed between the manager's own reading and `queueClock`.
+   *
+   * `queueClock` is read a slot or two after the manager read its own, so the measured gap lands
+   * just under `duration` rather than exactly on it. The slack has to be narrow: wide enough and a
+   * materially shortened duration would pass, zero and ordinary slot timing would fail.
+   */
+  slack: number
 }
 
 export interface ReleaseBoundaryReview {
-  /** The delay the program applied, in seconds, derived from its own two timestamps. */
+  /** The delay the manager applied, measured between two readings rather than assumed. */
   programDelay: bigint
+  /** Whether that measured delay is the program's declared duration, within `slack`. */
+  matchesDuration: boolean
   /** How much later the advanced ledger's clock is than the clock that queued the claim. */
   advancedBy: bigint
   /** Whether the program will now release: its own boundary has passed on the observed clock. */
@@ -304,9 +323,14 @@ export interface ReleaseBoundaryReview {
 }
 
 export function reviewReleaseBoundary(boundary: ReleaseBoundary): ReleaseBoundaryReview {
+  const programDelay = boundary.releaseAfter - boundary.queueClock
   return {
-    programDelay: boundary.releaseAfter - boundary.queuedAt,
-    advancedBy: boundary.observedClock - boundary.queuedAt,
+    programDelay,
+    // Upper bound inclusive, lower bound exclusive: the manager cannot have written a boundary
+    // further ahead than its own duration, and anything shorter than the slack is slot timing.
+    matchesDuration: programDelay <= BigInt(boundary.duration)
+      && programDelay > BigInt(boundary.duration - boundary.slack),
+    advancedBy: boundary.observedClock - boundary.queueClock,
     releasable: boundary.observedClock >= boundary.releaseAfter,
   }
 }

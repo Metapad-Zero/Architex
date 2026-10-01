@@ -100,9 +100,8 @@ library and splices its address into the `__$…$__` placeholders itself.
     once and a second completion is refused (`InboundQueuedTransferNotFound`).
 11. **A claim held by the spoke's own inbound limit.** With the spoke's inbound limit lowered, an
     Arc debit is queued on the Solana side and refused early release (`CantReleaseYet`). The
-    boundary the manager wrote is read back and checked to be `RATE_LIMIT_DURATION` seconds past the
-    `Clock` sysvar it read, so the delay under test is the program's figure rather than the
-    harness's. The two observed ledgers reconcile with the claim outstanding: the hub holds exactly
+    boundary the manager wrote is read back and the gap to a `Clock` sysvar reading taken just after
+    it is measured, so the delay under test is the program's figure rather than the harness's. The two observed ledgers reconcile with the claim outstanding: the hub holds exactly
     the backing for a representation that has not been minted.
 12. **Eventual release on the spoke, and the claim's return to Arc.** The same claim is carried past
     its 24-hour boundary, released, and brought home. See [the delayed
@@ -137,6 +136,7 @@ other:
 
 | | What holds |
 | --- | --- |
+| The delay is the program's | the boundary is measured against a `Clock` reading taken just after the manager took its own, and has to land within 60 seconds of the declared 24 hours |
 | Early refusal | `CantReleaseYet`, on the unadvanced ledger, against the manager's own boundary |
 | The claim is retained | all 34 seeded accounts byte-identical, same amount, same boundary, across a `SIGKILL` and a ledger rebuild |
 | The clock really moved | the spoke's `Clock` sysvar is read on chain and checked to be at least `RATE_LIMIT_DURATION` past the clock that queued the claim |
@@ -161,9 +161,15 @@ Two, and the record carries both in `clockFixtures`:
 | Solana | the rebuilt spoke ledger's validator process run with `CLOCK_REALTIME` offset `+86460` seconds, as above |
 
 Neither simulates anything about a queue. The entries, their timestamps, the early refusals and the
-releases are the pinned managers' own behaviour, and the record carries the program-written delay
-(`delayedReturn.programDelaySeconds`) separately from the advance the fixture made
-(`delayedReturn.advancedBySeconds`) so the two cannot be confused. Every clock manipulation in the
+releases are the pinned managers' own behaviour, and the record keeps three figures apart so none of
+them can stand in for another: `delayedReturn.measuredDelaySeconds`, the gap between the boundary the
+manager wrote and a `Clock` reading taken just after it took its own;
+`delayedReturn.declaredRateLimitDuration`, the constant the pinned program declares; and
+`delayedReturn.advancedBySeconds`, the advance the fixture made. The measured gap is deliberately not
+computed as `releaseAfter - duration` — that would return the duration whatever the program had
+written, and a shortened delay would read as a passing check. It is accepted only within
+`measuredDelaySlackSeconds` (60) of the declared duration, which is the slot or two between the two
+readings and nothing wider. Every clock manipulation in the
 script goes through one helper that records it, so none of them can be quiet.
 
 The Solana fixture needs macOS and `clang`. On a host where it cannot be built, the run says so in

@@ -74,6 +74,14 @@ const SECOND = 987_654_321n
 const DELAYED = 55_555_555n
 /** The hub manager's inbound queue delay. The pinned SVM program hard-codes the same 24 hours. */
 const RATE_LIMIT_DURATION = 86_400
+/**
+ * Slack allowed when measuring the delay the manager applied, in seconds.
+ *
+ * The boundary is compared against a `Clock` reading taken a slot or two after the manager took its
+ * own, so the measured gap sits just under {@link RATE_LIMIT_DURATION}. Narrow on purpose: wider and
+ * a materially shortened duration would pass this check.
+ */
+const DELAY_SLACK = 60
 
 const ARC_PORT = Number(process.env.EQUILIBRIUM_ARC_PORT ?? 8645)
 const RPC_PORT = Number(process.env.EQUILIBRIUM_SOLANA_INTEGRATION_PORT ?? 8945)
@@ -614,14 +622,21 @@ async function main(): Promise<void> {
     const clockAtQueue = await readChainClock(connection)
     assert(heldItem.status === 'release_after' && heldItem.releaseAfter !== null && heldItem.releaseAfter > clockAtQueue,
       'the over-limit claim was not delayed on Solana')
-    const queuedAt = heldItem.releaseAfter - BigInt(RATE_LIMIT_DURATION)
-    assert(clockAtQueue - queuedAt >= 0n && clockAtQueue - queuedAt < 60n,
-      `the queue boundary ${heldItem.releaseAfter} is not ${RATE_LIMIT_DURATION} seconds after the clock that wrote it (${clockAtQueue})`)
+    // Measured between the boundary the manager wrote and a sysvar reading taken just after it, so
+    // the delay under test is the program's figure. Computing it as `releaseAfter - duration` would
+    // return the duration whatever the program had written.
+    const atQueue = reviewReleaseBoundary({
+      queueClock: clockAtQueue, releaseAfter: heldItem.releaseAfter,
+      observedClock: clockAtQueue, duration: RATE_LIMIT_DURATION, slack: DELAY_SLACK,
+    })
+    assert(atQueue.matchesDuration,
+      `the manager put its boundary ${atQueue.programDelay} seconds past the Clock sysvar it had just read (${clockAtQueue}), not the ${RATE_LIMIT_DURATION} it declares`)
+    assert(!atQueue.releasable, 'the queued claim is already releasable on the clock that queued it')
     await expectSvmRefusal('rate limit: the delayed Solana claim released early', () =>
       send(connection, stranger, [spoke.releaseInboundMint(stranger.publicKey, heldDigest, recipientAta, true)]))
     const inFlight = await reconcile('a rate-limited claim left in flight', DELAYED, 0n)
     assert(inFlight.hubCustody === DELAYED && inFlight.spokeSupply === 0n, 'the delayed claim is not backed by observed Arc custody')
-    record('claim in flight', `a ${DELAYED} atom claim held by the spoke's inbound limit until ${heldItem.releaseAfter} is refused early and backed by ${inFlight.hubCustody} atoms of observed Arc custody. The manager wrote that boundary ${heldItem.releaseAfter - queuedAt} seconds past the Clock sysvar it read at ${clockAtQueue}. Conservation holds with the claim outstanding: ${describeRoute(inFlight)}`)
+    record('claim in flight', `a ${DELAYED} atom claim held by the spoke's inbound limit until ${heldItem.releaseAfter} is refused early and backed by ${inFlight.hubCustody} atoms of observed Arc custody. The manager wrote that boundary a measured ${atQueue.programDelay} seconds past the Clock sysvar read at ${clockAtQueue}, against the ${RATE_LIMIT_DURATION} it declares. Conservation holds with the claim outstanding: ${describeRoute(inFlight)}`)
 
     /* ------------------------------------------- 13. the delay elapses, and the claim comes home */
 
@@ -687,8 +702,11 @@ async function main(): Promise<void> {
       const differences = seedDifferences(dumped, await readSeeded(connection, dumped))
       assert(differences.length === 0, `the rebuilt spoke ledger does not carry the accounts it was seeded from: ${differences.slice(0, 5).join('; ')}`)
       const advancedClock = await readChainClock(connection)
-      const boundary = reviewReleaseBoundary({ queuedAt, releaseAfter: heldItem.releaseAfter, observedClock: advancedClock })
-      assert(boundary.programDelay === BigInt(RATE_LIMIT_DURATION), `the rebuilt claim's delay is ${boundary.programDelay}, not ${RATE_LIMIT_DURATION} seconds`)
+      const boundary = reviewReleaseBoundary({
+        queueClock: clockAtQueue, releaseAfter: heldItem.releaseAfter,
+        observedClock: advancedClock, duration: RATE_LIMIT_DURATION, slack: DELAY_SLACK,
+      })
+      assert(boundary.matchesDuration, `the rebuilt claim's measured delay is ${boundary.programDelay}, not the ${RATE_LIMIT_DURATION} seconds the program declares`)
       assert(boundary.advancedBy >= BigInt(RATE_LIMIT_DURATION), `the clock fixture advanced the spoke by ${boundary.advancedBy} seconds, short of the ${RATE_LIMIT_DURATION} the queue requires`)
       assert(boundary.releasable, 'the advanced spoke clock has not passed the boundary the manager wrote')
       const retained = decodeInboxItem(await fetchAccount(connection, spoke.at.inboxItem(heldDigest)))
@@ -778,10 +796,13 @@ async function main(): Promise<void> {
       delayedReturn = {
         executed: true,
         amount: DELAYED.toString(),
-        rateLimitDuration: RATE_LIMIT_DURATION,
-        queuedAtSpokeClock: queuedAt.toString(),
+        queueClockObserved: clockAtQueue.toString(),
         releaseAfter: heldItem.releaseAfter.toString(),
-        programDelaySeconds: boundary.programDelay.toString(),
+        // Measured, not derived: `releaseAfter` less a sysvar reading taken just after the manager
+        // took its own, so it lands in (duration - slack, duration] rather than on the duration.
+        measuredDelaySeconds: boundary.programDelay.toString(),
+        measuredDelaySlackSeconds: DELAY_SLACK,
+        declaredRateLimitDuration: RATE_LIMIT_DURATION,
         advancedSpokeClock: advancedClock.toString(),
         advancedBySeconds: boundary.advancedBy.toString(),
         clockOffsetSeconds: advanceBy,

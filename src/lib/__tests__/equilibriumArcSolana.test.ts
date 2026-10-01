@@ -284,31 +284,53 @@ describe('seed accounts for a rebuilt spoke ledger', () => {
 })
 
 describe('the queued claim release boundary', () => {
-  const queuedAt = 1_790_000_000n
-  const duration = 86_400n
+  const queueClock = 1_790_000_000n
+  const duration = 86_400
+  const slack = 60
+  const at = (releaseAfter: bigint, observedClock: bigint) =>
+    reviewReleaseBoundary({ queueClock, releaseAfter, observedClock, duration, slack })
 
-  test('the delay reported is the program\'s own, derived from its two timestamps', () => {
-    const review = reviewReleaseBoundary({ queuedAt, releaseAfter: queuedAt + duration, observedClock: queuedAt + duration })
-    expect(review.programDelay).toBe(duration)
-    expect(review.advancedBy).toBe(duration)
+  test('the delay reported is measured between two readings, not assumed from the duration', () => {
+    const review = at(queueClock + 86_400n, queueClock + 86_400n)
+    expect(review.programDelay).toBe(86_400n)
+    expect(review.matchesDuration).toBe(true)
+    expect(review.advancedBy).toBe(86_400n)
     expect(review.releasable).toBe(true)
+  })
+
+  test('a boundary a couple of slots under the duration still matches, because the readings differ', () => {
+    expect(at(queueClock + 86_398n, queueClock + 86_400n).matchesDuration).toBe(true)
+  })
+
+  test('a boundary further ahead than the declared duration does not match', () => {
+    const review = at(queueClock + 86_401n, queueClock + 90_000n)
+    expect(review.programDelay).toBe(86_401n)
+    expect(review.matchesDuration).toBe(false)
+  })
+
+  test('a materially shortened duration fails the match instead of reading back as 86400', () => {
+    // The defect the measured figure exists to catch: a program whose queue delay is an hour would
+    // have reported the full duration had the delay been computed as releaseAfter minus duration.
+    const review = at(queueClock + 3_600n, queueClock + 3_601n)
+    expect(review.programDelay).toBe(3_600n)
+    expect(review.matchesDuration).toBe(false)
+    expect(review.releasable).toBe(true)
+  })
+
+  test('a boundary exactly at the slack edge is refused, so the window is narrow on purpose', () => {
+    expect(at(queueClock + BigInt(duration - slack), queueClock).matchesDuration).toBe(false)
+    expect(at(queueClock + BigInt(duration - slack + 1), queueClock).matchesDuration).toBe(true)
   })
 
   test('a clock one second short of the boundary is not releasable', () => {
-    const review = reviewReleaseBoundary({ queuedAt, releaseAfter: queuedAt + duration, observedClock: queuedAt + duration - 1n })
+    const review = at(queueClock + 86_400n, queueClock + 86_399n)
     expect(review.releasable).toBe(false)
-    expect(review.advancedBy).toBe(duration - 1n)
+    expect(review.advancedBy).toBe(86_399n)
   })
 
   test('an unadvanced clock reports the advance it did not make, rather than reading as ready', () => {
-    const review = reviewReleaseBoundary({ queuedAt, releaseAfter: queuedAt + duration, observedClock: queuedAt + 5n })
+    const review = at(queueClock + 86_400n, queueClock + 5n)
     expect(review.advancedBy).toBe(5n)
     expect(review.releasable).toBe(false)
-  })
-
-  test('a boundary shorter than the program\'s duration surfaces as the delay, not as a passing release', () => {
-    const review = reviewReleaseBoundary({ queuedAt, releaseAfter: queuedAt + 60n, observedClock: queuedAt + 61n })
-    expect(review.programDelay).toBe(60n)
-    expect(review.releasable).toBe(true)
   })
 })
