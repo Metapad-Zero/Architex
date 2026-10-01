@@ -77,6 +77,29 @@ Each test covers one guarantee:
 | stale / concurrent | An in-process worker races a separate process on the same credit. A worker restored from a journal snapshot taken before the credit then resumes. There is exactly one credit execution. |
 | round trip | Returning everything the executor holds leaves custody equal to spoke supply, which is exactly the pool's and the trader's tokens. |
 
+### Paid launch job on the fork (49TH-32)
+
+The durable shared-supply launch job now runs end to end over HTTP against this route, still fork-only. Code: `fulfillment.ts` (job adapter), `fulfillment-fork.ts` (harness), `serve.ts` (service on port 4046), `__tests__/fulfillment*.ts`. It uses its own ports (Arc 18655, Robinhood 18656, service 4046) and its own job journal under `output/robinhood-fulfillment-*`. It does not import or change the Arc–Base release gate.
+
+- **One canonical asset.** The harness deploys the asset and its Arc hub once with `deployHub`. A launch job adopts those operations; it does not issue again. Only an Arc+Robinhood request for that exact name, symbol and issuance is accepted. The first job to reach its payment step binds the asset. Any other request for it is refused with `asset_launched` before anything is charged.
+- **Step to operation mapping.** Each job step runs exactly one executor operation. The job persists that operation's bytes. The route journal must hold the same digest, or the step is refused as `operation_conflict`. Debit and credit drive one route transfer per job. The debit is complete only once its VAA is attested. The credit mints to the Robinhood executor, which seeds the pool and forwards the recipient's remainder.
+- **Labels.** Every response carries `x-equilibrium-environment: mixed:arc-testnet-fork+robinhood-mainnet-fork` and `x-equilibrium-payment: fork-fixture`. `/api/equilibrium` reports the fixed labels:
+  - x402 payments use ForkUsdc with an anvil payer.
+  - The Robinhood pool quote is USDG credited by storage write. The payer's Arc USDC for it stays on Arc, because Robinhood has no CCTP domain.
+  - Robinhood gas is priced at a fixed 5,000 USDC/ETH with no tip, and its L1 component is not modelled.
+  A configuration cannot relabel these.
+
+Run it with `EQUILIBRIUM_ROBINHOOD_FULFILLMENT=1 bun test server/equilibrium/robinhood/__tests__/fulfillment.test.ts`. Evidence is written to `output/robinhood-fulfillment-evidence.json`.
+
+| Test | What it establishes |
+| --- | --- |
+| quote | A real service process returns 402 bound to the Arc executor and the quoted total. It refuses a changed payload under the same requestId (`identity_conflict`), a Base destination (`route_closed`), another asset (`asset_mismatch`), and a header signed for a different quote (`invalid_payment`). |
+| crash after payment | The service is SIGKILLed right after sending the payment. The payer is charged exactly once, and the job records no result. |
+| crash after debit + race | A worker is SIGKILLed after the debit send. Two workers then race, and the lease admits one; the other gets `job_busy`. The one admitted is SIGKILLed after the credit send. There is one debit and one credit. |
+| restart | A restarted service sweeps the journal without a client resend. It completes all eight steps, each executed exactly once. Custody equals spoke supply and nothing is pending. QuoterV2 prices both directions against the job's pool. |
+| replay | Re-posting the paid request returns the same job and transactions. Balances and executions are unchanged. A second requestId for the asset is refused uncharged. |
+| stale / replayed | Broadcasting every step again from persisted bytes changes nothing, including from the crashed stale snapshot. The stale snapshot cannot be saved. The operator's `execute` for each of the eight operations reverts. The payer's authorization reverts when replayed directly on USDC. The VAA reverts when replayed to the transceiver. |
+
 ### What remains before any public Robinhood route
 
 These are the gates the closed adapter reports (`pins.ts`, `ROBINHOOD_DECISIONS`):

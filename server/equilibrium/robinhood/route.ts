@@ -1,6 +1,6 @@
 import type { Database } from 'bun:sqlite'
 import {
-  BaseError, ContractFunctionRevertedError, ContractFunctionZeroDataError, createPublicClient, createWalletClient, decodeEventLog, defineChain, encodeAbiParameters,
+  BaseError, ContractFunctionRevertedError, ContractFunctionZeroDataError, HttpRequestError, TimeoutError, createPublicClient, createWalletClient, decodeEventLog, defineChain, encodeAbiParameters,
   encodeFunctionData, http, parseAbi, zeroAddress, type Address, type Hex, type PublicClient, type TransactionReceipt, type WalletClient,
 } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
@@ -35,6 +35,8 @@ export interface RouteChain {
   confirmations: number
   /** Lowest block searched for executor logs: the fork point + 1. */
   fromBlock: bigint
+  /** Priority fee in wei. Unset lets the RPC suggest one; anvil's 1 gwei suggestion misstates an Arbitrum chain, which ignores tips. */
+  priorityFeeWei?: bigint
 }
 export interface RobinhoodRouteConfig {
   mode: 'fork'
@@ -65,7 +67,15 @@ export interface Transfer {
 }
 export type Progress = TransferState | 'awaiting_finality' | 'awaiting_attestation'
 /** Test seam: runs right after a transaction is handed to the RPC, before anything about it is recorded. */
-export interface RouteOptions { afterSend?: (name: string, tx: Hex) => void }
+export interface RouteOptions {
+  afterSend?: (name: string, tx: Hex) => void
+  /**
+   * Runs for every send, after the operation is known to be neither executed nor pending and before
+   * gas estimation. It may refuse by throwing. A returned function is called only if the attempt
+   * then fails before anything was handed to the RPC, so whatever the guard recorded can be undone.
+   */
+  guard?: (side: Side, name: string, operation: Hex, calls: Plan['calls']) => Promise<(() => void) | void>
+}
 
 const LOCKING = 0
 const BURNING = 1
@@ -102,7 +112,7 @@ export function layout(config: Pick<RobinhoodRouteConfig, 'arc' | 'robinhood' | 
   return { op, canonicalInit, canonical, hub: manager(config.arc, canonical, LOCKING, op('manager:arc'), 0), spokeInit, spoke, spokeManager: manager(config.robinhood, spoke, BURNING, op('manager:robinhood'), 1) }
 }
 
-interface Plan { side: Side; chainId: number; executor: Address; operation: Hex; calls: { target: Address; value: string; data: Hex }[]; value: string }
+export interface Plan { side: Side; chainId: number; executor: Address; operation: Hex; calls: { target: Address; value: string; data: Hex }[]; value: string }
 const call = (target: Address, data: Hex, value = 0n) => ({ target, value: value.toString(), data })
 const create = (init: Hex) => ({ target: zeroAddress as Address, value: '0', data: init })
 
@@ -127,8 +137,9 @@ export function robinhoodRoute(config: RobinhoodRouteConfig, db: Database, optio
   const sending: Record<Side, Promise<unknown>> = { arc: Promise.resolve(), robinhood: Promise.resolve() }
   const L = layout(config)
 
-  async function digestOf(side: Side, operation: Hex, blockTag: 'latest' | 'pending' = 'latest'): Promise<Hex> {
-    try { return await clients[side].readContract({ address: config[side].executor, abi: executorAbi, functionName: 'digestOf', args: [operation], blockTag }) } catch (cause) {
+  async function digestOf(side: Side, operation: Hex, at: 'latest' | 'pending' | bigint = 'latest'): Promise<Hex> {
+    const block = typeof at === 'bigint' ? { blockNumber: at } : { blockTag: at }
+    try { return await clients[side].readContract({ address: config[side].executor, abi: executorAbi, functionName: 'digestOf', args: [operation], ...block }) } catch (cause) {
       if (cause instanceof BaseError && cause.walk((e) => e instanceof ContractFunctionZeroDataError)) return ZERO
       throw cause
     }
@@ -155,7 +166,11 @@ export function robinhoodRoute(config: RobinhoodRouteConfig, db: Database, optio
    * restarted worker reuses the persisted bytes, never a re-plan. Returns the executing receipt,
    * whoever sent it.
    */
-  async function execute(name: string, side: Side, build: () => Promise<Plan['calls']> | Plan['calls']): Promise<TransactionReceipt> {
+  /**
+   * Build and persist the plan for operation `name` once, without sending anything. The first
+   * persisted bytes win: a later call returns them unchanged, whatever `build` would now produce.
+   */
+  async function persist(name: string, side: Side, build: () => Promise<Plan['calls']> | Plan['calls']): Promise<{ operation: Hex; digest: Hex; bytes: string }> {
     const operation = L.op(name)
     let row = db.query<{ side: string; digest: Hex; bytes: string }, [string]>('SELECT side, digest, bytes FROM robinhood_ops WHERE operation=?').get(operation)
     if (!row) {
@@ -166,8 +181,12 @@ export function robinhoodRoute(config: RobinhoodRouteConfig, db: Database, optio
       row = db.query<{ side: string; digest: Hex; bytes: string }, [string]>('SELECT side, digest, bytes FROM robinhood_ops WHERE operation=?').get(operation)!
     }
     if (row.side !== side || hash(row.bytes) !== row.digest) throw new Error(`Persisted plan for ${name} is inconsistent`)
-    const p = JSON.parse(row.bytes) as Plan
-    const digest = row.digest
+    return { operation, digest: row.digest, bytes: row.bytes }
+  }
+
+  async function execute(name: string, side: Side, build: () => Promise<Plan['calls']> | Plan['calls']): Promise<TransactionReceipt> {
+    const { operation, digest, bytes } = await persist(name, side, build)
+    const p = JSON.parse(bytes) as Plan
     const args = [operation, digest, p.calls.map((x) => ({ target: x.target, value: BigInt(x.value), data: x.data }))] as const
     const run = async (): Promise<TransactionReceipt> => {
       const current = await digestOf(side, operation)
@@ -175,24 +194,36 @@ export function robinhoodRoute(config: RobinhoodRouteConfig, db: Database, optio
       if (current !== ZERO) throw new LaunchError(409, 'operation_conflict', `${name} already executed with other bytes (${current}).`)
       // A crashed or stale worker's copy may still be in the mempool: wait for it instead of paying for a second send.
       if (await digestOf(side, operation, 'pending') === digest) return landed(side, operation, name)
+      const abandon = await options.guard?.(side, name, operation, p.calls)
       let gas: bigint
       try {
         gas = await clients[side].estimateContractGas({ account, address: p.executor, abi: executorAbi, functionName: 'execute', args, value: BigInt(p.value) })
       } catch (cause) {
+        abandon?.()
         const revert = cause instanceof BaseError ? cause.walk((e) => e instanceof ContractFunctionRevertedError) : null
         if (revert instanceof ContractFunctionRevertedError && revert.data?.errorName === 'OperationDone') return executedReceipt(side, operation)
         throw cause
       }
+      const tip = config[side].priorityFeeWei
+      const fees = tip === undefined ? {} : { maxPriorityFeePerGas: tip, maxFeePerGas: ((await clients[side].getBlock()).baseFeePerGas ?? 0n) * 2n + tip }
       let tx: Hex
       try {
-        tx = await wallets[side].writeContract({ account, chain: chainOf(config[side]), address: p.executor, abi: executorAbi, functionName: 'execute', args, value: BigInt(p.value), gas: (gas * 12n) / 10n })
+        tx = await wallets[side].writeContract({ account, chain: chainOf(config[side]), address: p.executor, abi: executorAbi, functionName: 'execute', args, value: BigInt(p.value), gas: (gas * 12n) / 10n, ...fees })
       } catch (cause) {
         if (String(cause).includes(OPERATION_DONE) || await digestOf(side, operation, 'pending') === digest) return executedReceipt(side, operation)
+        // A transport failure may still have delivered the transaction: its outcome is unknown, not failed.
+        if (cause instanceof BaseError && cause.walk((e) => e instanceof HttpRequestError || e instanceof TimeoutError)) throw new LaunchError(409, 'broadcast_uncertain', `${name} may have been sent; observe it before resending.`)
         throw cause
       }
       options.afterSend?.(name, tx)
       db.query('UPDATE robinhood_ops SET tx=? WHERE operation=?').run(tx, operation)
-      const receipt = await clients[side].waitForTransactionReceipt({ hash: tx, timeout: config.receiptTimeoutMs ?? 120_000 })
+      let receipt: TransactionReceipt
+      try {
+        receipt = await clients[side].waitForTransactionReceipt({ hash: tx, timeout: config.receiptTimeoutMs ?? 120_000 })
+      } catch {
+        // The transaction is on the wire. Without a receipt it is neither done nor failed.
+        throw new LaunchError(409, 'broadcast_uncertain', `${name} was sent in ${tx} and has no receipt yet; observe it before resending.`)
+      }
       if (receipt.status === 'success') return receipt
       // Our copy lost a race to another worker's identical operation: the other one is the effect.
       if (await digestOf(side, operation) === digest) return executedReceipt(side, operation)
@@ -225,18 +256,20 @@ export function robinhoodRoute(config: RobinhoodRouteConfig, db: Database, optio
       call(h.proxy, encodeFunctionData({ abi: nttAbi, functionName: 'setPeer', args: [config.robinhood.wormholeChainId, universal(s.proxy), 6, config.limits.inbound] })),
       call(h.transceiver, encodeFunctionData({ abi: transceiverAbi, functionName: 'setWormholePeer', args: [config.robinhood.wormholeChainId, universal(s.transceiver)] }), f)])
   }
-  async function deploySpoke() {
+  /** The spoke token, its burning manager and transceiver, peered to the hub: one executor operation. */
+  async function spokeCalls(): Promise<Plan['calls']> {
     const h = L.hub; const s = L.spokeManager
     const f = await fee('robinhood')
-    return execute('manager:robinhood', 'robinhood', () => [create(L.spokeInit), create(s.managerInit), create(proxyInit(s.implementation)), call(s.proxy, encodeFunctionData({ abi: nttAbi, functionName: 'initialize' })),
+    return [create(L.spokeInit), create(s.managerInit), create(proxyInit(s.implementation)), call(s.proxy, encodeFunctionData({ abi: nttAbi, functionName: 'initialize' })),
       create(s.transceiverInit), create(proxyInit(s.transceiverImplementation)), call(s.transceiver, encodeFunctionData({ abi: transceiverAbi, functionName: 'initialize' }), f),
       call(s.proxy, encodeFunctionData({ abi: nttAbi, functionName: 'setTransceiver', args: [s.transceiver] })),
       call(s.proxy, encodeFunctionData({ abi: nttAbi, functionName: 'setThreshold', args: [1] })),
       call(s.proxy, encodeFunctionData({ abi: nttAbi, functionName: 'setOutboundLimit', args: [config.limits.outbound] })),
       call(s.proxy, encodeFunctionData({ abi: nttAbi, functionName: 'setPeer', args: [config.arc.wormholeChainId, universal(h.proxy), 6, config.limits.inbound] })),
       call(s.transceiver, encodeFunctionData({ abi: transceiverAbi, functionName: 'setWormholePeer', args: [config.arc.wormholeChainId, universal(h.transceiver)] }), f),
-      call(L.spoke, encodeFunctionData({ abi: spokeAbi, functionName: 'setMinter', args: [s.proxy] }))])
+      call(L.spoke, encodeFunctionData({ abi: spokeAbi, functionName: 'setMinter', args: [s.proxy] }))]
   }
+  const deploySpoke = () => execute('manager:robinhood', 'robinhood', spokeCalls)
 
   /** Seed the Robinhood v3 pool from the executor's spoke balance and quote inventory. */
   async function seedPool(tokens: bigint, quote: bigint) {
@@ -281,22 +314,42 @@ export function robinhoodRoute(config: RobinhoodRouteConfig, db: Database, optio
     return t
   }
 
-  /** Advance one transfer as far as chain state allows. Safe to call from any worker, any number of times. */
-  async function advance(id: string): Promise<Progress> {
+  /**
+   * The debit or credit leg of a transfer as an (operation name, chain, plan) triple, the same for
+   * `advance` and for callers that persist a leg's bytes before sending it.
+   */
+  function leg(t: Transfer, kind: 'debit' | 'credit') {
+    const source: Side = t.direction === 'outbound' ? 'arc' : 'robinhood'
+    const destination = other(source)
+    if (kind === 'debit') {
+      const [sourceToken, sourceManager] = source === 'arc' ? [L.canonical, L.hub.proxy] : [L.spoke, L.spokeManager.proxy]
+      return { name: `transfer:${t.id}:debit`, side: source, build: async () => [
+        call(sourceToken, encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [sourceManager, t.amount] })),
+        call(sourceManager, encodeFunctionData({ abi: nttAbi, functionName: 'transfer', args: [t.amount, config[destination].wormholeChainId, universal(t.recipient)] }), await fee(source))] }
+    }
+    if (!t.vaa) throw new Error(`Transfer ${t.id} has no attested VAA to credit`)
+    const transceiver = destination === 'arc' ? L.hub.transceiver : L.spokeManager.transceiver
+    return { name: `transfer:${t.id}:credit`, side: destination, build: () => [call(transceiver, encodeFunctionData({ abi: transceiverAbi, functionName: 'receiveMessage', args: [t.vaa!] }))] }
+  }
+
+  /**
+   * Advance one transfer as far as chain state allows, or no further than `stopAt`. Safe to call
+   * from any worker, any number of times.
+   */
+  async function advance(id: string, stopAt: TransferState = 'credited'): Promise<Progress> {
     const t = readTransfer(id)
     if (!t) throw new Error(`Unknown transfer ${id}`)
     const source: Side = t.direction === 'outbound' ? 'arc' : 'robinhood'
     const destination = other(source)
     const [sourceToken, sourceManager] = source === 'arc' ? [L.canonical, L.hub.proxy] : [L.spoke, L.spokeManager.proxy]
+    if (t.state === stopAt) return t.state
     if (t.state === 'planned') {
-      const f = await fee(source)
-      const receipt = await execute(`transfer:${id}:debit`, source, () => [
-        call(sourceToken, encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [sourceManager, t.amount] })),
-        call(sourceManager, encodeFunctionData({ abi: nttAbi, functionName: 'transfer', args: [t.amount, config[destination].wormholeChainId, universal(t.recipient)] }), f)])
+      const debit = leg(t, 'debit')
+      const receipt = await execute(debit.name, debit.side, debit.build)
       const moved = transfersIn(receipt, sourceToken).filter((x) => same(x.from, config[source].executor) && same(x.to, sourceManager)).reduce((n, x) => n + x.value, 0n)
       if (moved !== t.amount) throw new Error(`Debit ${id} moved ${moved}, not ${t.amount}`)
       db.query("UPDATE robinhood_transfers SET state='debited', debit_tx=?, debit_block=? WHERE id=? AND state='planned'").run(receipt.transactionHash, receipt.blockNumber.toString(), id)
-      return advance(id)
+      return advance(id, stopAt)
     }
     if (t.state === 'debited') {
       const latest = await clients[source].getBlockNumber({ cacheTime: 0 })
@@ -310,12 +363,12 @@ export function robinhoodRoute(config: RobinhoodRouteConfig, db: Database, optio
       const vaa = await config.vaa[destination].signed(messages[0])
       if (!vaa) return 'awaiting_attestation'
       db.query("UPDATE robinhood_transfers SET state='attested', vaa=? WHERE id=? AND state='debited'").run(vaa, id)
-      return advance(id)
+      return advance(id, stopAt)
     }
     if (t.state === 'attested') {
       const [destToken, destManager] = destination === 'arc' ? [L.canonical, L.hub.proxy] : [L.spoke, L.spokeManager.proxy]
-      const transceiver = destination === 'arc' ? L.hub.transceiver : L.spokeManager.transceiver
-      const receipt = await execute(`transfer:${id}:credit`, destination, () => [call(transceiver, encodeFunctionData({ abi: transceiverAbi, functionName: 'receiveMessage', args: [t.vaa!] }))])
+      const credit = leg(t, 'credit')
+      const receipt = await execute(credit.name, credit.side, credit.build)
       // Outbound credits mint on Robinhood; return credits unlock from the hub's custody on Arc.
       const from = destination === 'arc' ? destManager : zeroAddress
       const credited = transfersIn(receipt, destToken).filter((x) => same(x.from, from) && same(x.to, t.recipient)).reduce((n, x) => n + x.value, 0n)
@@ -341,6 +394,6 @@ export function robinhoodRoute(config: RobinhoodRouteConfig, db: Database, optio
     return { issued, custody, spokeSupply, pending, accounted, reconciled: issued === config.asset.issuance && accounted === config.asset.issuance && custody === spokeSupply + pending }
   }
 
-  return { config, clients, layout: L, execute, deployHub, deploySpoke, seedPool, pool, quote, transfer, advance, get: readTransfer, supply, digestOf }
+  return { config, clients, layout: L, persist, execute, leg, executedReceipt, deployHub, spokeCalls, deploySpoke, seedPool, pool, quote, transfer, advance, get: readTransfer, supply, digestOf }
 }
 export type RobinhoodRoute = ReturnType<typeof robinhoodRoute>
