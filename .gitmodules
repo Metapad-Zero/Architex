@@ -1,3 +1,6 @@
 [submodule "lib/ntt"]
 	path = lib/ntt
 	url = https://github.com/wormhole-foundation/native-token-transfers.git
+[submodule "lib/ntt-svm"]
+	path = lib/ntt-svm
+	url = https://github.com/wormhole-foundation/native-token-transfers.git
