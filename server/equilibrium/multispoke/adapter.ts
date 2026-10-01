@@ -4,6 +4,7 @@ import {
   http, parseAbi, parseSignature, zeroAddress, type Address, type Hex, type PublicClient, type TransactionReceipt, type WalletClient,
 } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
+import { PublicKey } from '@solana/web3.js'
 import { hash, identity } from '../request'
 import { migrateSchema } from '../store'
 import { publicJob } from '../runner'
@@ -14,7 +15,8 @@ import {
 } from '../evm/contracts'
 import { weiOf } from '../evm/adapter'
 import { plan as v3Plan } from '../evm/v3'
-import { publishedFrom, type VaaSource } from '../evm/vaa'
+import { publishedFrom, type Published, type VaaSource } from '../evm/vaa'
+import { hubPeers, solanaSpoke, type SolanaPlan, type SolanaSpokeConfig } from './solana'
 
 /**
  * FORK-ONLY composition of the Arc–Base adapter (PR #12) and the Robinhood fulfillment (PR #18) into
@@ -45,12 +47,19 @@ import { publishedFrom, type VaaSource } from '../evm/vaa'
  * held, separating the spoke quote inventory injected on the spokes, the platform fee and the
  * operator's native gas from USDC actually spent.
  *
+ * With `solana` configured (49TH-44) the same hub is also peered to the pinned SVM NTT manager on a
+ * local validator, and the job has a fourth lane: `debit:solana` is an Arc executor operation like
+ * the other debits, and the Solana half of `manager`, `credit` and `pool` is ./solana.ts. The job
+ * then fulfils exactly Arc, Base, Solana and Robinhood, and nothing else.
+ *
  * Every RPC must be loopback. Public Robinhood routes stay closed (robinhood/adapter.ts), and this
  * module has no testnet or live mode.
  */
 export const SPOKES = ['base', 'robinhood'] as const
 export type Spoke = typeof SPOKES[number]
 export type Side = 'arc' | Spoke
+/** Where a step runs: an EVM side, or the Solana validator. */
+export type Lane = Side | 'solana'
 
 export interface HubConfig {
   rpc: string
@@ -104,6 +113,8 @@ export interface MultispokeConfig {
   /** NTT rate limits in token atoms per 24 hours, per peer. */
   limits: { outbound: bigint; inbound: bigint }
   budgets: Record<StepKind, Atoms>
+  /** The Solana spoke on a local validator. Set: the job is Arc, Base, Solana and Robinhood. */
+  solana?: SolanaSpokeConfig
   /** Jobs that may hold a payment authorization at once. Unset: no launch limit. */
   launches?: number
   receiptTimeoutMs?: number
@@ -148,6 +159,14 @@ export const MULTISPOKE_LABELS: MultispokeLabels = {
   payment: 'fork-fixture: ForkUsdc (EIP-3009) at the Arc native USDC address on an Arc testnet fork; the payer is an anvil development key; no real funds move',
   quoteInventory: 'fork-fixture: Base Sepolia USDC and Robinhood USDG pool quote are credited to the spoke executors by storage write; the payer\'s Arc USDC for them is not bridged',
   gas: 'Base L1 data fees are bounded by the OP Stack oracle; Robinhood Arbitrum Orbit gas (including its L1 component) is not modelled; both are priced at a fixed ETH/USDC rate',
+}
+
+/** The four-chain labels. With a Solana spoke, a configuration cannot relabel the validator either. */
+export const FOURCHAIN_LABELS: MultispokeLabels = {
+  environment: 'mixed:arc-testnet-fork+base-sepolia-fork+solana-local-validator+robinhood-mainnet-fork',
+  payment: MULTISPOKE_LABELS.payment,
+  quoteInventory: 'fork-fixture: Base Sepolia USDC and Robinhood USDG pool quote are credited to the spoke executors by storage write, and the Solana quote is a fixture mint held by the operator; the payer\'s Arc USDC for them is not bridged',
+  gas: `${MULTISPOKE_LABELS.gas}; Solana fees are paid in SOL by the operator fee payer and recorded in lamports, never converted into the launch's USDC atoms`,
 }
 
 const LOCKING = 0
@@ -200,12 +219,19 @@ export function layout(job: Pick<Job, 'id' | 'request'>, config: Pick<Multispoke
 }
 
 /** The side a step executes on: debits leave the Arc hub, everything else runs on its own chain. */
-export const sideOf = (step: Pick<Step, 'kind' | 'chain'>): Side => (step.kind === 'debit' || step.chain === 'arc' ? 'arc' : step.chain as Spoke)
+export const laneOf = (step: Pick<Step, 'kind' | 'chain'>): Lane => (step.kind === 'debit' || step.chain === 'arc' ? 'arc' : step.chain)
+/** The EVM side of a step that is not on the Solana validator. */
+export const sideOf = (step: Pick<Step, 'kind' | 'chain'>): Side => {
+  const side = laneOf(step)
+  if (side === 'solana') throw new Error(`${step.kind}:${step.chain} runs on the Solana validator, not an EVM side`)
+  return side
+}
 
 export function multispokeAdapter(config: MultispokeConfig, db: Database, options: MultispokeOptions = {}) {
   if (config.mode !== 'fork') throw new LaunchError(503, 'route_closed', 'The Arc–Base–Robinhood composition runs on local forks only.')
-  if (JSON.stringify(config.labels) !== JSON.stringify(MULTISPOKE_LABELS)) throw new LaunchError(503, 'route_closed', 'Labels differ from the fork fixture labels. Fixtures cannot be relabelled.')
-  for (const [side, rpc] of [['arc', config.arc.rpc], ...SPOKES.map((s) => [s, config.spokes[s].rpc])]) {
+  if (JSON.stringify(config.labels) !== JSON.stringify(config.solana ? FOURCHAIN_LABELS : MULTISPOKE_LABELS)) throw new LaunchError(503, 'route_closed', 'Labels differ from the fork fixture labels. Fixtures cannot be relabelled.')
+  const solana = config.solana ? solanaSpoke(config.solana) : undefined
+  for (const [side, rpc] of [['arc', config.arc.rpc], ...SPOKES.map((s) => [s, config.spokes[s].rpc]), ...(config.solana ? [['solana', config.solana.infrastructure.connection.rpcEndpoint]] : [])]) {
     if (!isLoopback(rpc)) throw new LaunchError(503, 'route_closed', `${side} RPC ${rpc} is not a local fork. Public Robinhood routes are closed.`)
   }
   const account = privateKeyToAccount(config.operatorKey)
@@ -226,7 +252,8 @@ export function multispokeAdapter(config: MultispokeConfig, db: Database, option
       CREATE TABLE IF NOT EXISTS multispoke_payment_ledger (job TEXT PRIMARY KEY, payer TEXT NOT NULL, outcome TEXT NOT NULL, authorized TEXT NOT NULL, received TEXT NOT NULL,
         fees_spent TEXT NOT NULL, residual TEXT NOT NULL, evidence_tx TEXT, evidence_block TEXT NOT NULL, refund TEXT NOT NULL, refund_tx TEXT, refund_block TEXT, recorded_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS multispoke_ops (operation TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL, digest TEXT NOT NULL, bytes TEXT NOT NULL, created_at INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS multispoke_usdc_claims (operation TEXT PRIMARY KEY, name TEXT NOT NULL, amount TEXT NOT NULL, state TEXT NOT NULL, created_at INTEGER NOT NULL);`)
+      CREATE TABLE IF NOT EXISTS multispoke_usdc_claims (operation TEXT PRIMARY KEY, name TEXT NOT NULL, amount TEXT NOT NULL, state TEXT NOT NULL, created_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS multispoke_published (operation TEXT PRIMARY KEY, message TEXT NOT NULL);`)
     // Journals from before attribution lack the bound amount. Such a holder is never attributed a transfer: it cannot be matched.
     if (!db.query("SELECT 1 FROM pragma_table_info('multispoke_launches') WHERE name='value'").get()) db.exec('ALTER TABLE multispoke_launches ADD COLUMN value TEXT')
   })
@@ -235,9 +262,17 @@ export function multispokeAdapter(config: MultispokeConfig, db: Database, option
     usdcAtomsPerNative: c.usdcAtomsPerNative.toString(), maxFeePerGasWei: 'maxFeePerGasWei' in c ? c.maxFeePerGasWei?.toString() : undefined })
   const pinned = { labels: config.labels, ntt: NTT_COMMIT, code: Object.fromEntries(Object.entries(CODE).map(([k, v]) => [k, v.sha256])), arc: strip(config.arc),
     spokes: { base: strip(config.spokes.base), robinhood: strip(config.spokes.robinhood) }, limits: { outbound: config.limits.outbound.toString(), inbound: config.limits.inbound.toString() },
-    budgets: config.budgets, launches: config.launches ?? null }
-  const version = `multispoke-arc-base-robinhood-v1:${hash(pinned).slice(2, 18)}`
-  const destination = (request: LaunchRequest, side: Side) => request.destinations.find((d) => d.chain === side)!
+    budgets: config.budgets, launches: config.launches ?? null, solana: solana?.version }
+  const version = solana ? `multispoke-arc-base-solana-robinhood-v1:${hash(pinned).slice(2, 18)}` : `multispoke-arc-base-robinhood-v1:${hash(pinned).slice(2, 18)}`
+  const destination = (request: LaunchRequest, side: Lane) => request.destinations.find((d) => d.chain === side)!
+  const route = solana ? 'arc,base,solana,robinhood' : 'arc,base,robinhood'
+  /** The message debit:solana published, recorded from its finalized receipt; the credit delivers exactly these bytes. */
+  const publishedFor = (job: Job): Published | undefined => {
+    const row = db.query<{ message: string }, [string]>('SELECT message FROM multispoke_published WHERE operation=?').get(hash([job.id, 'debit:solana']))
+    if (!row) return undefined
+    const m = JSON.parse(row.message) as Omit<Published, 'sequence'> & { sequence: string }
+    return { ...m, sequence: BigInt(m.sequence) }
+  }
 
   async function executed(side: Side, operation: Hex, at: bigint | 'latest' | 'pending'): Promise<Hex> {
     const block = typeof at === 'bigint' ? { blockNumber: at } : { blockTag: at }
@@ -480,6 +515,13 @@ export function multispokeAdapter(config: MultispokeConfig, db: Database, option
         calls.push(call(h.proxy, encodeFunctionData({ abi: nttAbi, functionName: 'setPeer', args: [config.spokes[s].wormholeChainId, universal(peer.proxy), 6, config.limits.inbound] })),
           call(h.transceiver, encodeFunctionData({ abi: transceiverAbi, functionName: 'setWormholePeer', args: [config.spokes[s].wormholeChainId, universal(peer.transceiver)] }), fee))
       }
+      if (solana) {
+        // The pinned SVM manager program and its transceiver's emitter PDA: properties of the programs,
+        // not of this launch, so the hub peers them before the job's Solana mint exists.
+        const peer = hubPeers()
+        calls.push(call(h.proxy, encodeFunctionData({ abi: nttAbi, functionName: 'setPeer', args: [peer.chain, peer.manager, 6, config.limits.inbound] })),
+          call(h.transceiver, encodeFunctionData({ abi: transceiverAbi, functionName: 'setWormholePeer', args: [peer.chain, peer.emitter] }), fee))
+      }
       expect.manager = h.proxy; expect.transceiver = h.transceiver
     } else if (step.kind === 'manager') {
       const h = L.hub; const sp = L.spokes[side as Spoke]; const m = sp.manager
@@ -493,10 +535,14 @@ export function multispokeAdapter(config: MultispokeConfig, db: Database, option
         call(sp.token, encodeFunctionData({ abi: spokeAbi, functionName: 'setMinter', args: [m.proxy] })))
       expect.manager = m.proxy; expect.transceiver = m.transceiver; expect.token = sp.token
     } else if (step.kind === 'debit') {
-      const to = step.chain as Spoke
+      const to = step.chain
+      if (to === 'arc') throw new Error('Arc is not a debit destination')
       const amount = BigInt(destination(request, to).amount)
+      // Solana's recipient is the launch's custody owner on the validator; an EVM spoke's is its executor.
+      const chainId = to === 'solana' ? hubPeers().chain : config.spokes[to].wormholeChainId
+      const recipient: Hex = to === 'solana' ? `0x${new PublicKey(solana!.custodian()).toBuffer().toString('hex')}` : universal(config.spokes[to].executor)
       calls.push(call(L.canonical, encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [L.hub.proxy, amount] })),
-        call(L.hub.proxy, encodeFunctionData({ abi: nttAbi, functionName: 'transfer', args: [amount, config.spokes[to].wormholeChainId, universal(config.spokes[to].executor)] }), fee))
+        call(L.hub.proxy, encodeFunctionData({ abi: nttAbi, functionName: 'transfer', args: [amount, chainId, recipient] }), fee))
       expect.token = L.canonical; expect.manager = L.hub.proxy
     } else if (step.kind === 'credit') {
       const vaa = db.query<{ vaa: string }, [string]>('SELECT vaa FROM multispoke_vaas WHERE operation=?').get(L.op(`debit:${side}`))?.vaa
@@ -548,6 +594,13 @@ export function multispokeAdapter(config: MultispokeConfig, db: Database, option
     if (p.operation !== prepared.operation || p.side !== sideOf(step) || !same(p.executor, chain(p.side).executor)) throw new Error(`Prepared plan for ${step.id} is inconsistent`)
     return p
   }
+  /** A Solana step's persisted plan. The mint secret lives here, and is never projected by publicJob. */
+  const parseSolana = (prepared: PreparedEffect, step: Step, job: Job): SolanaPlan => {
+    if (hash(prepared.bytes) !== prepared.digest || prepared.operation !== hash([job.id, step.id])) throw new Error('Prepared bytes changed')
+    const p = JSON.parse(prepared.bytes) as { side: string; operation: Hex; plan: SolanaPlan }
+    if (p.side !== 'solana' || p.operation !== prepared.operation) throw new Error(`Prepared plan for ${step.id} is inconsistent`)
+    return p.plan
+  }
   const executeArgs = (p: Plan, digest: Hex) => [p.operation, digest, p.calls.map((x) => ({ target: x.target, value: BigInt(x.value), data: x.data }))] as const
 
   function transfers(receipt: TransactionReceipt, token: Address) {
@@ -560,7 +613,7 @@ export function multispokeAdapter(config: MultispokeConfig, db: Database, option
   }
   const sum = (items: { value: bigint }[]) => items.reduce((n, x) => n + x.value, 0n).toString()
 
-  async function result(p: Plan, step: Step, receipt: TransactionReceipt): Promise<EffectResult | 'pending'> {
+  async function result(p: Plan, job: Job, step: Step, receipt: TransactionReceipt): Promise<EffectResult | 'pending'> {
     const c = chain(p.side)
     const cost = ((weiOf(receipt) * c.usdcAtomsPerNative + 10n ** 18n - 1n) / 10n ** 18n).toString()
     const base: EffectResult = { operation: p.operation, transaction: receipt.transactionHash, finalized: true, cost }
@@ -577,6 +630,12 @@ export function multispokeAdapter(config: MultispokeConfig, db: Database, option
       const block = await clients.arc.getBlock({ blockNumber: receipt.blockNumber })
       const messages = publishedFrom(receipt.logs, config.arc.core, config.arc.wormholeChainId, Number(block.timestamp))
       if (messages.length !== 1) throw new Error(`${step.id} published ${messages.length} Wormhole messages; expected exactly one`)
+      if (step.chain === 'solana') {
+        // The validator's core is given these exact bytes by credit:solana, signed by its own fixture guardian.
+        solana!.checkDebit(job, messages[0])
+        db.query('INSERT OR IGNORE INTO multispoke_published(operation, message) VALUES(?, ?)').run(p.operation, JSON.stringify({ ...messages[0], sequence: messages[0].sequence.toString() }))
+        return { ...base, amount: sum(locked) }
+      }
       // Signed for the destination's core. Unsigned is pending, never absent.
       const vaa = await config.spokes[step.chain as Spoke].vaa.signed(messages[0])
       if (!vaa) return 'pending'
@@ -734,18 +793,22 @@ export function multispokeAdapter(config: MultispokeConfig, db: Database, option
     const step = (id: string) => job.steps.find((s) => s.id === id)!
     const inflow = BigInt(step('payment:arc').result!.amount!)
     const arcPoolQuote = BigInt(step('pool:arc').result!.quoteAmount!)
-    const injected = { base: BigInt(step('pool:base').result!.quoteAmount!), robinhood: BigInt(step('pool:robinhood').result!.quoteAmount!) }
+    const injected: Record<string, bigint> = { base: BigInt(step('pool:base').result!.quoteAmount!), robinhood: BigInt(step('pool:robinhood').result!.quoteAmount!) }
+    if (solana) injected.solana = BigInt(step('pool:solana').result!.quoteAmount!)
     const platformFee = BigInt(step('payment:arc').budget)
     const stepBudgets = job.steps.filter((s) => s.kind !== 'payment').reduce((n, s) => n + BigInt(s.budget), 0n)
-    const nativeOperatorCosts = Object.fromEntries((['arc', ...SPOKES] as const).map((side) => [side, job.steps.filter((s) => s.kind !== 'payment' && sideOf(s) === side).reduce((n, s) => n + BigInt(s.result!.cost), 0n)])) as Record<Side, bigint>
+    const nativeOperatorCosts = Object.fromEntries((['arc', ...SPOKES] as const).map((side) => [side, job.steps.filter((s) => s.kind !== 'payment' && laneOf(s) === side).reduce((n, s) => n + BigInt(s.result!.cost), 0n)])) as Record<Side, bigint>
     const native = nativeOperatorCosts.arc + nativeOperatorCosts.base + nativeOperatorCosts.robinhood
     const held = inflow - arcPoolQuote
-    const spokeReserve = injected.base + injected.robinhood
+    const spokeReserve = Object.values(injected).reduce((n, x) => n + x, 0n)
+    // Solana fees are SOL from the operator's fee payer: reported in lamports, never as USDC atoms.
+    const solanaLamports = solana ? job.steps.filter((s) => laneOf(s) === 'solana').reduce((n, s) => n + (solana.lamports.get(hash([job.id, s.id])) ?? 0n), 0n) : undefined
     return {
       inflow, usdcSpent: { arcPool: arcPoolQuote }, held,
       spokeQuoteInjected: { ...injected, source: 'pre-positioned spoke inventory (fork fixture); not bridged from Arc USDC' },
       disposition: { platformFee, spokeQuoteReserve: spokeReserve, stepBudgets, operatorReimbursable: native, unspentBudget: stepBudgets - native },
       nativeOperatorCosts: { ...nativeOperatorCosts, note: 'operator gas paid in native currency from the operator account, valued in USDC atoms at the configured rates; not paid from executor USDC' },
+      ...(solanaLamports === undefined ? {} : { solanaOperatorLamports: { measured: solanaLamports, note: 'lamports this process measured across its own Solana submissions; not converted to USDC and not reimbursed from the held budgets' } }),
       reconciled: inflow === BigInt(job.total) && held === platformFee + spokeReserve + stepBudgets && native <= stepBudgets,
     }
   }
@@ -794,7 +857,9 @@ export function multispokeAdapter(config: MultispokeConfig, db: Database, option
     const account = usdcAccount(job)
     if (!account) return v
     const s = (x: bigint) => x.toString()
-    return { ...v, funds: { ...v.funds, quoteInventoryDeployed: s(account.usdcSpent.arcPool), spokeQuoteInjected: { base: s(account.spokeQuoteInjected.base), robinhood: s(account.spokeQuoteInjected.robinhood) },
+    return { ...v, funds: { ...v.funds, quoteInventoryDeployed: s(account.usdcSpent.arcPool),
+      spokeQuoteInjected: Object.fromEntries(Object.entries(account.spokeQuoteInjected).filter(([k]) => k !== 'source').map(([k, x]) => [k, String(x)])),
+      ...(account.solanaOperatorLamports ? { solanaOperatorLamports: s(account.solanaOperatorLamports.measured) } : {}),
       feesSpent: '0', nativeOperatorCosts: s(account.disposition.operatorReimbursable), unallocatedHeld: s(account.held), heldOnExecutor: s(account.held),
       disposition: Object.fromEntries(Object.entries(account.disposition).map(([k, x]) => [k, s(x)])), reconciled: account.reconciled,
       note: 'Arc USDC: paid in, Arc pool quote out, the rest held on the executor. Spoke pool quote was injected from spoke inventory; operator gas was paid natively and is reimbursable from the held step budgets.' } }
@@ -816,18 +881,34 @@ export function multispokeAdapter(config: MultispokeConfig, db: Database, option
     const totalSupply = (side: Side, address: Address) => orZero(clients[side].readContract({ address, abi: erc20Abi, functionName: 'totalSupply' }))
     const issued = await totalSupply('arc', L.canonical)
     const custody = await orZero(clients.arc.readContract({ address: L.canonical, abi: erc20Abi, functionName: 'balanceOf', args: [L.hub.proxy] }))
-    const spokes = { base: await totalSupply('base', L.spokes.base.token), robinhood: await totalSupply('robinhood', L.spokes.robinhood.token) }
-    const inFlight = { base: 0n, robinhood: 0n }
+    const spokes: Record<string, bigint> = { base: await totalSupply('base', L.spokes.base.token), robinhood: await totalSupply('robinhood', L.spokes.robinhood.token) }
+    const inFlight: Record<string, bigint> = { base: 0n, robinhood: 0n }
     for (const s of SPOKES) {
       const debited = await executed('arc', L.op(`debit:${s}`), 'latest') !== ZERO
       const credited = await executed(s, L.op(`credit:${s}`), 'latest') !== ZERO
       if (debited && !credited) inFlight[s] = BigInt(destination(job.request, s).amount)
     }
-    const remote = spokes.base + spokes.robinhood
-    const pending = inFlight.base + inFlight.robinhood
+    let solanaLedger: { mint: string | null; supply: bigint; custody: bigint } | undefined
+    let queued = 0n
+    if (solana) {
+      // The SPL mint's own supply; in flight is a debit executed on Arc whose inbox item is not released.
+      // A held claim is part of in flight: locked on Arc, not minted. It is reported beside it, never added again.
+      solanaLedger = await solana.ledger(job)
+      spokes.solana = solanaLedger.supply
+      const debited = await executed('arc', L.op('debit:solana'), 'latest') !== ZERO
+      const credit = job.steps.find((s) => s.id === 'credit:solana')!
+      const plan = credit.prepared ? parseSolana(credit.prepared, credit, job) : undefined
+      const released = plan?.kind === 'credit' ? await solana.released(job, plan.digest) : false
+      inFlight.solana = debited && !released ? BigInt(destination(job.request, 'solana').amount) : 0n
+      if (credit.claim && credit.state !== 'complete' && !released) queued = BigInt(credit.claim.amount)
+    }
+    const remote = Object.values(spokes).reduce((n, x) => n + x, 0n)
+    const pending = Object.values(inFlight).reduce((n, x) => n + x, 0n)
     const outside = issued - custody
-    return { issued, custody, spokes, inFlight, outside, accounted: outside + remote + pending,
-      reconciled: issued === BigInt(job.request.canonical.issuance) && outside + remote + pending === issued && custody === remote + pending }
+    // A burning spoke holds nothing in custody; anything there is unexplained and fails reconciliation.
+    const spokeCustodyClean = (solanaLedger?.custody ?? 0n) === 0n
+    return { issued, custody, spokes, inFlight, outside, accounted: outside + remote + pending, ...(solanaLedger ? { queued, solanaMint: solanaLedger.mint, solanaSpokeCustody: solanaLedger.custody } : {}),
+      reconciled: issued === BigInt(job.request.canonical.issuance) && outside + remote + pending === issued && custody === remote + pending && spokeCustodyClean }
   }
 
   const adapter: PromotionalTokenAdapter & {
@@ -850,9 +931,13 @@ export function multispokeAdapter(config: MultispokeConfig, db: Database, option
     view,
     terms: { chainId: config.arc.chainId, asset: config.arc.usdc, payTo: config.arc.executor, name: 'USDC', version: '2' },
     assertReady(request) {
-      if (request.destinations.map((d) => d.chain).join(',') !== 'arc,base,robinhood') {
-        throw new LaunchError(503, 'route_closed', 'This fork composition fulfils exactly Arc, Base and Robinhood in one job. Solana is closed here; single-spoke launches run in their own harnesses.')
+      if (request.destinations.map((d) => d.chain).join(',') !== route) {
+        throw new LaunchError(503, 'route_closed', solana
+          ? 'This fork composition fulfils exactly Arc, Base, Solana and Robinhood in one job; single-spoke launches run in their own harnesses.'
+          : 'This fork composition fulfils exactly Arc, Base and Robinhood in one job. Solana is closed here; single-spoke launches run in their own harnesses.')
       }
+      // The hub's outbound limit is shared by every peer. Solana's own inbound limit may hold a claim; that is a delay, not a refusal.
+      if (solana && BigInt(destination(request, 'solana').amount) > config.limits.outbound) throw new LaunchError(409, 'rate_limit', 'The solana allocation exceeds the hub outbound rate limit and would queue on Arc.')
       for (const s of SPOKES) {
         const amount = BigInt(destination(request, s).amount)
         if (amount > config.limits.inbound || amount > config.limits.outbound) throw new LaunchError(409, 'rate_limit', `The ${s} allocation exceeds the configured NTT rate limit and would queue.`)
@@ -876,13 +961,21 @@ export function multispokeAdapter(config: MultispokeConfig, db: Database, option
         const factory = await clients[side].readContract({ address: c.executor, abi: executorAbi, functionName: 'v3Factory' })
         if (!same(factory, side === 'arc' ? zeroAddress : config.spokes[side].venue.factory)) throw new Error(`${side} executor v3 factory differs from the venue`)
       }
+      await solana?.verify()
     },
     async prepare(context) {
+      if (laneOf(context.step) === 'solana') {
+        const L = layout(context.job, config)
+        const operation = L.op(context.step.id)
+        const bytes = JSON.stringify({ side: 'solana', operation, plan: solana!.plan(context.job, context.step, operation, { manager: L.hub.proxy, transceiver: L.hub.transceiver }, publishedFor(context.job)) })
+        return { operation, digest: hash(bytes), bytes }
+      }
       const p = await plan(context)
       const bytes = JSON.stringify(p)
       return { operation: p.operation, digest: hash(bytes), bytes }
     },
     async observe({ job, step }, prepared) {
+      if (laneOf(step) === 'solana') return solana!.observe(job, prepared.operation, parseSolana(prepared, step, job))
       const p = parse(prepared, step, job)
       const client = clients[p.side]
       const final = await finalBlock(p.side)
@@ -892,7 +985,7 @@ export function multispokeAdapter(config: MultispokeConfig, db: Database, option
         const [log] = await client.getLogs({ address: p.executor, event: executorAbi.find((x) => x.type === 'event' && x.name === 'Executed')!, args: { operation: p.operation }, fromBlock: BigInt(p.fromBlock), toBlock: final }) as { transactionHash: Hex }[]
         if (!log) throw new Error(`${step.id} executed but has no log in the searched range`)
         if (step.kind === 'payment') db.query('UPDATE multispoke_launches SET settled=1 WHERE job=?').run(job.id)
-        return result(p, step, await client.getTransactionReceipt({ hash: log.transactionHash }))
+        return result(p, job, step, await client.getTransactionReceipt({ hash: log.transactionHash }))
       }
       // Executed but not yet final, or a submission still in the mempool: pending, never absent.
       const current = await executed(p.side, p.operation, 'latest')
@@ -911,6 +1004,7 @@ export function multispokeAdapter(config: MultispokeConfig, db: Database, option
       return 'absent'
     },
     async broadcast({ job, step }, prepared) {
+      if (laneOf(step) === 'solana') return solana!.submit(job, prepared.operation, parseSolana(prepared, step, job))
       const p = parse(prepared, step, job)
       if (step.kind === 'payment') await takeSlot(job)
       await send(p, prepared.digest, step.id, BigInt(step.budget))

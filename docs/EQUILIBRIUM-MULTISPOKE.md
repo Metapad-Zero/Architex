@@ -111,7 +111,7 @@ Arc's anvil clock trails wall time on this fork, about 4 hours in the recorded r
 
 - Public Guardian attestation, Arc's real USDC precompile path, and real Base or Robinhood fees.
 - Any public or funded route. Robinhood's seven gates are unchanged.
-- The Solana spoke. It is excluded until its owner (49TH-34) delivers a pinned, reviewed interface.
+- The Solana spoke. It is excluded until its owner (49TH-34) delivers a pinned, reviewed interface. The four-chain composition with the queued-claim Solana branch is [EQUILIBRIUM-FOURCHAIN.md](EQUILIBRIUM-FOURCHAIN.md) (49TH-44); it leaves this three-chain job unchanged.
 - Return transfers, quote refill and keeper maintenance on the composed job (49TH-28/29 cover Arc–Base only).
 - Operator gas caps and the approval digest of #12's testnet release gate. That gate still covers Arc–Base only and is untouched here.
 - Reimbursing operator gas from held budgets, and disbursing the platform fee. Both are reported, not moved.
