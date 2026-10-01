@@ -1,0 +1,12 @@
+# Seismic prototype (49TH-44). Build and test with the Seismic toolchain only:
+#   sforge build && sforge test   (sfoundry v0.4.1, ssolc 0.8.31-develop+commit.98e187b6)
+[profile.default]
+src = "src"
+test = "test"
+script = "script"
+out = "out"
+cache_path = "cache"
+libs = ["../lib"]
+remappings = ["forge-std/=../lib/forge-std/src/"]
+optimizer = true
+optimizer_runs = 200

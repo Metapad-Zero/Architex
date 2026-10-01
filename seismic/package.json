@@ -1,0 +1,14 @@
+{
+  "name": "equilibrium-seismic-prototype",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "sforge build",
+    "test": "sforge test",
+    "prototype": "bun run script/prototype.ts"
+  },
+  "dependencies": {
+    "seismic-viem": "3.0.1",
+    "viem": "2.38.0"
+  }
+}
