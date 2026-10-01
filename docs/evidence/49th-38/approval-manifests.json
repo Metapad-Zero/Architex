@@ -1,0 +1,192 @@
+{
+  "keeper": [
+    {
+      "file": "server/equilibrium/keeper/bytecode.json",
+      "sha256": "03efc8463f271ffdab31c2e62664670f268077654c613c8840b95676789461ff"
+    },
+    {
+      "file": "server/equilibrium/keeper/approval.ts",
+      "sha256": "38afbfdb2a33faf27783b02642df876e431e5ccbc7a07fa00d2b731a7260e468"
+    },
+    {
+      "file": "server/equilibrium/keeper/cli.ts",
+      "sha256": "df368d55e1eb91c6c233d0de177dfacde2719ba5e55afc3996f9a2070b48efa9"
+    },
+    {
+      "file": "server/equilibrium/keeper/config.ts",
+      "sha256": "27e4d8725d9bfe22517ccdaef95c318af90444fee90c59af891cfc03d4b7cb93"
+    },
+    {
+      "file": "server/equilibrium/keeper/contracts.ts",
+      "sha256": "15fd2405dbdace6e767da770d111bd7f5b2c30f6bb36f966ac1a5e41184e64e9"
+    },
+    {
+      "file": "server/equilibrium/keeper/fees.ts",
+      "sha256": "01f2ae9552bf5d302d5d2a57b79b343a572f71c27665127cac621226ebab09ca"
+    },
+    {
+      "file": "server/equilibrium/keeper/keeper.ts",
+      "sha256": "ae21c615b1b75876490c0e8f681654c7f4ca8958f94f8e02e844a397fbb9abc2"
+    },
+    {
+      "file": "server/equilibrium/keeper/policy.ts",
+      "sha256": "0a04f7cd8b9d4b6a7eb48930e91808f06f0df12392a1ae5be9bc2bdd9930a95b"
+    },
+    {
+      "file": "server/equilibrium/keeper/preview.ts",
+      "sha256": "e89e5142af1138f29eaeea1fb4d9934ad91be569a9c86c2253ac528e2f8d8565"
+    },
+    {
+      "file": "server/equilibrium/keeper/quotes.ts",
+      "sha256": "210f624489b97482ea93873a65f5a7c7484cf71fa673b35ca27644065f8ca739"
+    },
+    {
+      "file": "server/equilibrium/keeper/run.ts",
+      "sha256": "7b1aa484940b75252c0070fe43926a7a84c3d01afa680904797fcd626104de77"
+    },
+    {
+      "file": "server/equilibrium/keeper/store.ts",
+      "sha256": "a1f6cf657621557fa2dfbf2066f2af8aa7058d864ea72ac975d5dca67f8d2d86"
+    },
+    {
+      "file": "server/equilibrium/keeper/types.ts",
+      "sha256": "bb2eb28d61dc8cd7534f4296822d3dfb93cce8007e2567d545f58a478cfbdbeb"
+    },
+    {
+      "file": "server/equilibrium/keeper/maintenance.ts",
+      "sha256": "cf2afe6652b4a78278a3ec737e23773089a05320d992e15cfee335428090d65e"
+    },
+    {
+      "file": "contracts/equilibrium/EquilibriumKeeper.sol",
+      "sha256": "a8fcc48cc78515b65042582e45ab85c8869d2e1cfe3492fda92318a20e017541"
+    },
+    {
+      "file": "scripts/equilibrium-keeper-bytecode.ts",
+      "sha256": "94c71963b81922b3750ac37fe826adc03da6428700d71d67f269e0745df08574"
+    }
+  ],
+  "transfer": [
+    {
+      "file": "server/equilibrium/evm/transfers/cctp.ts",
+      "sha256": "f444e1e9e2e17fb3979e37eba38b39623fd292318351e3da891bb5d269dd896e"
+    },
+    {
+      "file": "server/equilibrium/evm/transfers/cli.ts",
+      "sha256": "6798e23e6d2832364739336aaca2d1c91050164f4d3817c166827a9768a88158"
+    },
+    {
+      "file": "server/equilibrium/evm/transfers/config.ts",
+      "sha256": "0657c82c906bd8345e2aefd449134643b6f310163c4a625f3a5b09416767cfcf"
+    },
+    {
+      "file": "server/equilibrium/evm/transfers/executor.ts",
+      "sha256": "3f95850b07bc20683ea2c3a7d30cf0cd42e274dc5c4db65285243005ae942c97"
+    },
+    {
+      "file": "server/equilibrium/evm/transfers/ntt.ts",
+      "sha256": "2eeb233fb1b24e196629c4662177062b13bc9df084b67b32dccefdf0e62bd885"
+    },
+    {
+      "file": "server/equilibrium/evm/transfers/refill.ts",
+      "sha256": "05dec95793c3349db11eb42d6277dd042efb56de7d574d63b2ab2038e715c79a"
+    },
+    {
+      "file": "server/equilibrium/evm/transfers/returns.ts",
+      "sha256": "9cc32138d0efb373dd72a73f70904bc531b3e54435c839d1046f924b62ab1083"
+    },
+    {
+      "file": "server/equilibrium/evm/transfers/runner.ts",
+      "sha256": "a612811f6bd073861cab783da3a09fb3684b427f6b3e8ac77f22d00c8c755aeb"
+    },
+    {
+      "file": "server/equilibrium/evm/transfers/store.ts",
+      "sha256": "9e421cfb6ab1113c18bcaafa3a11e429e309ba537373595860e746533f217f7f"
+    },
+    {
+      "file": "server/equilibrium/evm/transfers/types.ts",
+      "sha256": "66199027451317315850af9527d35e74f4bdcb11b667828e9aebe76550a50875"
+    },
+    {
+      "file": "server/equilibrium/evm/transfers/token-refill.ts",
+      "sha256": "8af81ca5dc5b38d0544f472e76ee90a9252e0d0024621658f3c3296ad8738e78"
+    },
+    {
+      "file": "server/equilibrium/evm/bytecode.json",
+      "sha256": "fb23b75c4f1e58ea206be768da1387d090920cc8a65dcd430b038b35e6b9a413"
+    },
+    {
+      "file": "server/equilibrium/evm/adapter.ts",
+      "sha256": "3ef2f3798ec6a4fa46e71f5d701ee10c0f3898f64b1f06bb956a375d864a1f1f"
+    },
+    {
+      "file": "server/equilibrium/evm/approval.ts",
+      "sha256": "35de1e894f5039855bbcc9d3ccde25ad57944b03fd7a81ee6c3b5aebc95f4230"
+    },
+    {
+      "file": "server/equilibrium/evm/config.ts",
+      "sha256": "9daa9b7ae2dbc7fe2692396278f05f8e81fe336076cd529969774b79a5ef9726"
+    },
+    {
+      "file": "server/equilibrium/evm/contracts.ts",
+      "sha256": "01e84e16e486e44cdfa08de078b43a27e1d5b21be347f46b6bdbca969c5c72b3"
+    },
+    {
+      "file": "server/equilibrium/evm/serve.ts",
+      "sha256": "b8499ea7eea74b32ec23b6a9e52f17fb6bb9086fc168be14c85f1505bd49288d"
+    },
+    {
+      "file": "server/equilibrium/evm/types.ts",
+      "sha256": "2ee1da1910142c461e5ad2cacc0f82a6ceed0b9d53afc83961043f55ac4067dd"
+    },
+    {
+      "file": "server/equilibrium/evm/v3.ts",
+      "sha256": "ab881373155e5c610ccfc2bda2135bb5283b34d2d37bb4de67bc62b18ae86090"
+    },
+    {
+      "file": "server/equilibrium/evm/vaa.ts",
+      "sha256": "50e10ea26575e3d7edf0a56e5b35be23fac0d5a27f532d7b2c0ba415d1a25e56"
+    },
+    {
+      "file": "server/equilibrium/payment.ts",
+      "sha256": "96405c1846f96bf2d6ac67cbd4747d8f0b7a97e823d5895a819897e8fb770d47"
+    },
+    {
+      "file": "server/equilibrium/request.ts",
+      "sha256": "a0ad95b8c6aae60b6c0254156ae4ff209539e53750e29f18a95597efbd7ccf7b"
+    },
+    {
+      "file": "server/equilibrium/runner.ts",
+      "sha256": "e7f1761b77f4eba753ae4c2c69cdd1a00d51f0204a87596baad7156fe0e31963"
+    },
+    {
+      "file": "server/equilibrium/service.ts",
+      "sha256": "bd74873189ab2fca8e16b76fc7daca14e92b8dd511e6b0afc576eaa5706d6e22"
+    },
+    {
+      "file": "server/equilibrium/store.ts",
+      "sha256": "997a218d6e294e0b2010f237699c1a6db37d875a94bad755cfd8e8e61c0304f5"
+    },
+    {
+      "file": "server/equilibrium/types.ts",
+      "sha256": "22ee799805195982200c41ef70a46cea1483870ad35074c72b9ea196dccdaeb6"
+    },
+    {
+      "file": "contracts/equilibrium/EquilibriumExecutor.sol",
+      "sha256": "7a12d020d08d9cdbfdeb543e1c30d927d1d52128d88f43758573e37fdfb58397"
+    },
+    {
+      "file": "contracts/equilibrium/EquilibriumToken.sol",
+      "sha256": "409bb015489f87b399b17b9d451650eaf7f2d65484ad6a6c7892f0b8cae8934b"
+    },
+    {
+      "file": "scripts/equilibrium-infra.ts",
+      "sha256": "c692dc02e6aa8d1776f7c5a184651ac8a951952ec7253521c7c51e1d675511d1"
+    },
+    {
+      "file": "scripts/equilibrium-evm-launch.ts",
+      "sha256": "7a2fdfeca87510b3b01aebb091d991f8717144b391b0870eed8d3ad516f5095f"
+    }
+  ],
+  "keeperApproval": "a0436281e4ee735c7bac1931c03a886d2642331c808b7dc3fe07db21a871eaac",
+  "transferApproval": "7243b9455ec878dd7f6f07bc4c253c84e33e31ab777335677ae5b3c5713a4057"
+}

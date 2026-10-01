@@ -8,12 +8,17 @@ reseeds no pools, and changes no holder inventory or vault contract.
 | Asset | Authenticated route | Destination |
 | --- | --- | --- |
 | EQL | Base executor → NTT burn → Wormhole VAA → Arc NTT unlock | Arc keeper vault |
+| EQL refill | Arc executor → canonical NTT lock → Wormhole VAA → Base mint | Base keeper vault |
 | USDC | Arc executor → CCTP V2 burn → attestation → Base mint | Base executor, then replay-protected ERC20 deposit to Base keeper vault |
 
 The executor's operation/digest binding enforces each effect at most once. The added USDC deposit
 uses the same executor and records its exact calldata before sending. Settlement checks the mined
 USDC `Transfer` log from the approved Base executor to the approved Base keeper for the exact amount.
-Arc-to-Base **token** refill is outside this scope: depleted Base sale tokens still stop that direction.
+Arc→Base token refill requires an explicit `tokenRefill` section in transfer settings. Its request
+binds `tokenDirection: "arc-to-base"`; omitting the direction retains the Base→Arc return. Both
+directions share the keeper's token caps. The forward rail separately reserves its cumulative cap
+in an immediate SQLite transaction, including pending claims and concurrent admissions. It transfers
+existing executor inventory only. Empty source inventory refuses; it cannot issue new canonical tokens.
 
 ### Three separate approvals
 
@@ -43,8 +48,8 @@ launch's completion, its canonical/spoke assets and pools, and absence of open p
 The underlying NTT/CCTP bounds and cumulative transfer gas caps also apply. Changing any settings
 requires refreshed approvals; changing settings cannot replace an unfinished request.
 
-`keeper/approval.ts` pins the coordinator along with the keeper's existing broadcast dependencies
-(16 files). The transfer approval covers every shared launch dependency through the complete frozen
+`keeper/approval.ts` pins the coordinator along with the keeper's existing broadcast dependency
+files. The transfer approval covers every shared launch dependency through the complete frozen
 launch manifest. The keeper and launch file lists stay disjoint. Fork helpers and rehearsals are not
 public broadcast dependencies.
 
@@ -88,6 +93,7 @@ export EQUILIBRIUM_DB=<completed-launch-record>
 bun run equilibrium:keeper preview --config <keeper-config> --write <keeper-preview>
 bun run equilibrium:keeper maintenance-preview --config <keeper-config> --write <maintenance-preview>
 bun run equilibrium:keeper maintain --config <keeper-config> --request-id keeper-refill-001 --tokens 500000000 --quote 3000000 --yes
+bun run equilibrium:keeper maintain --config <keeper-config> --request-id keeper-forward-001 --token-direction arc-to-base --tokens 500000000 --quote 0 --yes
 bun run equilibrium:keeper maintenance-reconcile --config <keeper-config> --yes
 bun run equilibrium:keeper status --config <keeper-config>
 ```
@@ -123,6 +129,39 @@ an Arc USDC stand-in, development-key gas, and locally staged existing operator-
 Base starts at zero USDC and receives its pool and keeper cash through CCTP. Anvil receipts commonly
 omit L1 fees. None proves public Guardian/Circle attestations, Arc USDC precompile settlement, real
 Base L1 fees, public paid settlement or four-chain fulfillment.
+
+### Arc→Base token-refill proof (49TH-38)
+
+Set explicit transfer settings, separately approved with the keeper scope:
+
+```json
+{ "tokenRefill": { "maxPerTransfer": "500000000", "maxTotal": "2000000000" } }
+```
+
+These amounts are fork fixtures. Run `bun run equilibrium:keeper-token-refill-rehearse` to reproduce
+the pinned-fork evidence, keyless configurations, previews and exact approval manifests under
+`output/49th-38/`. `bun run equilibrium:keeper-token-refill-fork-test` asserts the same proof without
+overwriting artifacts. The checked evidence bundle is in `docs/evidence/49th-38/`; regenerating it
+changes timestamp-bound launch identities and local addresses, so compare invariants, not transaction IDs.
+
+The proof starts with an empty Arc executor and Base vault, refuses the source debit and trading,
+then stages existing operator-owned canonical tokens on the fork. It checks an unredeemed claim
+against a forged signature and a valid Guardian signature from an unapproved peer. A destination
+with two confirmations remains pending until mined confirmations arrive. The independent finalized
+supply reads show a pending claim before redemption, then custody exactly matching remote supply.
+
+Twelve child processes exit at the before/after boundaries of send, receipt persistence and cost
+persistence for both the Arc lock and the Base mint. The test alone accelerates leases to 200ms;
+public leases stay 30 seconds. Recovery sends each original operation once, credits the exact vault
+amount and agrees with an independent receipt-cost sum. Transactions signed before a crash are
+persisted privately in SQLite and replayed byte for byte under the original gas reservation. They
+are excluded from the public status and evidence projections. Conflicting request direction,
+concurrent cumulative-cap admission, depleted inventory, zero gas allowance and nonzero unsupported
+NTT protocol fees refuse. Source outbound and destination inbound capacities are checked before sending.
+
+All preview files and digests in this bundle belong to this fork branch. Source PR heads, launch
+approval code and existing approval artifacts are unchanged. Public signing, funding, deployment,
+Guardian availability and four-chain live acceptance remain unapproved or unproven.
 
 Maintenance and trading remain cross-chain, non-atomic operator workflows. Use one runner per operator
 key and the shared record. The local admission lock cannot police manual owner transactions or a

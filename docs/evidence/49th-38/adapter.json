@@ -1,0 +1,59 @@
+{
+  "mode": "fork",
+  "arc": {
+    "chain": "arc",
+    "rpc": "http://127.0.0.1:18765",
+    "chainId": 5042002,
+    "wormholeChainId": 71,
+    "core": "0xBB73cB66C26740F31d1FabDC6b7A46a038A300dd",
+    "usdc": "0x3600000000000000000000000000000000000000",
+    "executor": "0x9c409262efa8e122e00b1c6efaf5e1135325b7ca",
+    "transceiverStructs": "0x1339e1782ce2f7a7f233e82de47c50faf6e5ffb4",
+    "finality": 0,
+    "fromBlock": "64824601",
+    "usdcAtomsPerNative": "1000000",
+    "opStackL1Fee": false,
+    "maxFeePerGasWei": "60000000000",
+    "venue": {
+      "kind": "architex",
+      "factory": "0x6362f5a0fc007ab7d1e61f99d3f4eb04360d060a"
+    }
+  },
+  "base": {
+    "chain": "base",
+    "rpc": "http://127.0.0.1:18766",
+    "chainId": 84532,
+    "wormholeChainId": 10004,
+    "core": "0x79A1027a6A159502049F10906D333EC57E95F083",
+    "usdc": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+    "executor": "0xbf0fe883bbaa0565af4b02fa9d6a6a85c96a2924",
+    "transceiverStructs": "0x7ac0e82c82503b9b648c52a25ed27a6ebd01e869",
+    "finality": 0,
+    "fromBlock": "47513001",
+    "usdcAtomsPerNative": "5000000000",
+    "priorityFeeWei": "1000000",
+    "opStackL1Fee": true,
+    "venue": {
+      "kind": "uniswap-v3",
+      "factory": "0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24",
+      "fee": 3000,
+      "tickSpacing": 60
+    }
+  },
+  "vaa": {
+    "kind": "local-guardian",
+    "guardianSetIndex": 0
+  },
+  "limits": {
+    "outbound": "10000000000000",
+    "inbound": "10000000000000"
+  },
+  "budgets": {
+    "payment": "1000000",
+    "canonical": "2000000",
+    "manager": "5000000",
+    "debit": "1000000",
+    "credit": "1000000",
+    "pool": "2000000"
+  }
+}

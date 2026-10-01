@@ -25,6 +25,8 @@
     "equilibrium:keeper-fork-test": "EQUILIBRIUM_FORK=1 bun test server/equilibrium/keeper/__tests__/fork.test.ts",
     "equilibrium:keeper-maintenance-fork-test": "EQUILIBRIUM_FORK=1 bun test server/equilibrium/keeper/__tests__/maintenance.fork.test.ts",
     "equilibrium:keeper-maintenance-rehearse": "bun run server/equilibrium/keeper/maintenance-rehearse.ts",
+    "equilibrium:keeper-token-refill-rehearse": "bun run server/equilibrium/keeper/token-refill-rehearse.ts",
+    "equilibrium:keeper-token-refill-fork-test": "EQUILIBRIUM_FORK=1 bun test server/equilibrium/keeper/__tests__/token-refill.fork.test.ts",
     "equilibrium:gate-challenge": "bun run server/equilibrium/evm/challenge.ts",
     "equilibrium:transfer": "bun run server/equilibrium/evm/transfers/cli.ts",
     "equilibrium:transfers-fork-test": "EQUILIBRIUM_FORK=1 bun test server/equilibrium/evm/transfers/__tests__/returns.fork.test.ts server/equilibrium/evm/transfers/__tests__/refill.fork.test.ts",

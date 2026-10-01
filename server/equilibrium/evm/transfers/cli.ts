@@ -39,18 +39,19 @@ const jobs = new JobStore(assertDurableStore(process.env.EQUILIBRIUM_DB ?? './ou
 const store = new TransferStore(jobs.db, 60_000)
 const routes = transferRoutes(fromFile(file), JSON.parse(settingsText) as TransferSettings, jobs.db, (id) => jobs.get(id))
 const routeOf = (kind: string): TransferRoute<unknown> => {
-  const route = kind === 'return' ? routes.returns : routes.refill
-  if (!route) throw new Error('The refill rail is closed: the transfer settings carry no refill section.')
+  const route = kind === 'return' ? routes.returns : kind === 'token-refill' ? routes.tokenRefill : kind === 'refill' ? routes.refill : undefined
+  if (!route) throw new Error(`The ${kind} rail is closed or unknown; explicit transfer bounds are required.`)
   return route
 }
 const now = () => Math.floor(Date.now() / 1000)
 // Before anything can send: each RPC is the approved chain and each executor is this operator's.
-if (['return', 'refill', 'run', 'sweep'].includes(command)) await routes.sender.verify()
+if (['return', 'refill', 'token-refill', 'run', 'sweep'].includes(command)) await routes.sender.verify()
 const print = (value: unknown) => console.log(JSON.stringify(value, null, 2))
 
-if (command === 'return' || command === 'refill') {
+if (command === 'return' || command === 'refill' || command === 'token-refill') {
   const raw = command === 'refill'
     ? { kind: 'refill', requestId: need('--request-id'), from: need('--from'), to: need('--to'), amount: need('--amount'), maxFee: '0' }
+    : command === 'token-refill' ? { kind: command, requestId: need('--request-id'), launch: need('--launch'), amount: need('--amount'), recipient: need('--recipient') }
     : flag('--transaction')
       ? { kind: 'return', source: 'holder', launch: need('--launch'), transaction: need('--transaction') }
       : { kind: 'return', source: 'executor', requestId: need('--request-id'), launch: need('--launch'), amount: need('--amount'), recipient: need('--recipient') }
@@ -62,7 +63,8 @@ if (command === 'return' || command === 'refill') {
   if (!t) throw new Error('Unknown transfer')
   print(publicTransfer(await runTransfer(store, routeOf(t.kind), t.id)))
 } else if (command === 'sweep') {
-  print({ returns: await reconcileTransfers(store, routes.returns), refill: routes.refill ? await reconcileTransfers(store, routes.refill) : 'closed' })
+  print({ returns: await reconcileTransfers(store, routes.returns), refill: routes.refill ? await reconcileTransfers(store, routes.refill) : 'closed',
+    tokenRefill: routes.tokenRefill ? await reconcileTransfers(store, routes.tokenRefill) : 'closed' })
 } else if (command === 'status') {
   print(rest[0] ? publicTransfer(store.get(rest[0]) ?? (() => { throw new Error('Unknown transfer') })()) : store.list().map(publicTransfer))
 } else if (command === 'supply') {
@@ -70,6 +72,6 @@ if (command === 'return' || command === 'refill') {
   if (!job) throw new Error('Unknown launch')
   print(await conservation(routes.sender, fromFile(file), job))
 } else {
-  throw new Error('Commands: digest | return | refill | run <id> | sweep | status [id] | supply --launch <id>')
+  throw new Error('Commands: digest | return | refill | token-refill | run <id> | sweep | status [id] | supply --launch <id>')
 }
 jobs.close()
