@@ -365,6 +365,10 @@ async function main(): Promise<void> {
     const creditPlan = decodePlan(creditStep.prepared!.operation, creditStep.prepared!.bytes)
     assert(creditPlan.kind === 'credit' && claim.reference === creditPlan.digest,
       'the claim reference is not the manager-message digest the step was planned against')
+    // The account the claim IS: a PDA of its digest under the pinned manager. Everything that follows
+    // — the finality wait before each hard kill, the dump, the byte comparison — is about this one.
+    const spoke = spokeDeployment(queuedJob)
+    const inboxItem = spoke.at.inboxItem(Uint8Array.from(Buffer.from(claim.reference.slice(2), 'hex')))
     // The boundary is measured against the Clock sysvar the manager compared with, not derived from
     // the duration: computing it as `releaseAfter - duration` would return the duration regardless.
     const atQueue = reviewReleaseBoundary({
@@ -420,9 +424,16 @@ async function main(): Promise<void> {
 
     /* -------------------------------------------------------- 6. a spoke restart, claim outstanding */
 
+    // Rooted first. A SIGKILL can only be survived by state the validator has already finalized, and
+    // a claim that exists only in the dying process is not a claim the queue kept — killing before it
+    // roots would test the validator's snapshot cadence rather than the manager's own durability.
+    await awaitFinalizedAccount(infrastructure.connection, inboxItem)
     validator = await restartSpoke(infrastructure, validator)
     const afterRestart = store.get(jobId)!
-    const retainedOnChain = await route.observe({ job: afterRestart, step: creditStep }, await route.plan({ job: afterRestart, step: creditStep }))
+    // Read back off the durable job, not off the object this run has been holding: the point is that
+    // a process which knows nothing but the journal finds the same claim.
+    const restartedStep = afterRestart.steps.find((step) => step.id === 'credit:solana')!
+    const retainedOnChain = await route.observe({ job: afterRestart, step: restartedStep }, await route.plan({ job: afterRestart, step: restartedStep }))
     assert(typeof retainedOnChain === 'object' && 'queued' in retainedOnChain, 'the reopened ledger lost the queued claim')
     assert(retainedOnChain.queued.reference === claim.reference && retainedOnChain.queued.releaseAfter === claim.releaseAfter,
       'the reopened ledger altered the claim or its boundary')
@@ -441,8 +452,6 @@ async function main(): Promise<void> {
     }
 
     const seedDirectory = join(OUT, 'arc-solana-fulfillment-seed')
-    const spoke = spokeDeployment(store.get(jobId)!)
-    const inboxItem = spoke.at.inboxItem(Uint8Array.from(Buffer.from(claim.reference.slice(2), 'hex')))
     const programNames = new Map([
       [SOLANA_NTT.manager, 'NTT manager'], [SOLANA_NTT.transceiver, 'transceiver'],
       [SOLANA_NTT.coreBridge, 'core bridge'], [TOKEN_PROGRAM.toBase58(), 'SPL token'],

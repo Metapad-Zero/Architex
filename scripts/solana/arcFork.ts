@@ -221,7 +221,20 @@ export async function call(
   const { request } = await node.publicClient.simulateContract({
     address, abi, functionName, args, account: node.wallet.account!,
   })
-  const hash = await node.wallet.writeContract(request as never)
+  /**
+   * Send with headroom over the estimate instead of exactly the estimate.
+   *
+   * `eth_estimateGas` prices the call against the state of the block it is asked about; the
+   * transaction then executes in the next one, where a storage slot the estimate touched warm can be
+   * cold again. The difference is thousands of gas, and the failure it produces is the worst kind to
+   * read: a receipt with status 0 and no revert data, which looks exactly like a contract refusing.
+   * Twenty-five percent is the same headroom the launchpad's own window buys use, and these are a
+   * handful of calls on a local fork, so an over-estimate costs nothing but a gas figure.
+   */
+  const estimate = await node.publicClient.estimateContractGas({
+    address, abi, functionName, args, account: node.wallet.account!,
+  })
+  const hash = await node.wallet.writeContract({ ...request, gas: (estimate * 125n) / 100n } as never)
   const receipt = await node.publicClient.waitForTransactionReceipt({ hash })
   if (receipt.status !== 'success') {
     // Re-run the transaction as a call against the block that rejected it, so the reason is the

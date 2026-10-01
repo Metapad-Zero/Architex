@@ -114,11 +114,11 @@ async function main(): Promise<void> {
     },
     limits: {
       outbound: 'set to the approved ceiling with `set_outbound_limit`; it refills over 24 hours',
-      inbound: 'set per peer chain with `set_inbound_limit`. A claim above the limit is queued, not lost, and cannot be released before its timestamp. The rehearsal exercises exactly this.',
+      inbound: 'set per peer chain with `set_inbound_limit`. A claim above the limit is queued, not lost, and cannot be released before its timestamp. The rehearsal exercises exactly this, and a paid launch job records the queued claim and waits it out rather than treating it as a failed delivery.',
       threshold: '1 authenticated Wormhole transceiver. That relies on Guardian verification, not on one Guardian.',
     },
     recovery: [
-      'A claim approved but not released survives a crash: it is an on-chain inbox item addressed by the message digest. Re-run `release_inbound_mint`; a second release is refused as TransferAlreadyRedeemed.',
+      'A claim approved but not released survives a crash: it is an on-chain inbox item addressed by the message digest. Re-run `release_inbound_mint`; a second release is refused as TransferAlreadyRedeemed. A launch job holds the same claim in its own record — amount, recipient and the boundary the manager wrote — so an operator can see which launch is waiting and until when.',
       'A debit whose message was never published leaves an outbox item. Re-run `release_wormhole_outbound` with the same outbox item; a second publication is refused as MessageAlreadySent.',
       'A debit whose message was published and never credited stays backed on the hub as a pending claim. It is redeemed by delivering the same VAA; it is never re-issued.',
       '`set_paused` stops credits and debits without touching any balance. Pausing is also the precondition for moving the mint authority back out of the manager.',
