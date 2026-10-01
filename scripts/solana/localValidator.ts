@@ -10,7 +10,8 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { join } from 'node:path'
 import {
-  Connection, Keypair, PublicKey, SendTransactionError, Transaction, type TransactionInstruction,
+  Connection, Keypair, PublicKey, SendTransactionError, SYSVAR_CLOCK_PUBKEY, Transaction,
+  type TransactionInstruction,
 } from '@solana/web3.js'
 import { SOLANA_NTT, toHex, type VaaBody } from '../../src/lib/equilibriumSolana'
 import { NttDeployment } from './nttClient'
@@ -37,23 +38,64 @@ export interface ValidatorFixtures {
  * with. The two NTT programs are loaded upgradeable because the manager checks its deployer
  * against the program's upgrade authority.
  */
+export interface ValidatorOptions {
+  /**
+   * A directory of `solana account --output json` files to rebuild the ledger from, in place of the
+   * three mainnet core-bridge fixtures. Only meaningful with `reset`: `--account-dir` is ignored
+   * when the ledger already exists. The dump carries the current state of those three accounts —
+   * including the substituted guardian set — so loading both sources would be two answers to the
+   * same question.
+   */
+  seedDirectory?: string
+  /**
+   * Extra environment for the validator process only. This is how the clock fixture is applied;
+   * see `scripts/solana/clockShift.ts`. It reaches the child and nothing else, so the harness
+   * keeps stamping its own records with the real date.
+   */
+  environment?: Record<string, string>
+}
+
 export function startValidator(
   at: ValidatorFixtures, ledger: string, ports: ValidatorPorts, reset: boolean, admin: PublicKey,
+  options: ValidatorOptions = {},
 ): ChildProcess {
+  const accounts = options.seedDirectory
+    ? ['--account-dir', options.seedDirectory]
+    : [
+      '--account', '2yVjuQwpsvdsrywzsJJVs9Ueh4zayyo5DYJbBNc3DDpn', join(at.accounts, 'core_bridge_config.json'),
+      '--account', '9bFNrXNb2WTx8fMHXCheaZqkLZ3YCCaiqTftHxeintHy', join(at.accounts, 'core_bridge_fee_collector.json'),
+      '--account', 'DS7qfSAgYsonPpKoAjcGhX9VFjXdGkiHjEDkTidf8H2P', join(at.accounts, 'guardian_set_0.json'),
+    ]
+  if (options.seedDirectory && !reset) {
+    throw new Error('A seeded ledger has to be a new one: solana-test-validator ignores --account-dir when the ledger exists.')
+  }
   const args = [
     '--ledger', ledger, '--rpc-port', String(ports.rpc), '--faucet-port', String(ports.faucet),
     '--limit-ledger-size', '10000', '--quiet',
     ...(reset ? ['--reset'] : []),
     '--bpf-program', SOLANA_NTT.coreBridge, join(at.fixtures, 'mainnet_core_bridge.so'),
-    '--account', '2yVjuQwpsvdsrywzsJJVs9Ueh4zayyo5DYJbBNc3DDpn', join(at.accounts, 'core_bridge_config.json'),
-    '--account', '9bFNrXNb2WTx8fMHXCheaZqkLZ3YCCaiqTftHxeintHy', join(at.accounts, 'core_bridge_fee_collector.json'),
-    '--account', 'DS7qfSAgYsonPpKoAjcGhX9VFjXdGkiHjEDkTidf8H2P', join(at.accounts, 'guardian_set_0.json'),
+    ...accounts,
     '--upgradeable-program', SOLANA_NTT.manager, join(at.deploy, 'example_native_token_transfers.so'), admin.toBase58(),
     '--upgradeable-program', SOLANA_NTT.transceiver, join(at.deploy, 'ntt_transceiver.so'), admin.toBase58(),
   ]
-  const child = spawn('solana-test-validator', args, { cwd: at.cwd, stdio: ['ignore', 'ignore', 'pipe'] })
+  // Spawned directly, never through a wrapper. nohup, env and setsid are all SIP-protected on
+  // macOS, and exec'ing one of them strips DYLD_INSERT_LIBRARIES out of the environment on the way
+  // past — the clock fixture would be silently absent and the release it exists for would be
+  // refused for a reason that looks like a defect in the manager.
+  const child = spawn('solana-test-validator', args, {
+    cwd: at.cwd,
+    stdio: ['ignore', 'ignore', 'pipe'],
+    env: { ...process.env, ...options.environment },
+  })
   child.stderr?.on('data', (chunk: Buffer) => { process.stderr.write(`    [validator] ${chunk.toString()}`) })
   return child
+}
+
+/** The Clock sysvar's own `unix_timestamp`, which is what the manager's queue compares against. */
+export async function readChainClock(connection: Connection): Promise<bigint> {
+  const account = await connection.getAccountInfo(SYSVAR_CLOCK_PUBKEY, 'confirmed')
+  if (!account) throw new Error('The Clock sysvar is missing from this ledger.')
+  return new DataView(account.data.buffer, account.data.byteOffset, account.data.byteLength).getBigInt64(32, true)
 }
 
 /** Cancels only the process this run started, by its own pid. */

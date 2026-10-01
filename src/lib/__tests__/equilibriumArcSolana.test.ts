@@ -2,9 +2,10 @@ import { describe, expect, test } from 'bun:test'
 import { PublicKey } from '@solana/web3.js'
 import { encodeAbiParameters, type Hex } from 'viem'
 import {
-  LOG_MESSAGE_PUBLISHED_TOPIC, decodePostedMessage, describeRoute, evmToWormholeFormat,
-  guardianSetSlots, parseLogMessagePublished, reconcileRoute, wormholeFormatToEvm,
-  type ObservedRoute,
+  LOG_MESSAGE_PUBLISHED_TOPIC, RENT_EXEMPT_EPOCH, decodePostedMessage, describeRoute,
+  evmToWormholeFormat, guardianSetSlots, parseLogMessagePublished, parseSeedAccount, reconcileRoute,
+  reviewReleaseBoundary, seedAccountJson, seedDifferences, wormholeFormatToEvm,
+  type ObservedRoute, type SeedAccount,
 } from '../equilibriumArcSolana'
 import { SOLANA_NTT, bytes32, decodeTransceiverMessage, toHex } from '../equilibriumSolana'
 
@@ -222,5 +223,114 @@ describe('two-sided reconciliation', () => {
   test('the description names both sides, so a failure says which one moved', () => {
     expect(describeRoute(settled)).toContain('hub custody 0')
     expect(describeRoute(settled)).toContain('spoke supply 0')
+  })
+})
+
+describe('seed accounts for a rebuilt spoke ledger', () => {
+  const account: SeedAccount = {
+    pubkey: '11111111111111111111111111111112',
+    lamports: 1_057_920,
+    owner: 'worm2ZoG2kUd4vFXhvjh93UUH596ayRfgQ2MgjNMTth',
+    data: Uint8Array.from([0, 1, 2, 253, 254, 255]),
+  }
+
+  test('a seed file round-trips the bytes and the owner it was written from', () => {
+    expect(parseSeedAccount(seedAccountJson(account))).toEqual(account)
+  })
+
+  test('an empty account round-trips, because the Wormhole fee collector is one', () => {
+    const feeCollector: SeedAccount = { ...account, data: new Uint8Array(0), owner: '11111111111111111111111111111111' }
+    expect(parseSeedAccount(seedAccountJson(feeCollector))).toEqual(feeCollector)
+  })
+
+  test('rentEpoch is written as u64::MAX in full, which a JavaScript number cannot carry', () => {
+    const text = seedAccountJson(account)
+    expect(text).toContain(`"rentEpoch": ${RENT_EXEMPT_EPOCH}`)
+    // The value solana-test-validator would reject, and the reason the field is spliced in as text.
+    expect(String(Number(RENT_EXEMPT_EPOCH))).not.toBe(RENT_EXEMPT_EPOCH)
+  })
+
+  test('space is the length of the data, so a truncated file is refused rather than loaded short', () => {
+    const shortened = seedAccountJson(account).replace('"space": 6', '"space": 7')
+    expect(() => parseSeedAccount(shortened)).toThrow(/declares 7 bytes but carries 6/)
+  })
+
+  test('an encoding other than base64 is refused instead of silently decoded', () => {
+    const other = seedAccountJson(account).replace('"base64"\n', '"base58"\n')
+    expect(() => parseSeedAccount(other)).toThrow(/base58, not base64/)
+  })
+
+  test('an identical rebuild has no differences', () => {
+    expect(seedDifferences([account], [{ ...account, data: Uint8Array.from(account.data) }])).toEqual([])
+  })
+
+  test('a claim missing from the rebuilt ledger is named, not counted', () => {
+    expect(seedDifferences([account], [])).toEqual([`${account.pubkey}: absent from the rebuilt ledger`])
+  })
+
+  test('a single changed byte is reported with its offset, so a rewritten boundary cannot pass', () => {
+    const tampered = { ...account, data: Uint8Array.from([0, 1, 2, 253, 254, 0]) }
+    expect(seedDifferences([account], [tampered])).toEqual([`${account.pubkey}: data differs from byte 5`])
+  })
+
+  test('a re-owned account is a difference even when its bytes match', () => {
+    const reowned = { ...account, owner: '11111111111111111111111111111111' }
+    expect(seedDifferences([account], [reowned])[0]).toContain('owner worm2ZoG')
+  })
+
+  test('lamports are carried but do not decide sameness: a fee collector pays for the publish', () => {
+    expect(seedDifferences([account], [{ ...account, lamports: 1 }])).toEqual([])
+  })
+})
+
+describe('the queued claim release boundary', () => {
+  const queueClock = 1_790_000_000n
+  const duration = 86_400
+  const slack = 60
+  const at = (releaseAfter: bigint, observedClock: bigint) =>
+    reviewReleaseBoundary({ queueClock, releaseAfter, observedClock, duration, slack })
+
+  test('the delay reported is measured between two readings, not assumed from the duration', () => {
+    const review = at(queueClock + 86_400n, queueClock + 86_400n)
+    expect(review.programDelay).toBe(86_400n)
+    expect(review.matchesDuration).toBe(true)
+    expect(review.advancedBy).toBe(86_400n)
+    expect(review.releasable).toBe(true)
+  })
+
+  test('a boundary a couple of slots under the duration still matches, because the readings differ', () => {
+    expect(at(queueClock + 86_398n, queueClock + 86_400n).matchesDuration).toBe(true)
+  })
+
+  test('a boundary further ahead than the declared duration does not match', () => {
+    const review = at(queueClock + 86_401n, queueClock + 90_000n)
+    expect(review.programDelay).toBe(86_401n)
+    expect(review.matchesDuration).toBe(false)
+  })
+
+  test('a materially shortened duration fails the match instead of reading back as 86400', () => {
+    // The defect the measured figure exists to catch: a program whose queue delay is an hour would
+    // have reported the full duration had the delay been computed as releaseAfter minus duration.
+    const review = at(queueClock + 3_600n, queueClock + 3_601n)
+    expect(review.programDelay).toBe(3_600n)
+    expect(review.matchesDuration).toBe(false)
+    expect(review.releasable).toBe(true)
+  })
+
+  test('a boundary exactly at the slack edge is refused, so the window is narrow on purpose', () => {
+    expect(at(queueClock + BigInt(duration - slack), queueClock).matchesDuration).toBe(false)
+    expect(at(queueClock + BigInt(duration - slack + 1), queueClock).matchesDuration).toBe(true)
+  })
+
+  test('a clock one second short of the boundary is not releasable', () => {
+    const review = at(queueClock + 86_400n, queueClock + 86_399n)
+    expect(review.releasable).toBe(false)
+    expect(review.advancedBy).toBe(86_399n)
+  })
+
+  test('an unadvanced clock reports the advance it did not make, rather than reading as ready', () => {
+    const review = at(queueClock + 86_400n, queueClock + 5n)
+    expect(review.advancedBy).toBe(5n)
+    expect(review.releasable).toBe(false)
   })
 })
