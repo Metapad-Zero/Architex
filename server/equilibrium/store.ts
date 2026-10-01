@@ -75,6 +75,16 @@ export function durationMs(name: string, raw: string | undefined, fallback: numb
   return value
 }
 
+/**
+ * Apply a journal's schema as one IMMEDIATE transaction. Every process sharing the journal runs
+ * this at startup: they serialize on the write lock, `apply` re-reads the schema inside it so a
+ * column another opener already added is not added twice, and a crash or failure part-way rolls
+ * back to the previous schema rather than committing some changes without the rest.
+ */
+export function migrateSchema(db: Database, apply: () => void): void {
+  db.transaction(apply).immediate()
+}
+
 /** Single durable host only. Never use a serverless /tmp file as a production job store. */
 export class JobStore implements JobStorage {
   readonly db: Database
@@ -84,17 +94,21 @@ export class JobStore implements JobStorage {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
     this.db = new Database(path, { create: true, strict: true })
     if (path !== ':memory:') chmodSync(path, 0o600)
-    this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;')
+    // The busy timeout goes first: switching a new file to WAL needs an exclusive lock, and a
+    // second process opening the same journal at that moment would otherwise fail immediately.
+    this.db.exec('PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;')
+    // A crash between adding the columns and backfilling them must not commit the defaults: a
+    // paid job would read as unpaid and never be resumed.
+    migrateSchema(this.db, () => this.migrate())
+  }
+  private migrate() {
     this.db.exec(`CREATE TABLE IF NOT EXISTS jobs (identity TEXT PRIMARY KEY, id TEXT UNIQUE NOT NULL, data TEXT NOT NULL, revision INTEGER NOT NULL, lease TEXT, until_ms INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS local_effects (operation TEXT PRIMARY KEY, digest TEXT NOT NULL, result TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS local_supply (job TEXT PRIMARY KEY, issuance TEXT NOT NULL, custody TEXT NOT NULL, remote TEXT NOT NULL, pending TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS local_pool_inventory (operation TEXT PRIMARY KEY, tokens TEXT NOT NULL, quote TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS settled_authorizations (chain_id INTEGER NOT NULL, asset TEXT NOT NULL, nonce TEXT NOT NULL, job TEXT NOT NULL, settlement TEXT, PRIMARY KEY (chain_id, asset, nonce));
       CREATE UNIQUE INDEX IF NOT EXISTS settled_authorizations_job ON settled_authorizations (job);`)
-    this.migrate()
-  }
-  /** Additive, idempotent column migration so an existing store opens without losing jobs. */
-  private migrate() {
+    // Additive, idempotent column migration so an existing store opens without losing jobs.
     const columns = new Set(this.db.query<{ name: string }, []>('PRAGMA table_info(jobs)').all().map((c) => c.name))
     if (!columns.has('state')) this.db.exec(`ALTER TABLE jobs ADD COLUMN state TEXT NOT NULL DEFAULT 'awaiting_payment'`)
     if (!columns.has('payable')) this.db.exec('ALTER TABLE jobs ADD COLUMN payable INTEGER NOT NULL DEFAULT 0')
