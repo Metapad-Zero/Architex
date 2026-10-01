@@ -15,7 +15,8 @@ import { join } from 'node:path'
 import { createTestClient, createWalletClient, encodeFunctionData, http, parseAbi, parseSignature, publicActions, type Address, type Hex } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { erc20Abi, executorAbi, transceiverAbi, usdcAbi } from '../../evm/contracts'
-import { DEV, PINNED } from '../../evm/fork'
+import { DEV, PINNED, deployInfrastructure } from '../../evm/fork'
+import { AUTHORIZATION_TYPES, paymentDomain } from '../../payment'
 import { signedHeader, signedPayment } from '../../evm/__tests__/harness'
 import { ROBINHOOD_MAINNET } from '../../robinhood/pins'
 import { hash } from '../../request'
@@ -34,7 +35,8 @@ const LEASE_MS = 3000
 const recipient = '0x00000000000000000000000000000000000000a1' as Address
 const operator = privateKeyToAccount(DEV.operator)
 const payerKey = privateKeyToAccount(DEV.payer)
-const sink = privateKeyToAccount('0x47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a').address
+const SINK_KEY = '0x47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a' as Hex
+const sink = privateKeyToAccount(SINK_KEY).address
 const quoterAbi = parseAbi([
   'struct QuoteExactInputSingleParams { address tokenIn; address tokenOut; uint256 amountIn; uint24 fee; uint160 sqrtPriceLimitX96; }',
   'function quoteExactInputSingle(QuoteExactInputSingleParams params) returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)',
@@ -134,9 +136,9 @@ async function stopService() {
   }
   service = null
 }
-function worker(j: Journal, jobId: Hex, mode: string): Promise<{ code: number | null; signal: NodeJS.Signals | null; out: string }> {
+function worker(j: Journal, jobId: string, mode: string, kill?: string): Promise<{ code: number | null; signal: NodeJS.Signals | null; out: string }> {
   return new Promise((resolve) => {
-    const child = spawn('bun', ['run', join(import.meta.dir, 'worker.ts'), j.configPath, j.dbPath, jobId, mode, '2000'], { stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn('bun', ['run', join(import.meta.dir, 'worker.ts'), j.configPath, j.dbPath, jobId, mode, '2000', ...(kill ? [kill] : [])], { stdio: ['ignore', 'pipe', 'pipe'] })
     let out = ''
     child.stdout.on('data', (d) => { out += d })
     child.stderr.on('data', (d) => { out += d })
@@ -213,6 +215,7 @@ suite('EQUILIBRIUM one paid launch job across Arc, Base and Robinhood forks', ()
   afterAll(async () => {
     await stopService()
     main?.store.close()
+    attr?.store.close()
     env?.stop()
     if (enabled) writeFileSync(join(process.cwd(), 'output', 'multispoke-fork-evidence.json'), JSON.stringify(json(evidence), null, 2) + '\n')
   }, 30_000)
@@ -475,6 +478,185 @@ suite('EQUILIBRIUM one paid launch job across Arc, Base and Robinhood forks', ()
       await assertLaunched(delayed, result)
       evidence.finality = { robinhoodConfirmations: 3, pendingSteps: waits, executions: await executions(result, delayed.config) }
     } finally { delayed.store.close() }
+  })
+
+  // ---- Attribution, residuals, refunds and claims (carries #18 @ 22adede) on a fresh Arc executor
+  // with 2 Arc confirmations, so every decision below is made under nonzero finality and the executor's
+  // USDC reconciles exactly against this one journal.
+  let attr: Journal
+  let f1: { request: LaunchRequest; job: Job; header: string }
+  let successor: Job
+  const UNRELATED = 89_000_000n
+  const mineArc = (blocks: number) => client('arc').mine({ blocks })
+  /** Run a paid job to completion, mining Arc blocks while a step waits for its confirmations. */
+  async function drive(j: Journal, id: Hex) {
+    let job = j.store.get(id)!
+    for (let i = 0; i < 40 && job.state !== 'complete'; i++) {
+      await mineArc(2)
+      job = await runJob(j.store, j.adapter, id)
+    }
+    return job
+  }
+  async function directAuthorization(job: Job, terms: { to: Address; value: bigint }) {
+    await client('arc').setBalance({ address: payerKey.address, value: 10n ** 20n })
+    const message = { from: payerKey.address, to: terms.to, value: terms.value, validAfter: 0n, validBefore: BigInt(job.request.quote.expires), nonce: job.id }
+    const signature = await payerKey.signTypedData({ domain: paymentDomain(job), types: AUTHORIZATION_TYPES, primaryType: 'TransferWithAuthorization', message })
+    const { r, s, v } = parseSignature(signature)
+    const wallet = createWalletClient({ account: payerKey, transport: http(env.urls.arc) })
+    const receipt = await client('arc').waitForTransactionReceipt({ hash: await wallet.writeContract({ account: payerKey, chain: null, address: usdc, abi: usdcAbi, functionName: 'transferWithAuthorization',
+      args: [message.from, message.to, message.value, 0n, message.validBefore, message.nonce, Number(v ?? 27n), r, s] }) })
+    expect(receipt.status).toBe('success')
+    return receipt
+  }
+  const refundExecutions = async (job: Job) => (await client('arc').getLogs({ address: attr.config.arc.executor, event: executorAbi.find((x) => x.type === 'event' && x.name === 'Executed')!, args: { operation: hash([job.id, 'refund:arc']) }, fromBlock: attr.config.arc.fromBlock })).length
+
+  test_('an unrelated USDC transfer to the executor is never attributed to a held job', async () => {
+    const infra = await deployInfrastructure(env.urls.arc, DEV.operator, null)
+    attr = journal('attr', { arc: { ...env.config.arc, ...infra, confirmations: 2 } })
+    await attr.adapter.verify()
+    const funds = await balance('arc', usdc, payerKey.address)
+    f1 = { request: launchRequest('multispoke-attr-f001', 200), job: undefined as unknown as Job, header: '' }
+    const q = await postTo(attr, f1.request)
+    f1.job = attr.store.get(q.body.jobId!)!
+    f1.header = await signedHeader(f1.job)
+    await payerTo(0n)
+    const first = await postTo(attr, f1.request, f1.header)
+    expect([first.status, first.body.error]).toEqual([503, 'reconciliation_required'])
+    // A stranger sends exactly the quoted amount straight to the executor. It is not this job's payment.
+    const minter = createWalletClient({ account: operator, transport: http(env.urls.arc) })
+    await client('arc').waitForTransactionReceipt({ hash: await minter.writeContract({ account: operator, chain: null, address: usdc, abi: usdcAbi, functionName: 'mint', args: [sink, UNRELATED] }) })
+    await client('arc').setBalance({ address: sink, value: 10n ** 20n })
+    const stranger = createWalletClient({ account: privateKeyToAccount(SINK_KEY), transport: http(env.urls.arc) })
+    const unrelated = await client('arc').waitForTransactionReceipt({ hash: await stranger.writeContract({ account: privateKeyToAccount(SINK_KEY), chain: null, address: usdc, abi: erc20Abi, functionName: 'transfer', args: [infra.executor, UNRELATED] }) })
+    await mineArc(3)
+    const again = await postTo(attr, f1.request, f1.header)
+    expect([again.status, again.body.error]).toEqual([503, 'reconciliation_required'])
+    expect(attr.adapter.slot(f1.job.id)).toMatchObject({ released_reason: null, settled: 0 })
+    expect(attr.adapter.ledger(f1.job.id)).toBeUndefined()
+    const usdcView = await attr.adapter.executorUsdc()
+    expect(json(usdcView) as object).toMatchObject(json({ balance: UNRELATED, jobs: 0n, residualsOwed: 0n, operatorSends: 0n, unattributed: UNRELATED }) as object)
+    await payerTo(funds)
+    evidence.unrelatedReceipt = { executor: infra.executor, job: f1.job.id, unrelatedTx: unrelated.transactionHash, held: attr.adapter.slot(f1.job.id), executorUsdc: usdcView }
+  })
+
+  test_('a nonce spent outside the job is attributed to the original job only once final; its residual is isolated from the successor and operator', async () => {
+    const payerBefore = await balance('arc', usdc, payerKey.address)
+    const spend = await directAuthorization(f1.job, { to: attr.config.arc.executor, value: BigInt(f1.job.total) })
+    expect(payerBefore - await balance('arc', usdc, payerKey.address)).toBe(BigInt(f1.job.total))
+    // Not yet 2 blocks deep: still held, nothing attributed.
+    const shallow = await postTo(attr, f1.request, f1.header)
+    expect(shallow.status).toBe(503)
+    expect(attr.adapter.ledger(f1.job.id)).toBeUndefined()
+    await mineArc(2)
+    const released = await postTo(attr, f1.request, f1.header)
+    expect([released.status, released.body.error]).toEqual([409, 'payment_failed'])
+    const ledger = attr.adapter.ledger(f1.job.id)!
+    expect(ledger).toMatchObject({ outcome: 'used_outside_job', authorized: f1.job.total, received: f1.job.total, residual: f1.job.total, fees_spent: '0', evidence_tx: spend.transactionHash, refund: 'owed' })
+    expect(attr.adapter.explain(f1.job.id)).toContain('refund owed')
+    const view = attr.adapter.view(attr.store.get(f1.job.id)!) as { funds: Record<string, unknown>; attribution: { refund: { state: string } } }
+    expect(view.funds).toMatchObject({ paid: f1.job.total, heldForPayer: f1.job.total, refundable: true, refundableAmount: f1.job.total })
+    expect(view.attribution.refund.state).toBe('owed')
+    // Permanent: a repeat is refused with the same attribution.
+    const repeat = await postTo(attr, f1.request, f1.header)
+    expect([repeat.status, repeat.body.error]).toEqual([409, 'payment_failed'])
+    // A successor launches with its own payment; the residual is untouched.
+    const s = launchRequest('multispoke-attr-s001')
+    const sq = await postTo(attr, s)
+    successor = attr.store.get(sq.body.jobId!)!
+    const paid = await postTo(attr, s, await signedHeader(successor))
+    expect(paid.status).toBe(202)
+    successor = await drive(attr, successor.id)
+    expect(successor.state).toBe('complete')
+    await assertLaunched(attr, successor)
+    const account = attr.adapter.usdcAccount(successor)!
+    expect(json(account) as object).toMatchObject(json({ inflow: 89_000_000n, usdcSpent: { arcPool: 10_000_000n }, held: 79_000_000n, spokeQuoteInjected: { base: 10_000_000n, robinhood: 10_000_000n },
+      disposition: { platformFee: 1_000_000n, spokeQuoteReserve: 20_000_000n, stepBudgets: 58_000_000n }, reconciled: true }) as object)
+    expect(account.disposition.operatorReimbursable).toBeGreaterThan(0n)
+    const sv = attr.adapter.view(successor) as { funds: Record<string, unknown> }
+    expect(sv.funds).toMatchObject({ quoteInventoryDeployed: '10000000', heldOnExecutor: '79000000', spokeQuoteInjected: { base: '10000000', robinhood: '10000000' }, feesSpent: '0', reconciled: true })
+    await mineArc(2)
+    const usdcView = await attr.adapter.executorUsdc()
+    expect(json(usdcView) as object).toMatchObject(json({ balance: UNRELATED + 89_000_000n + 79_000_000n, jobs: 79_000_000n, residualsOwed: 89_000_000n, unattributed: UNRELATED }) as object)
+    // An operator send that would reach into the residual is refused before anything is sent; one within the unowed balance is allowed.
+    const spendable = usdcView.balance - usdcView.residualsOwed
+    const greedy = await attr.adapter.operatorSend('greedy-1', sink, spendable + 1n).then(() => 'sent', (e: unknown) => (e instanceof LaunchError ? e.code : String(e)))
+    expect(greedy).toBe('residual_reserved')
+    expect(attr.adapter.ledger(f1.job.id)!.refund).toBe('owed')
+    evidence.attribution = { job: f1.job.id, spendTx: spend.transactionHash, ledger, view: view.funds, successor: successor.id, successorUsdc: account, executorUsdc: usdcView, greedy }
+  })
+
+  test_('a refund killed after send is resumed once, stays held until final, and cannot be replayed', async () => {
+    const payerBefore = await balance('arc', usdc, payerKey.address)
+    const killed = await worker(attr, f1.job.id, 'refund', `kill-after-send:refund:${f1.job.id}`)
+    expect(killed.signal).toBe('SIGKILL')
+    // Restart: the journal knows a refund is prepared but not its outcome; the residual stays reserved.
+    expect(attr.adapter.refundStatus(f1.job.id)!.state).toBe('prepared')
+    expect(attr.adapter.ledger(f1.job.id)!.refund).toBe('owed')
+    // Resume. Until the killed worker's execution is in a committed block with its receipt, the ledger truthfully stays 'owed'.
+    let submitted = await attr.adapter.refund(f1.job.id)
+    for (let i = 0; i < 20 && submitted.refund === 'owed'; i++) { await sleep(250); submitted = await attr.adapter.refund(f1.job.id) }
+    expect(submitted.refund).toBe('submitted')
+    expect(attr.adapter.explain(f1.job.id)).toContain('not yet final')
+    await mineArc(2)
+    const done = await attr.adapter.refund(f1.job.id)
+    expect(done).toMatchObject({ refund: 'refunded', refund_tx: submitted.refund_tx })
+    expect(await balance('arc', usdc, payerKey.address) - payerBefore).toBe(BigInt(f1.job.total))
+    expect(await refundExecutions(f1.job)).toBe(1)
+    // Replays: the adapter returns the final ledger; the operator's raw execute reverts.
+    expect((await attr.adapter.refund(f1.job.id)).refund_tx).toBe(done.refund_tx)
+    const op = attr.store.db.query<{ bytes: string; digest: Hex }, [string]>('SELECT bytes, digest FROM multispoke_ops WHERE operation=?').get(hash([f1.job.id, 'refund:arc']))!
+    const plan = JSON.parse(op.bytes) as { operation: Hex; calls: { target: Address; value: string; data: Hex }[] }
+    expect(await reverts('arc', operator.address, attr.config.arc.executor, encodeFunctionData({ abi: executorAbi, functionName: 'execute', args: [plan.operation, op.digest, plan.calls.map((c) => ({ target: c.target, value: BigInt(c.value), data: c.data }))] }))).toBe(true)
+    expect(await refundExecutions(f1.job)).toBe(1)
+    const view = attr.adapter.view(attr.store.get(f1.job.id)!) as { funds: Record<string, unknown> }
+    expect(view.funds).toMatchObject({ paid: f1.job.total, heldForPayer: '0', refundable: false, refundableAmount: '0' })
+    const usdcView = await attr.adapter.executorUsdc()
+    expect(json(usdcView) as object).toMatchObject(json({ residualsOwed: 0n, jobs: 79_000_000n, unattributed: UNRELATED }) as object)
+    evidence.refund = { job: f1.job.id, killed: killed.signal, submitted: submitted.refund, final: done, executions: await refundExecutions(f1.job), view: view.funds, executorUsdc: usdcView }
+  })
+
+  test_('an authorization with other terms under the job nonce is held for the payer, never counted as payment', async () => {
+    const f2 = launchRequest('multispoke-attr-f002', 200)
+    const q = await postTo(attr, f2)
+    const job = attr.store.get(q.body.jobId!)!
+    const spend = await directAuthorization(job, { to: attr.config.arc.executor, value: 50_000_000n })
+    await mineArc(2)
+    const reply = await postTo(attr, f2, await signedHeader(job))
+    expect([reply.status, reply.body.error]).toEqual([409, 'payment_failed'])
+    expect(attr.adapter.ledger(job.id)).toMatchObject({ outcome: 'spent_by_other_authorization', received: '50000000', residual: '50000000', evidence_tx: spend.transactionHash, refund: 'owed' })
+    const view = attr.adapter.view(attr.store.get(job.id)!) as { funds: Record<string, unknown> }
+    expect(view.funds).toMatchObject({ paid: '0', heldForPayer: '50000000', refundable: true })
+    await attr.adapter.refund(job.id)
+    await mineArc(2)
+    expect((await attr.adapter.refund(job.id)).refund).toBe('refunded')
+    evidence.otherTerms = { job: job.id, spendTx: spend.transactionHash, ledger: attr.adapter.ledger(job.id), view: view.funds }
+  })
+
+  test_('operator sends in two processes cannot together spend more than the unowed balance', async () => {
+    await mineArc(2)
+    const before = await attr.adapter.executorUsdc()
+    expect(before.residualsOwed).toBe(0n)
+    const each = before.balance / 2n + 1n
+    const [a, b] = await Promise.all([worker(attr, '-', `operator:race-a:${sink}:${each}`), worker(attr, '-', `operator:race-b:${sink}:${each}`)])
+    const outcomes = [lastLine(a.out), lastLine(b.out)]
+    // Never both: each claim is committed before its check, so at least the later one sees the other.
+    // Both may be refused when each sees the other's pending claim; that is the conservative outcome.
+    expect(outcomes.filter((o) => o.ok).length).toBeLessThanOrEqual(1)
+    for (const o of outcomes) if (!o.ok) expect(o.code).toBe('residual_reserved')
+    let winner = outcomes[0].ok ? 'race-a' : outcomes[1].ok ? 'race-b' : null
+    if (!winner) {
+      // Neither was sent, so their claims were dropped; the same send alone now succeeds.
+      expect(lastLine((await worker(attr, '-', `operator:race-a:${sink}:${each}`)).out).ok).toBe(true)
+      winner = 'race-a'
+    }
+    // The same name with other parameters is a conflict, never a second transfer.
+
+    const conflict = await attr.adapter.operatorSend(winner, sink, 1n).then(() => 'sent', (e: unknown) => (e instanceof LaunchError ? e.code : String(e)))
+    expect(conflict).toBe('operation_conflict')
+    await mineArc(2)
+    const after = await attr.adapter.executorUsdc()
+    expect(json(after) as object).toMatchObject(json({ balance: before.balance - each, operatorSends: each, residualsOwed: 0n, unattributed: UNRELATED }) as object)
+    evidence.operatorRace = { each, outcomes, conflict, before, after }
   })
 
   test_('the public record shows labels and chain-read supply for every job', async () => {

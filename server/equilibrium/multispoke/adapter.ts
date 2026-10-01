@@ -1,10 +1,11 @@
 import type { Database } from 'bun:sqlite'
 import {
-  BaseError, ContractFunctionRevertedError, ContractFunctionZeroDataError, createPublicClient, createWalletClient, decodeEventLog, defineChain, encodeAbiParameters, encodeFunctionData, getAddress,
-  http, parseSignature, zeroAddress, type Address, type Hex, type PublicClient, type TransactionReceipt, type WalletClient,
+  BaseError, ContractFunctionRevertedError, ContractFunctionZeroDataError, createPublicClient, createWalletClient, decodeEventLog, decodeFunctionData, defineChain, encodeAbiParameters, encodeFunctionData, getAddress,
+  http, parseAbi, parseSignature, zeroAddress, type Address, type Hex, type PublicClient, type TransactionReceipt, type WalletClient,
 } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { hash, identity } from '../request'
+import { publicJob } from '../runner'
 import { LaunchError, type Atoms, type EffectContext, type EffectResult, type Job, type LaunchRequest, type PreparedEffect, type PromotionalTokenAdapter, type Step, type StepKind } from '../types'
 import {
   CODE, NTT_COMMIT, architexFactoryAbi, architexPairAbi, coreAbi, erc20Abi, executorAbi, linked, nttAbi, predict, proxyInit, spokeAbi, transceiverAbi,
@@ -31,6 +32,17 @@ import { publishedFrom, type VaaSource } from '../evm/vaa'
  * Launch slots carry #12's one-launch scope and #18's release rule together: with `launches` set, at
  * most that many jobs may hold a payment authorization at once, and a slot moves to another job only
  * once chain state proves the holder's payment can never settle. A released job is refused for good.
+ *
+ * Money follows #18's correction (22adede). A spent nonce is attributed only from the finalized
+ * transaction that spent it; whatever reached the Arc executor is recorded against the ORIGINAL job
+ * in multispoke_payment_ledger in the same transaction as the release, and stays reserved for it.
+ * Every Arc send that moves executor USDC (a job's Arc pool, a refund, an operator send) first takes a
+ * durable claim in the shared journal and checks the executor's final balance against owed residuals
+ * and other unfinished claims, so no successor, operator or other process can spend a residual. Only
+ * `refund` moves a residual, back to its payer, as one executor operation that executes at most once.
+ * `usdcAccount` reconciles a completed job's Arc USDC: what came in, what actually left, and what is
+ * held, separating the spoke quote inventory injected on the spokes, the platform fee and the
+ * operator's native gas from USDC actually spent.
  *
  * Every RPC must be loopback. Public Robinhood routes stay closed (robinhood/adapter.ts), and this
  * module has no testnet or live mode.
@@ -95,7 +107,39 @@ export interface MultispokeConfig {
   launches?: number
   receiptTimeoutMs?: number
 }
-export interface MultispokeOptions { afterSend?: (step: Step, tx: Hex) => void }
+/** Test seam: runs right after a transaction is handed to the RPC, before anything about it is recorded. `label` is a step id, `refund:<job>` or `operator:<name>`. */
+export interface MultispokeOptions { afterSend?: (label: string, tx: Hex) => void }
+/** Why a job's payment can never settle, with what (if anything) its authorization moved. */
+export interface Unsettleable {
+  reason: string
+  /** The Arc block `confirmations` deep at which this was decided. */
+  block: string
+  outcome: 'expired_unused' | 'cancelled' | 'used_outside_job' | 'spent_by_other_authorization'
+  /** USDC atoms that reached the Arc executor under this job's nonce. */
+  received: string
+  /** The transaction that spent the nonce, when one did. */
+  evidence: string | null
+}
+/** The original job's money after a release. */
+export interface PaymentLedger {
+  job: string
+  payer: string
+  outcome: Unsettleable['outcome']
+  authorized: string
+  received: string
+  fees_spent: string
+  residual: string
+  evidence_tx: string | null
+  evidence_block: string
+  /** 'owed' while the residual sits on the executor, 'submitted' once the refund executed but is not final, 'refunded' only when final. */
+  refund: 'none' | 'owed' | 'submitted' | 'refunded'
+  refund_tx: string | null
+  refund_block: string | null
+  recorded_at: number
+}
+/** What is known about a refund now: 'prepared' (journalled, may be sent), 'uncertain' (handed to the RPC, no executed receipt read). */
+export interface RefundStatus { state: 'none' | 'owed' | 'prepared' | 'uncertain' | 'submitted' | 'refunded'; transaction: string | null; block: string | null }
+const authorizationEvents = parseAbi(['event AuthorizationUsed(address indexed authorizer, bytes32 indexed nonce)', 'event AuthorizationCanceled(address indexed authorizer, bytes32 indexed nonce)'])
 
 /** The exact label set this composition accepts. A configuration cannot relabel a fixture as funds. */
 export const MULTISPOKE_LABELS: MultispokeLabels = {
@@ -175,7 +219,13 @@ export function multispokeAdapter(config: MultispokeConfig, db: Database, option
   db.exec(`CREATE TABLE IF NOT EXISTS multispoke_broadcasts (operation TEXT NOT NULL, side TEXT NOT NULL, tx TEXT NOT NULL, sent_at INTEGER NOT NULL, PRIMARY KEY (operation, tx));
     CREATE TABLE IF NOT EXISTS multispoke_vaas (operation TEXT PRIMARY KEY, vaa TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS multispoke_launches (job TEXT PRIMARY KEY, identity TEXT NOT NULL, payer TEXT NOT NULL, valid_before INTEGER NOT NULL, settled INTEGER NOT NULL DEFAULT 0,
-      released_reason TEXT, released_block TEXT, created_at INTEGER NOT NULL);`)
+      released_reason TEXT, released_block TEXT, created_at INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS multispoke_payment_ledger (job TEXT PRIMARY KEY, payer TEXT NOT NULL, outcome TEXT NOT NULL, authorized TEXT NOT NULL, received TEXT NOT NULL,
+      fees_spent TEXT NOT NULL, residual TEXT NOT NULL, evidence_tx TEXT, evidence_block TEXT NOT NULL, refund TEXT NOT NULL, refund_tx TEXT, refund_block TEXT, recorded_at INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS multispoke_ops (operation TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL, digest TEXT NOT NULL, bytes TEXT NOT NULL, created_at INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS multispoke_usdc_claims (operation TEXT PRIMARY KEY, name TEXT NOT NULL, amount TEXT NOT NULL, state TEXT NOT NULL, created_at INTEGER NOT NULL);`)
+  // Journals from before attribution lack the bound amount. Such a holder is never attributed a transfer: it cannot be matched.
+  if (!db.query("SELECT 1 FROM pragma_table_info('multispoke_launches') WHERE name='value'").get()) db.exec('ALTER TABLE multispoke_launches ADD COLUMN value TEXT')
   const sending: Record<Side, Promise<unknown>> = { arc: Promise.resolve(), base: Promise.resolve(), robinhood: Promise.resolve() }
   const strip = (c: HubConfig | SpokeConfig) => ({ ...c, rpc: undefined, fromBlock: undefined, vaa: 'vaa' in c ? c.vaa.kind : undefined, priorityFeeWei: undefined,
     usdcAtomsPerNative: c.usdcAtomsPerNative.toString(), maxFeePerGasWei: 'maxFeePerGasWei' in c ? c.maxFeePerGasWei?.toString() : undefined })
@@ -204,64 +254,194 @@ export function multispokeAdapter(config: MultispokeConfig, db: Database, option
     return getAddress(`0x${out.slice(26, 66)}`)
   }
 
-  // ---- Launch slots -------------------------------------------------------------------------
-  interface Slot { job: string; identity: string; payer: string; valid_before: number; settled: number; released_reason: string | null; released_block: string | null }
+  // ---- Launch slots and payment attribution (carried from #18 at 22adede) --------------------
+  interface Slot { job: string; identity: string; payer: string; value: string | null; valid_before: number; settled: number; released_reason: string | null; released_block: string | null }
   const slot = (job: string) => db.query<Slot, [string]>('SELECT * FROM multispoke_launches WHERE job=?').get(job) ?? undefined
   const releasedFor = (identityHash: string) => db.query<Slot, [string]>('SELECT * FROM multispoke_launches WHERE identity=? AND released_reason IS NOT NULL').get(identityHash) ?? undefined
   const holders = (except: string) => db.query<Slot, [string]>('SELECT * FROM multispoke_launches WHERE released_reason IS NULL AND job!=?').all(except)
-  const failed = (s: Pick<Slot, 'job' | 'released_reason' | 'released_block'>) =>
-    new LaunchError(409, 'payment_failed', `Job ${s.job}'s payment can never settle (${s.released_reason} at Arc block ${s.released_block}); its launch slot was released. This job executed no charge. Start a new request.`)
+  const ledgerOf = (job: string) => db.query<PaymentLedger, [string]>('SELECT * FROM multispoke_payment_ledger WHERE job=?').get(job) ?? undefined
+  /** Residual USDC on the Arc executor that belongs to released jobs and has not provably left it. */
+  const owed = (except?: string) => db.query<{ residual: string; job: string }, []>("SELECT residual, job FROM multispoke_payment_ledger WHERE refund IN ('owed','submitted')").all()
+    .filter((r) => r.job !== except).reduce((n, r) => n + BigInt(r.residual), 0n)
+  const refundOperation = (job: string) => hash([job, 'refund:arc'])
+
+  /** The ledger's refund state, refined by the journal: a refund can be prepared or on the wire before its receipt is read. */
+  function refundStatus(l: PaymentLedger): RefundStatus {
+    if (l.refund === 'none' || l.refund === 'submitted' || l.refund === 'refunded') return { state: l.refund, transaction: l.refund_tx, block: l.refund_block }
+    const op = refundOperation(l.job)
+    if (!db.query('SELECT 1 FROM multispoke_ops WHERE operation=?').get(op)) return { state: 'owed', transaction: null, block: null }
+    const sent = db.query<{ tx: string }, [string]>('SELECT tx FROM multispoke_broadcasts WHERE operation=? ORDER BY sent_at DESC').get(op)
+    return sent ? { state: 'uncertain', transaction: sent.tx, block: null } : { state: 'prepared', transaction: null, block: null }
+  }
+
+  /** A released job's error, stating what its authorization actually did with the payer's money. */
+  function failed(job: string): LaunchError {
+    const s = slot(job)!
+    const l = ledgerOf(job)
+    const head = `Job ${job}'s payment can never settle (${s.released_reason} at Arc block ${s.released_block}); its launch slot was released for good.`
+    if (!l) return new LaunchError(409, 'payment_failed', `${head} No payment attribution was recorded for it; read the executor's USDC history before assuming nothing was charged. Start a new request.`)
+    if (l.outcome === 'expired_unused') return new LaunchError(409, 'payment_failed', `${head} Its authorization was never used: nothing was charged. Start a new request.`)
+    if (l.outcome === 'cancelled') return new LaunchError(409, 'payment_failed', `${head} The payer cancelled its authorization in ${l.evidence_tx}: nothing was charged. Start a new request.`)
+    const r = refundStatus(l)
+    const refund = {
+      none: '',
+      owed: `Residual ${l.residual}: refund owed to ${l.payer}; no refund has been sent. It is held for this job and no other job or operator send may spend it.`,
+      prepared: `Residual ${l.residual}: a refund to ${l.payer} is prepared and may already have been sent; its outcome is unknown. It stays held for this job until the refund is final.`,
+      uncertain: `Residual ${l.residual}: a refund to ${l.payer} was sent in ${r.transaction} and has no executed receipt yet; its outcome is unknown. It stays held for this job until the refund is final.`,
+      submitted: `Residual ${l.residual}: refunded to ${l.payer} in ${r.transaction} at Arc block ${r.block}, not yet final. It stays held for this job until then.`,
+      refunded: `Residual ${l.residual}: refunded to ${l.payer} in ${r.transaction}, final at Arc block ${r.block}. Nothing of it remains on the executor.`,
+    }[r.state]
+    if (l.outcome === 'spent_by_other_authorization') {
+      if (l.received === '0') return new LaunchError(409, 'payment_failed', `${head} Its nonce was spent in ${l.evidence_tx} by an authorization with other terms, and none of that transfer reached the executor. Nothing is attributed to this job. Start a new request.`)
+      return new LaunchError(409, 'payment_failed', `${head} Its nonce was spent in ${l.evidence_tx} by an authorization with other terms, which moved ${l.received} USDC atoms to the Arc executor. That is not this job's payment and fulfilled nothing. ${refund} Start a new request.`)
+    }
+    return new LaunchError(409, 'payment_failed', `${head} Its authorization was used outside the job in ${l.evidence_tx}: ${l.received} USDC atoms reached the Arc executor and nothing was fulfilled. Fees spent: ${l.fees_spent}. ${refund} Start a new request.`)
+  }
 
   /**
-   * Why a job's payment can never settle, or null while it still could. Read at one block
-   * `confirmations` deep: the payment operation is unexecuted there, and the authorization has
-   * expired by that block's time or its nonce is spent. Block time only grows and a spent nonce
-   * makes the persisted bytes revert, so no later block can execute the payment.
+   * Why a job's payment can never settle, or null while it still could (or while that cannot yet be
+   * proven). Read at one block `confirmations` deep: the payment operation is unexecuted there, and
+   * either the nonce is spent by a finalized, identified transaction whose transfer is matched
+   * against the bound terms, or the authorization's validBefore has passed unused.
    */
-  async function unsettleable(job: string, payer: Address, validBefore: bigint): Promise<{ reason: string; block: string } | null> {
+  async function unsettleable(job: string, r: Pick<Slot, 'payer' | 'value' | 'valid_before'>): Promise<Unsettleable | null> {
     const at = await finalBlock('arc')
     if (await executed('arc', hash([job, 'payment:arc']), at) !== ZERO) {
       db.query('UPDATE multispoke_launches SET settled=1 WHERE job=?').run(job)
       return null
     }
+    const spentAt = (blockNumber: bigint) => clients.arc.readContract({ address: config.arc.usdc, abi: usdcAbi, functionName: 'authorizationState', args: [r.payer as Address, job as Hex], blockNumber })
+    // Spent first: an authorization used before it expired moved money even if it has expired since.
+    if (await spentAt(at)) return spentBy(job, r, at, spentAt)
     const block = await clients.arc.getBlock({ blockNumber: at })
-    if (block.timestamp >= validBefore) return { reason: 'authorization expired', block: at.toString() }
-    const spent = await clients.arc.readContract({ address: config.arc.usdc, abi: usdcAbi, functionName: 'authorizationState', args: [payer, job as Hex], blockNumber: at })
-    return spent ? { reason: 'authorization nonce spent elsewhere', block: at.toString() } : null
+    if (block.timestamp >= BigInt(r.valid_before)) return { reason: 'authorization expired', block: at.toString(), outcome: 'expired_unused', received: '0', evidence: null }
+    return null
   }
-  /** Release a slot for good. Idempotent; the first recorded reason stands. */
-  function release(job: Job, why: { reason: string; block: string }) {
-    const a = job.payment!.authorization
-    db.query(`INSERT INTO multispoke_launches(job, identity, payer, valid_before, created_at, released_reason, released_block) VALUES(?,?,?,?,?,?,?)
-      ON CONFLICT(job) DO UPDATE SET released_reason=COALESCE(released_reason, excluded.released_reason), released_block=COALESCE(released_block, excluded.released_block)`)
-      .run(job.id, job.identity, a.from.toLowerCase(), Number(a.validBefore), Date.now(), why.reason, why.block)
+  /**
+   * The finalized transaction that spent the nonce, and what it moved. The nonce flipped in exactly
+   * one block at or below `at`: step back until it is unspent, then bisect. That block must hold one
+   * AuthorizationUsed or AuthorizationCanceled log for (payer, nonce); a used authorization is
+   * attributed only from the transfer that follows that log in the same transaction. An unrelated
+   * USDC transfer to the executor is never attributed. Anything less certain returns null, which
+   * keeps the slot held.
+   */
+  async function spentBy(job: string, r: Pick<Slot, 'payer' | 'value'>, at: bigint, spentAt: (b: bigint) => Promise<boolean>): Promise<Unsettleable | null> {
+    let hi = at; let lo = at; let stride = 1n
+    while (true) {
+      if (lo === 0n) return null
+      lo = lo > stride ? lo - stride : 0n
+      if (!await spentAt(lo)) break
+      hi = lo; stride *= 2n
+    }
+    while (hi - lo > 1n) { const mid = (lo + hi) / 2n; if (await spentAt(mid)) hi = mid; else lo = mid }
+    const logs = (await Promise.all(authorizationEvents.map((event) => clients.arc.getLogs({ address: config.arc.usdc, event, args: { authorizer: r.payer as Address, nonce: job as Hex }, fromBlock: hi, toBlock: hi })))).flat()
+    if (logs.length !== 1) return null
+    const [log] = logs
+    const base = { block: at.toString(), evidence: log.transactionHash }
+    if (log.eventName === 'AuthorizationCanceled') return { ...base, reason: 'authorization cancelled', outcome: 'cancelled', received: '0' }
+    const receipt = await clients.arc.getTransactionReceipt({ hash: log.transactionHash })
+    if (receipt.status !== 'success') return null
+    const moved = receipt.logs.filter((l) => same(l.address, config.arc.usdc) && l.logIndex > log.logIndex).flatMap((l) => {
+      try {
+        const e = decodeEventLog({ abi: erc20Abi, data: l.data, topics: l.topics })
+        return e.eventName === 'Transfer' && same(e.args.from, r.payer) ? [e.args] : []
+      } catch { return [] }
+    })[0]
+    if (!moved) return null
+    if (r.value !== null && same(moved.to, config.arc.executor) && moved.value === BigInt(r.value)) return { ...base, reason: 'authorization used outside the job', outcome: 'used_outside_job', received: moved.value.toString() }
+    // Other terms are not this job's payment, but money they moved onto the executor is still the payer's and is held for return.
+    return { ...base, reason: 'authorization nonce spent by other terms', outcome: 'spent_by_other_authorization', received: same(moved.to, config.arc.executor) ? moved.value.toString() : '0' }
+  }
+  /**
+   * Release a slot for good and record the original job's money, in one transaction. Idempotent:
+   * the first decision stands. A released job ran no executor operation (release requires its
+   * payment unexecuted, and every later step requires a completed payment), so its whole receipt
+   * is residual.
+   */
+  function release(job: string, r: Pick<Slot, 'identity' | 'payer' | 'value' | 'valid_before'>, why: Unsettleable) {
+    db.transaction(() => {
+      db.query(`INSERT INTO multispoke_launches(job, identity, payer, value, valid_before, created_at, released_reason, released_block) VALUES(?,?,?,?,?,?,?,?)
+        ON CONFLICT(job) DO UPDATE SET released_reason=COALESCE(released_reason, excluded.released_reason), released_block=COALESCE(released_block, excluded.released_block)`)
+        .run(job, r.identity, r.payer.toLowerCase(), r.value, r.valid_before, Date.now(), why.reason, why.block)
+      db.query(`INSERT OR IGNORE INTO multispoke_payment_ledger(job, payer, outcome, authorized, received, fees_spent, residual, evidence_tx, evidence_block, refund, recorded_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(job, r.payer.toLowerCase(), why.outcome, r.value ?? 'unknown', why.received, '0', why.received, why.evidence, why.block, BigInt(why.received) > 0n ? 'owed' : 'none', Date.now())
+    }).immediate()
   }
   /** A holder that is settled, or whose authorization has not expired yet, still counts. */
   const live = (s: Slot) => s.settled === 1 || Date.now() / 1000 < s.valid_before
+  const slotOf = (job: Job): Pick<Slot, 'identity' | 'payer' | 'value' | 'valid_before'> => {
+    const a = job.payment!.authorization
+    return { identity: job.identity, payer: a.from.toLowerCase(), value: a.value, valid_before: Number(a.validBefore) }
+  }
 
   /**
    * Take this job's slot before its payment can be sent. Holders whose payments provably can never
-   * settle are released first; the count and insert then happen in one IMMEDIATE transaction, so
-   * two processes racing for the last slot cannot both take it.
+   * settle are released first, with their attribution; the count and insert then happen in one
+   * IMMEDIATE transaction, so two processes racing for the last slot cannot both take it.
    */
   async function takeSlot(job: Job) {
     const own = slot(job.id)
-    if (own?.released_reason) throw failed(own)
+    if (own?.released_reason) throw failed(job.id)
     if (own) return
     const limit = config.launches
     if (limit !== undefined && holders(job.id).length >= limit) {
       for (const h of holders(job.id).filter((x) => !x.settled)) {
-        const why = await unsettleable(h.job, h.payer as Address, BigInt(h.valid_before))
-        if (why) db.query('UPDATE multispoke_launches SET released_reason=?, released_block=? WHERE job=? AND released_reason IS NULL').run(why.reason, why.block, h.job)
+        const why = await unsettleable(h.job, h)
+        if (why) release(h.job, h, why)
       }
     }
-    const a = job.payment!.authorization
+    const s = slotOf(job)
     db.transaction(() => {
       if (slot(job.id)) return
       const taken = holders(job.id)
       if (limit !== undefined && taken.length >= limit) throw new LaunchError(409, 'launch_limit', `${taken.length} launch(es) already hold the approved slot(s): ${taken.map((t) => t.job).join(', ')}. Nothing was charged.`)
-      db.query('INSERT INTO multispoke_launches(job, identity, payer, valid_before, created_at) VALUES(?,?,?,?,?)').run(job.id, job.identity, a.from.toLowerCase(), Number(a.validBefore), Date.now())
+      db.query('INSERT INTO multispoke_launches(job, identity, payer, value, valid_before, created_at) VALUES(?,?,?,?,?,?)').run(job.id, s.identity, s.payer, s.value, s.valid_before, Date.now())
     }).immediate()
+  }
+
+  // ---- Executor USDC claims (job, refund and operator sends) ---------------------------------
+  /**
+   * Arc USDC a plan sends out of the executor. Plans make only plain transfers (outflows) and the
+   * payment's transferWithAuthorization (an inflow from the payer); any other USDC call is refused.
+   */
+  function usdcOut(calls: Plan['calls']) {
+    return calls.filter((c) => same(c.target, config.arc.usdc)).reduce((n, c) => {
+      const d = decodeFunctionData({ abi: [...erc20Abi, ...usdcAbi], data: c.data })
+      if (d.functionName === 'transferWithAuthorization') return n
+      if (d.functionName !== 'transfer') throw new Error(`Unplanned USDC call ${d.functionName}`)
+      return n + d.args[1]
+    }, 0n)
+  }
+  /**
+   * Coordinate an Arc send that moves executor USDC across every process sharing this journal. The
+   * claim is committed BEFORE the check, so of two racing sends the later-committed one always sees
+   * the other's claim. Funds are read at a block `confirmations` deep; claims not executed at that
+   * depth are subtracted, as are residuals owed to released jobs, except the one this send refunds.
+   * Any failure to establish this refuses the send. Returns an undo for when nothing was then sent.
+   * Journals that share an executor do not see each other's claims: one journal per executor.
+   */
+  async function claim(name: string, operation: Hex, calls: Plan['calls'], refunding?: string): Promise<() => void> {
+    const out = usdcOut(calls)
+    if (out === 0n) return () => undefined
+    const fresh = db.query("INSERT OR IGNORE INTO multispoke_usdc_claims(operation, name, amount, state, created_at) VALUES(?,?,?,'pending',?)").run(operation, name, out.toString(), Date.now()).changes > 0
+    const drop = () => { if (fresh) db.query("DELETE FROM multispoke_usdc_claims WHERE operation=? AND state='pending'").run(operation) }
+    try {
+      const at = await finalBlock('arc')
+      let others = 0n
+      for (const c of db.query<{ operation: Hex; amount: string }, [string]>("SELECT operation, amount FROM multispoke_usdc_claims WHERE state='pending' AND operation<>?").all(operation)) {
+        // Executed at the depth read below: already in that balance, and final from now on.
+        if (await executed('arc', c.operation, at) !== ZERO) db.query("UPDATE multispoke_usdc_claims SET state='final' WHERE operation=?").run(c.operation)
+        else others += BigInt(c.amount)
+      }
+      const held = await clients.arc.readContract({ address: config.arc.usdc, abi: erc20Abi, functionName: 'balanceOf', args: [config.arc.executor], blockNumber: at })
+      const reserved = owed(refunding)
+      if (held - reserved - others < out) throw new LaunchError(409, 'residual_reserved', `At Arc block ${at} the executor holds ${held} USDC atoms; ${reserved} are owed to released jobs and ${others} are claimed by sends not yet final. ${name} needs ${out}. Nothing was sent.`)
+    } catch (cause) {
+      drop()
+      if (cause instanceof LaunchError) throw cause
+      throw new LaunchError(503, 'residual_reserved', `Executor USDC for ${name} could not be established (${cause instanceof Error ? cause.message.split('\n')[0] : 'unreadable'}). Nothing was sent.`)
+    }
+    return drop
   }
 
   // ---- Plans --------------------------------------------------------------------------------
@@ -420,12 +600,200 @@ export function multispokeAdapter(config: MultispokeConfig, db: Database, option
     return { maxPriorityFeePerGas: tip, maxFeePerGas: ((await clients[side].getBlock()).baseFeePerGas ?? 0n) * 2n + tip }
   }
   /** Refuse to send anything whose worst-case cost could exceed the step's budget. */
-  async function worstCase(side: Side, step: Step, gas: bigint, maxFeePerGas: bigint, data: Hex) {
+  async function worstCase(side: Side, label: string, budget: bigint, gas: bigint, maxFeePerGas: bigint, data: Hex) {
     const c = chain(side)
     let worst = gas * maxFeePerGas
     if ('opStackL1Fee' in c && c.opStackL1Fee) worst += await clients[side].readContract({ address: GAS_PRICE_ORACLE, abi: gasPriceOracleAbi, functionName: 'getL1FeeUpperBound', args: [BigInt((data.length - 2) / 2 + 68)] })
     const atoms = (worst * c.usdcAtomsPerNative + 10n ** 18n - 1n) / 10n ** 18n
-    if (atoms > BigInt(step.budget)) throw new LaunchError(409, 'budget', `${step.id} could cost up to ${atoms} USDC atoms, above its ${step.budget} budget. Nothing was sent.`)
+    if (atoms > budget) throw new LaunchError(409, 'budget', `${label} could cost up to ${atoms} USDC atoms, above its ${budget} budget. Nothing was sent.`)
+  }
+  /**
+   * Send one executor operation from its persisted plan, exactly as a job step is sent. Any Arc send
+   * that moves executor USDC takes a claim first; the claim is dropped only if the send provably never
+   * left (refused in simulation or estimation before anything was signed).
+   */
+  async function send(p: Plan, digest: Hex, label: string, budget: bigint, refunding?: string) {
+    const client = clients[p.side]
+    const run = async () => {
+      const current = await executed(p.side, p.operation, 'latest')
+      if (current === digest) return
+      if (current !== ZERO) throw new LaunchError(409, 'operation_conflict', `${label} already executed with other bytes (${current}).`)
+      // A crashed or stale worker's identical copy may still be in the mempool: observe it instead of paying for a second send.
+      if (await executed(p.side, p.operation, 'pending') === digest) return
+      const abandon = p.side === 'arc' ? await claim(label, p.operation, p.calls, refunding) : () => undefined
+      let gas: bigint
+      try {
+        await client.simulateContract({ account, address: p.executor, abi: executorAbi, functionName: 'execute', args: executeArgs(p, digest), value: BigInt(p.value) })
+        gas = await client.estimateContractGas({ account, address: p.executor, abi: executorAbi, functionName: 'execute', args: executeArgs(p, digest), value: BigInt(p.value) })
+      } catch (cause) {
+        // Another worker executed it between the read and the simulation: nothing to send, and its claim stands.
+        const revert = cause instanceof BaseError ? cause.walk((e) => e instanceof ContractFunctionRevertedError) : null
+        if (revert instanceof ContractFunctionRevertedError && revert.data?.errorName === 'OperationDone') return
+        abandon()
+        throw cause
+      }
+      const limit = (gas * 12n) / 10n
+      const fee = await fees(p.side)
+      try { await worstCase(p.side, label, budget, limit, fee.maxFeePerGas, encodeFunctionData({ abi: executorAbi, functionName: 'execute', args: executeArgs(p, digest) })) } catch (cause) { abandon(); throw cause }
+      let tx: Hex | undefined
+      for (let attempt = 0; attempt < 3 && !tx; attempt++) {
+        try {
+          tx = await wallets[p.side].writeContract({ account, chain: chainOf(p.side), address: p.executor, abi: executorAbi, functionName: 'execute', args: executeArgs(p, digest), value: BigInt(p.value), gas: limit, ...fee })
+        } catch (cause) {
+          // Another worker's execution landed between our simulation and our send: nothing to send.
+          if (String(cause).includes(OPERATION_DONE) || await executed(p.side, p.operation, 'pending') === digest) return
+          // Possibly delivered: the claim stays until the operation is final or provably absent.
+          if (attempt === 2 || !/nonce|underpriced|already known/i.test(String(cause))) throw cause
+        }
+      }
+      options.afterSend?.(label, tx!)
+      db.query('INSERT OR IGNORE INTO multispoke_broadcasts(operation, side, tx, sent_at) VALUES(?,?,?,?)').run(p.operation, p.side, tx!, Date.now())
+      const receipt = await client.waitForTransactionReceipt({ hash: tx!, timeout: config.receiptTimeoutMs ?? 120_000 })
+      if (receipt.status !== 'success' && await executed(p.side, p.operation, receipt.blockNumber) !== digest) throw new Error(`${label} execution reverted in ${tx}`)
+    }
+    const next = sending[p.side].then(run, run)
+    sending[p.side] = next.catch(() => undefined)
+    await next
+  }
+
+  /** The executing receipt of an operation, if it executed at `at` or earlier. */
+  async function executedReceipt(side: Side, operation: Hex, fromBlock: bigint, at: bigint): Promise<TransactionReceipt | null> {
+    const [log] = await clients[side].getLogs({ address: chain(side).executor, event: executorAbi.find((x) => x.type === 'event' && x.name === 'Executed')!, args: { operation }, fromBlock, toBlock: at }) as { transactionHash: Hex }[]
+    return log ? clients[side].getTransactionReceipt({ hash: log.transactionHash }) : null
+  }
+
+  /** Persist an Arc operation outside the job steps once; the first bytes win, and a different plan under the same name is a conflict. */
+  async function persistOp(kind: 'refund' | 'operator', name: string, operation: Hex, build: () => Plan['calls']): Promise<{ plan: Plan; digest: Hex }> {
+    let row = db.query<{ digest: Hex; bytes: string }, [string]>('SELECT digest, bytes FROM multispoke_ops WHERE operation=?').get(operation)
+    if (!row) {
+      const calls = build()
+      const fromBlock = await clients.arc.getBlockNumber({ cacheTime: 0 })
+      const p: Plan = { side: 'arc', chainId: config.arc.chainId, executor: config.arc.executor, operation, calls, value: '0', fromBlock: (fromBlock > config.arc.fromBlock ? fromBlock : config.arc.fromBlock).toString(), expect: {} }
+      const bytes = JSON.stringify(p)
+      db.query('INSERT OR IGNORE INTO multispoke_ops(operation, name, kind, digest, bytes, created_at) VALUES(?,?,?,?,?,?)').run(operation, name, kind, hash(bytes), bytes, Date.now())
+      row = db.query<{ digest: Hex; bytes: string }, [string]>('SELECT digest, bytes FROM multispoke_ops WHERE operation=?').get(operation)!
+    }
+    if (hash(row.bytes) !== row.digest) throw new Error(`Persisted ${name} is inconsistent`)
+    return { plan: JSON.parse(row.bytes) as Plan, digest: row.digest }
+  }
+  const usdcTransfer = (to: Address, amount: bigint) => call(config.arc.usdc, encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [to, amount] }))
+
+  /**
+   * Operator action: return a released job's residual to its payer. One executor operation named for
+   * the job, persisted before sending, so repeated calls, restarts and racing operators execute it at
+   * most once. The ledger says 'refunded' only once that execution is `confirmations` deep and its
+   * receipt shows exactly the residual going to the payer.
+   */
+  async function refund(job: string): Promise<PaymentLedger> {
+    const l = ledgerOf(job)
+    if (!l) throw new LaunchError(404, 'not_released', `Job ${job} has no payment ledger; only a released job's residual can be refunded.`)
+    if (l.refund === 'none') throw new LaunchError(409, 'nothing_to_refund', `Job ${job}'s authorization moved nothing to the executor.`)
+    if (l.refund === 'refunded') return l
+    const operation = refundOperation(job)
+    const { plan: p, digest } = await persistOp('refund', `refund:${job}`, operation, () => [usdcTransfer(l.payer as Address, BigInt(l.residual))])
+    await send(p, digest, `refund:${job}`, BigInt(config.budgets.payment), job)
+    const latest = await clients.arc.getBlockNumber({ cacheTime: 0 })
+    const receipt = await executedReceipt('arc', operation, BigInt(p.fromBlock), latest)
+    // Executed in state the node serves but in no committed block yet, or not executed: the ledger stays owed and the refund prepared/uncertain.
+    if (!receipt) return ledgerOf(job)!
+    const back = transfers(receipt, config.arc.usdc).filter((t) => same(t.from, config.arc.executor) && same(t.to, l.payer)).reduce((n, t) => n + t.value, 0n)
+    if (back.toString() !== l.residual) throw new Error(`Refund receipt ${receipt.transactionHash} moved ${back}, not the residual ${l.residual}`)
+    const final = latest >= receipt.blockNumber + BigInt(config.arc.confirmations)
+    db.query("UPDATE multispoke_payment_ledger SET refund=?, refund_tx=?, refund_block=? WHERE job=? AND refund <> 'refunded'").run(final ? 'refunded' : 'submitted', receipt.transactionHash, receipt.blockNumber.toString(), job)
+    return ledgerOf(job)!
+  }
+
+  /**
+   * Operator action: move executor USDC that no job or residual claims, e.g. retained fees. The same
+   * name with other parameters is a conflict, never a second transfer; it executes at most once and
+   * passes the same claim check as every job and refund send.
+   */
+  async function operatorSend(name: string, to: Address, amount: bigint) {
+    if (!/^[a-z0-9-]{1,64}$/.test(name) || amount <= 0n) throw new LaunchError(400, 'invalid_request', 'An operator send needs a short lowercase name and a positive amount.')
+    const operation = hash(['operator', name])
+    const { plan: p, digest } = await persistOp('operator', `operator:${name}`, operation, () => [usdcTransfer(to, amount)])
+    if (JSON.stringify(p.calls) !== JSON.stringify([usdcTransfer(to, amount)])) throw new LaunchError(409, 'operation_conflict', `operator:${name} is journalled with other parameters.`)
+    await send(p, digest, `operator:${name}`, BigInt(config.budgets.payment))
+    const receipt = await executedReceipt('arc', operation, BigInt(p.fromBlock), await clients.arc.getBlockNumber({ cacheTime: 0 }))
+    return { operation, transaction: receipt?.transactionHash ?? null }
+  }
+
+  /**
+   * A completed job's Arc USDC, from its own receipts. In: the payment. Out: only the Arc pool's quote.
+   * Held on the executor: everything else, which is the platform fee, the reserve for the spoke pools'
+   * quote (injected on Base and Robinhood from pre-positioned inventory; no Arc USDC moved for it) and
+   * the step budgets. The operator paid the steps' gas in native currency from its own account, so
+   * those costs are reported as reimbursable from the held budgets, not as USDC the executor spent.
+   */
+  function usdcAccount(job: Job) {
+    if (job.state !== 'complete') return null
+    const step = (id: string) => job.steps.find((s) => s.id === id)!
+    const inflow = BigInt(step('payment:arc').result!.amount!)
+    const arcPoolQuote = BigInt(step('pool:arc').result!.quoteAmount!)
+    const injected = { base: BigInt(step('pool:base').result!.quoteAmount!), robinhood: BigInt(step('pool:robinhood').result!.quoteAmount!) }
+    const platformFee = BigInt(step('payment:arc').budget)
+    const stepBudgets = job.steps.filter((s) => s.kind !== 'payment').reduce((n, s) => n + BigInt(s.budget), 0n)
+    const nativeOperatorCosts = Object.fromEntries((['arc', ...SPOKES] as const).map((side) => [side, job.steps.filter((s) => s.kind !== 'payment' && sideOf(s) === side).reduce((n, s) => n + BigInt(s.result!.cost), 0n)])) as Record<Side, bigint>
+    const native = nativeOperatorCosts.arc + nativeOperatorCosts.base + nativeOperatorCosts.robinhood
+    const held = inflow - arcPoolQuote
+    const spokeReserve = injected.base + injected.robinhood
+    return {
+      inflow, usdcSpent: { arcPool: arcPoolQuote }, held,
+      spokeQuoteInjected: { ...injected, source: 'pre-positioned spoke inventory (fork fixture); not bridged from Arc USDC' },
+      disposition: { platformFee, spokeQuoteReserve: spokeReserve, stepBudgets, operatorReimbursable: native, unspentBudget: stepBudgets - native },
+      nativeOperatorCosts: { ...nativeOperatorCosts, note: 'operator gas paid in native currency from the operator account, valued in USDC atoms at the configured rates; not paid from executor USDC' },
+      reconciled: inflow === BigInt(job.total) && held === platformFee + spokeReserve + stepBudgets && native <= stepBudgets,
+    }
+  }
+
+  /**
+   * The Arc executor's USDC against this journal. Expected: completed and partial jobs' payments less
+   * their Arc pool quote, plus residuals of released jobs not yet refunded, less executed operator
+   * sends. Anything else on the executor is unattributed (an unsolicited deposit, or another journal
+   * sharing the executor) and is reported separately, never assigned to a job.
+   */
+  async function executorUsdc() {
+    const at = await finalBlock('arc')
+    const balance = await clients.arc.readContract({ address: config.arc.usdc, abi: erc20Abi, functionName: 'balanceOf', args: [config.arc.executor], blockNumber: at })
+    let jobs = 0n
+    for (const { data } of db.query<{ data: string }, []>('SELECT data FROM jobs').all()) {
+      const job = JSON.parse(data) as Job
+      const paid = job.steps.find((s) => s.id === 'payment:arc')
+      if (paid?.state !== 'complete') continue
+      const pool = job.steps.find((s) => s.id === 'pool:arc')!
+      jobs += BigInt(paid.result!.amount!) - (pool.state === 'complete' ? BigInt(pool.result!.quoteAmount!) : 0n)
+    }
+    const residuals = owed()
+    let operator = 0n
+    for (const o of db.query<{ operation: Hex; bytes: string }, []>("SELECT operation, bytes FROM multispoke_ops WHERE kind='operator'").all()) {
+      if (await executed('arc', o.operation, at) !== ZERO) operator += usdcOut((JSON.parse(o.bytes) as Plan).calls)
+    }
+    const expected = jobs + residuals - operator
+    return { block: at, balance, jobs, residualsOwed: residuals, operatorSends: operator, expected, unattributed: balance - expected }
+  }
+
+  /** The public record: the runner's projection, corrected for released jobs and completed jobs' USDC. */
+  function view(job: Job) {
+    const v = publicJob(job)
+    const l = ledgerOf(job.id)
+    if (l) {
+      const refund = refundStatus(l)
+      const held = l.refund === 'owed' || l.refund === 'submitted' ? l.residual : '0'
+      const refundable = refund.state === 'owed'
+      return { ...v, error: slot(job.id)?.released_reason ? failed(job.id).message : v.error,
+        // Only the job's own authorization counts as its payment; other terms' funds are held for the payer, never paid.
+        funds: { ...v.funds, paid: l.outcome === 'used_outside_job' ? l.received : '0', heldForPayer: held, feesSpent: l.fees_spent, unallocatedHeld: held, determinate: true, refundable,
+          refundableAmount: refundable ? l.residual : '0', unresolvedEffects: [],
+          note: l.received === '0' ? `Released (${l.outcome}): nothing reached the executor under this job's authorization.` : `Released (${l.outcome}): ${l.received} reached the executor outside the job; residual ${l.residual}, refund ${refund.state}.${held === '0' ? '' : ' No other job or operator send may spend it.'}` },
+        attribution: { outcome: l.outcome, authorized: l.authorized, received: l.received, feesSpent: l.fees_spent, residual: l.residual, evidence: { transaction: l.evidence_tx, block: l.evidence_block }, refund } }
+    }
+    const account = usdcAccount(job)
+    if (!account) return v
+    const s = (x: bigint) => x.toString()
+    return { ...v, funds: { ...v.funds, quoteInventoryDeployed: s(account.usdcSpent.arcPool), spokeQuoteInjected: { base: s(account.spokeQuoteInjected.base), robinhood: s(account.spokeQuoteInjected.robinhood) },
+      feesSpent: '0', nativeOperatorCosts: s(account.disposition.operatorReimbursable), unallocatedHeld: s(account.held), heldOnExecutor: s(account.held),
+      disposition: Object.fromEntries(Object.entries(account.disposition).map(([k, x]) => [k, s(x)])), reconciled: account.reconciled,
+      note: 'Arc USDC: paid in, Arc pool quote out, the rest held on the executor. Spoke pool quote was injected from spoke inventory; operator gas was paid natively and is reimbursable from the held step budgets.' } }
   }
 
   /**
@@ -459,13 +827,23 @@ export function multispokeAdapter(config: MultispokeConfig, db: Database, option
   }
 
   const adapter: PromotionalTokenAdapter & {
-    clients: Record<Side, PublicClient>; verify(): Promise<void>; supply: typeof supply; slot: typeof slot
+    clients: Record<Side, PublicClient>; verify(): Promise<void>; supply: typeof supply; slot: typeof slot; ledger: typeof ledgerOf; refundStatus(job: string): RefundStatus | undefined
+    explain(job: string): string | undefined; refund: typeof refund; operatorSend: typeof operatorSend; usdcAccount: typeof usdcAccount; executorUsdc: typeof executorUsdc; view: typeof view
   } = {
     mode: 'fork',
     version,
     clients,
     supply,
     slot,
+    ledger: ledgerOf,
+    refundStatus: (job) => { const l = ledgerOf(job); return l ? refundStatus(l) : undefined },
+    /** A released job's error as of now. The job's stored error is a snapshot and goes stale once a refund moves. */
+    explain: (job) => (slot(job)?.released_reason ? failed(job).message : undefined),
+    refund,
+    operatorSend,
+    usdcAccount,
+    executorUsdc,
+    view,
     terms: { chainId: config.arc.chainId, asset: config.arc.usdc, payTo: config.arc.executor, name: 'USDC', version: '2' },
     assertReady(request) {
       if (request.destinations.map((d) => d.chain).join(',') !== 'arc,base,robinhood') {
@@ -476,7 +854,7 @@ export function multispokeAdapter(config: MultispokeConfig, db: Database, option
         if (amount > config.limits.inbound || amount > config.limits.outbound) throw new LaunchError(409, 'rate_limit', `The ${s} allocation exceeds the configured NTT rate limit and would queue.`)
       }
       const gone = releasedFor(identity(request))
-      if (gone) throw failed(gone)
+      if (gone) throw failed(gone.job)
       // Fast refusal before a quote or charge. The payment step re-checks atomically.
       if (config.launches !== undefined) {
         const taken = holders('').filter((h) => h.identity !== identity(request) && live(h))
@@ -521,55 +899,17 @@ export function multispokeAdapter(config: MultispokeConfig, db: Database, option
       }
       if (step.kind === 'payment') {
         // Absent and provably never payable: release the slot and refuse this job for good.
-        const own = slot(job.id)
-        if (own?.released_reason) throw failed(own)
-        const a = job.payment!.authorization
-        const why = await unsettleable(job.id, a.from, BigInt(a.validBefore))
-        if (why) { release(job, why); throw failed({ job: job.id, released_reason: why.reason, released_block: why.block }) }
+        if (slot(job.id)?.released_reason) throw failed(job.id)
+        const s = slot(job.id) ?? slotOf(job)
+        const why = await unsettleable(job.id, s)
+        if (why) { release(job.id, s, why); throw failed(job.id) }
       }
       return 'absent'
     },
     async broadcast({ job, step }, prepared) {
       const p = parse(prepared, step, job)
-      const client = clients[p.side]
       if (step.kind === 'payment') await takeSlot(job)
-      const run = async () => {
-        const current = await executed(p.side, p.operation, 'latest')
-        if (current === prepared.digest) return
-        if (current !== ZERO) throw new LaunchError(409, 'operation_conflict', `${step.id} already executed with other bytes (${current}).`)
-        // A crashed or stale worker's identical copy may still be in the mempool: observe it instead of paying for a second send.
-        if (await executed(p.side, p.operation, 'pending') === prepared.digest) return
-        let gas: bigint
-        try {
-          await client.simulateContract({ account, address: p.executor, abi: executorAbi, functionName: 'execute', args: executeArgs(p, prepared.digest), value: BigInt(p.value) })
-          gas = await client.estimateContractGas({ account, address: p.executor, abi: executorAbi, functionName: 'execute', args: executeArgs(p, prepared.digest), value: BigInt(p.value) })
-        } catch (cause) {
-          // Another worker executed it between the read and the simulation: nothing to send.
-          const revert = cause instanceof BaseError ? cause.walk((e) => e instanceof ContractFunctionRevertedError) : null
-          if (revert instanceof ContractFunctionRevertedError && revert.data?.errorName === 'OperationDone') return
-          throw cause
-        }
-        const limit = (gas * 12n) / 10n
-        const fee = await fees(p.side)
-        await worstCase(p.side, step, limit, fee.maxFeePerGas, encodeFunctionData({ abi: executorAbi, functionName: 'execute', args: executeArgs(p, prepared.digest) }))
-        let tx: Hex | undefined
-        for (let attempt = 0; attempt < 3 && !tx; attempt++) {
-          try {
-            tx = await wallets[p.side].writeContract({ account, chain: chainOf(p.side), address: p.executor, abi: executorAbi, functionName: 'execute', args: executeArgs(p, prepared.digest), value: BigInt(p.value), gas: limit, ...fee })
-          } catch (cause) {
-            // Another worker's execution landed between our simulation and our send: nothing to send.
-            if (String(cause).includes(OPERATION_DONE) || await executed(p.side, p.operation, 'pending') === prepared.digest) return
-            if (attempt === 2 || !/nonce|underpriced|already known/i.test(String(cause))) throw cause
-          }
-        }
-        options.afterSend?.(step, tx!)
-        db.query('INSERT OR IGNORE INTO multispoke_broadcasts(operation, side, tx, sent_at) VALUES(?,?,?,?)').run(p.operation, p.side, tx!, Date.now())
-        const receipt = await client.waitForTransactionReceipt({ hash: tx!, timeout: config.receiptTimeoutMs ?? 120_000 })
-        if (receipt.status !== 'success' && await executed(p.side, p.operation, receipt.blockNumber) !== prepared.digest) throw new Error(`${step.id} execution reverted in ${tx}`)
-      }
-      const next = sending[p.side].then(run, run)
-      sending[p.side] = next.catch(() => undefined)
-      await next
+      await send(p, prepared.digest, step.id, BigInt(step.budget))
     },
   }
   return adapter

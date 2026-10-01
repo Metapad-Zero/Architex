@@ -13,7 +13,7 @@
 import { readFileSync } from 'node:fs'
 import { JobStore, assertDurableStore, durationMs } from '../store'
 import { createLaunchService } from '../service'
-import { publicJob, reconcile } from '../runner'
+import { reconcile } from '../runner'
 import { robinhoodStatus } from '../robinhood/adapter'
 import { multispokeAdapter } from './adapter'
 import { configFromJson } from './fork'
@@ -25,7 +25,7 @@ const dbPath = assertDurableStore(process.env.EQUILIBRIUM_DB ?? './output/equili
 const store = new JobStore(dbPath, { leaseMs: durationMs('EQUILIBRIUM_LEASE_MS', process.env.EQUILIBRIUM_LEASE_MS, 60_000) })
 const sweepMs = durationMs('EQUILIBRIUM_RECONCILE_MS', process.env.EQUILIBRIUM_RECONCILE_MS, 30_000)
 const kill = process.env.EQUILIBRIUM_MULTISPOKE_KILL_AFTER_SEND
-const adapter = multispokeAdapter(config, store.db, { afterSend: (step) => { if (step.id === kill) process.kill(process.pid, 'SIGKILL') } })
+const adapter = multispokeAdapter(config, store.db, { afterSend: (label) => { if (label === kill) process.kill(process.pid, 'SIGKILL') } })
 await adapter.verify()
 const service = createLaunchService(store, adapter)
 const labels = { ...config.labels, publicRobinhoodRoute: robinhoodStatus().route }
@@ -40,10 +40,18 @@ const server = Bun.serve({ hostname: '127.0.0.1', port: Number(process.env.EQUIL
   async fetch(request) {
     const path = new URL(request.url).pathname
     if (path === '/api/equilibrium' && request.method === 'GET') {
-      const jobs = await Promise.all(store.list().map(async (job) => ({ ...publicJob(job), chainSupply: await adapter.supply(job).then(text, (cause: unknown) => ({ unavailable: String(cause).split('\n')[0] })) })))
-      return labelled(Response.json({ mode: adapter.mode, adapter: adapter.version, labels, jobs }, { headers: { 'cache-control': 'no-store' } }))
+      const unavailable = (cause: unknown) => ({ unavailable: String(cause).split('\n')[0] })
+      const jobs = await Promise.all(store.list().map(async (job) => ({ ...adapter.view(job), chainSupply: await adapter.supply(job).then(text, unavailable) })))
+      const executorUsdc = await adapter.executorUsdc().then(text, unavailable)
+      return labelled(Response.json({ mode: adapter.mode, adapter: adapter.version, labels, jobs, executorUsdc }, { headers: { 'cache-control': 'no-store' } }))
     }
-    if (path === '/x402/equilibrium' || path === '/equilibrium/jobs' || path.startsWith('/equilibrium/jobs/')) return labelled(await service(request))
+    if (path === '/x402/equilibrium' || path === '/equilibrium/jobs' || path.startsWith('/equilibrium/jobs/')) {
+      const response = await service(request)
+      if (request.method !== 'GET' || !response.ok) return labelled(response)
+      // Job reads come from the corrected view: released jobs' attribution and completed jobs' USDC.
+      const body = await response.json() as { jobs: { id: string }[] }
+      return labelled(Response.json({ ...body, jobs: body.jobs.map((j) => adapter.view(store.get(j.id)!)) }, { status: response.status, headers: response.headers }))
+    }
     return labelled(Response.json({ mode: adapter.mode, adapter: adapter.version, labels, endpoints: ['/x402/equilibrium', '/equilibrium/jobs', '/api/equilibrium'] }))
   },
 })
