@@ -453,7 +453,7 @@ export function createKeeper(config: KeeperConfig, store: KeeperStore, options: 
       }
       // A vault with a wider per-leg gas allowance than the planner assumes would be undercosted.
       for (const chain of KEEPER_CHAINS) if (!LEG_GAS[chains[chain].venue]) throw new KeeperError('invalid_configuration', `No leg gas allowance for ${chains[chain].venue}.`)
-    
+
   }
 
   return {
