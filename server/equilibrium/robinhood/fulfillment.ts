@@ -1,6 +1,7 @@
 import type { Database } from 'bun:sqlite'
 import { decodeEventLog, decodeFunctionData, encodeAbiParameters, encodeFunctionData, getAddress, parseAbi, parseSignature, zeroAddress, type Address, type Hex, type PublicClient, type TransactionReceipt } from 'viem'
 import { hash, identity } from '../request'
+import { migrateSchema } from '../store'
 import { LaunchError, type Atoms, type EffectContext, type EffectResult, type Job, type LaunchRequest, type PreparedEffect, type PromotionalTokenAdapter, type Step, type StepKind } from '../types'
 import { architexFactoryAbi, architexPairAbi, erc20Abi, nttAbi, usdcAbi, v3FactoryAbi, v3PoolAbi } from '../evm/contracts'
 import { plan as v3Plan } from '../evm/v3'
@@ -146,13 +147,16 @@ export function robinhoodFulfillment(config: RobinhoodFulfillmentConfig, db: Dat
   const L = route.layout
   const { arc, robinhood } = config.route
   const clients: Record<Side, PublicClient> = route.clients
-  db.exec(`CREATE TABLE IF NOT EXISTS robinhood_launches (asset TEXT PRIMARY KEY, identity TEXT NOT NULL, job TEXT NOT NULL, payer TEXT NOT NULL, valid_before INTEGER NOT NULL, settled INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
-    CREATE TABLE IF NOT EXISTS robinhood_released (job TEXT PRIMARY KEY, asset TEXT NOT NULL, identity TEXT NOT NULL, reason TEXT NOT NULL, block TEXT NOT NULL, released_at INTEGER NOT NULL);
-    CREATE TABLE IF NOT EXISTS robinhood_payment_ledger (job TEXT PRIMARY KEY, asset TEXT NOT NULL, payer TEXT NOT NULL, outcome TEXT NOT NULL, authorized TEXT NOT NULL, received TEXT NOT NULL,
-      fees_spent TEXT NOT NULL, residual TEXT NOT NULL, evidence_tx TEXT, evidence_block TEXT NOT NULL, refund TEXT NOT NULL, refund_tx TEXT, refund_block TEXT, recorded_at INTEGER NOT NULL);
-    CREATE TABLE IF NOT EXISTS robinhood_usdc_claims (operation TEXT PRIMARY KEY, name TEXT NOT NULL, amount TEXT NOT NULL, state TEXT NOT NULL, created_at INTEGER NOT NULL);`)
-  // Journals from before attribution lack the bound amount. Such a holder is never attributed a transfer: it cannot be matched.
-  if (!db.query("SELECT 1 FROM pragma_table_info('robinhood_launches') WHERE name='value'").get()) db.exec('ALTER TABLE robinhood_launches ADD COLUMN value TEXT')
+  // Concurrent openers of a shared journal: see migrateSchema.
+  migrateSchema(db, () => {
+    db.exec(`CREATE TABLE IF NOT EXISTS robinhood_launches (asset TEXT PRIMARY KEY, identity TEXT NOT NULL, job TEXT NOT NULL, payer TEXT NOT NULL, valid_before INTEGER NOT NULL, settled INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS robinhood_released (job TEXT PRIMARY KEY, asset TEXT NOT NULL, identity TEXT NOT NULL, reason TEXT NOT NULL, block TEXT NOT NULL, released_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS robinhood_payment_ledger (job TEXT PRIMARY KEY, asset TEXT NOT NULL, payer TEXT NOT NULL, outcome TEXT NOT NULL, authorized TEXT NOT NULL, received TEXT NOT NULL,
+        fees_spent TEXT NOT NULL, residual TEXT NOT NULL, evidence_tx TEXT, evidence_block TEXT NOT NULL, refund TEXT NOT NULL, refund_tx TEXT, refund_block TEXT, recorded_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS robinhood_usdc_claims (operation TEXT PRIMARY KEY, name TEXT NOT NULL, amount TEXT NOT NULL, state TEXT NOT NULL, created_at INTEGER NOT NULL);`)
+    // Journals from before attribution lack the bound amount. Such a holder is never attributed a transfer: it cannot be matched.
+    if (!db.query("SELECT 1 FROM pragma_table_info('robinhood_launches') WHERE name='value'").get()) db.exec('ALTER TABLE robinhood_launches ADD COLUMN value TEXT')
+  })
   const pinned = { labels: config.labels, asset: { ...config.route.asset, issuance: config.route.asset.issuance.toString() }, arc: { chainId: arc.chainId, executor: arc.executor, usdc: config.arc.usdc, factory: config.arc.factory },
     robinhood: { chainId: robinhood.chainId, executor: robinhood.executor, venue: robinhood.venue, quote: robinhood.quote }, limits: { outbound: config.route.limits.outbound.toString(), inbound: config.route.limits.inbound.toString() },
     pricing: { arc: config.pricing.arc.toString(), robinhood: config.pricing.robinhood.toString() }, budgets: config.budgets }

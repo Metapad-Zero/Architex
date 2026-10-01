@@ -5,6 +5,7 @@ import {
 } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { hash, identity } from '../request'
+import { migrateSchema } from '../store'
 import { publicJob } from '../runner'
 import { LaunchError, type Atoms, type EffectContext, type EffectResult, type Job, type LaunchRequest, type PreparedEffect, type PromotionalTokenAdapter, type Step, type StepKind } from '../types'
 import {
@@ -216,16 +217,19 @@ export function multispokeAdapter(config: MultispokeConfig, db: Database, option
   const clients: Record<Side, PublicClient> = { arc: publicClient('arc'), base: publicClient('base'), robinhood: publicClient('robinhood') }
   const wallets: Record<Side, WalletClient> = { arc: walletClient('arc'), base: walletClient('base'), robinhood: walletClient('robinhood') }
   // Own tables: this composition never reads or writes the evm_* or robinhood_* journals.
-  db.exec(`CREATE TABLE IF NOT EXISTS multispoke_broadcasts (operation TEXT NOT NULL, side TEXT NOT NULL, tx TEXT NOT NULL, sent_at INTEGER NOT NULL, PRIMARY KEY (operation, tx));
-    CREATE TABLE IF NOT EXISTS multispoke_vaas (operation TEXT PRIMARY KEY, vaa TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS multispoke_launches (job TEXT PRIMARY KEY, identity TEXT NOT NULL, payer TEXT NOT NULL, valid_before INTEGER NOT NULL, settled INTEGER NOT NULL DEFAULT 0,
-      released_reason TEXT, released_block TEXT, created_at INTEGER NOT NULL);
-    CREATE TABLE IF NOT EXISTS multispoke_payment_ledger (job TEXT PRIMARY KEY, payer TEXT NOT NULL, outcome TEXT NOT NULL, authorized TEXT NOT NULL, received TEXT NOT NULL,
-      fees_spent TEXT NOT NULL, residual TEXT NOT NULL, evidence_tx TEXT, evidence_block TEXT NOT NULL, refund TEXT NOT NULL, refund_tx TEXT, refund_block TEXT, recorded_at INTEGER NOT NULL);
-    CREATE TABLE IF NOT EXISTS multispoke_ops (operation TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL, digest TEXT NOT NULL, bytes TEXT NOT NULL, created_at INTEGER NOT NULL);
-    CREATE TABLE IF NOT EXISTS multispoke_usdc_claims (operation TEXT PRIMARY KEY, name TEXT NOT NULL, amount TEXT NOT NULL, state TEXT NOT NULL, created_at INTEGER NOT NULL);`)
-  // Journals from before attribution lack the bound amount. Such a holder is never attributed a transfer: it cannot be matched.
-  if (!db.query("SELECT 1 FROM pragma_table_info('multispoke_launches') WHERE name='value'").get()) db.exec('ALTER TABLE multispoke_launches ADD COLUMN value TEXT')
+  // Concurrent openers of a shared journal: see migrateSchema.
+  migrateSchema(db, () => {
+    db.exec(`CREATE TABLE IF NOT EXISTS multispoke_broadcasts (operation TEXT NOT NULL, side TEXT NOT NULL, tx TEXT NOT NULL, sent_at INTEGER NOT NULL, PRIMARY KEY (operation, tx));
+      CREATE TABLE IF NOT EXISTS multispoke_vaas (operation TEXT PRIMARY KEY, vaa TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS multispoke_launches (job TEXT PRIMARY KEY, identity TEXT NOT NULL, payer TEXT NOT NULL, valid_before INTEGER NOT NULL, settled INTEGER NOT NULL DEFAULT 0,
+        released_reason TEXT, released_block TEXT, created_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS multispoke_payment_ledger (job TEXT PRIMARY KEY, payer TEXT NOT NULL, outcome TEXT NOT NULL, authorized TEXT NOT NULL, received TEXT NOT NULL,
+        fees_spent TEXT NOT NULL, residual TEXT NOT NULL, evidence_tx TEXT, evidence_block TEXT NOT NULL, refund TEXT NOT NULL, refund_tx TEXT, refund_block TEXT, recorded_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS multispoke_ops (operation TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL, digest TEXT NOT NULL, bytes TEXT NOT NULL, created_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS multispoke_usdc_claims (operation TEXT PRIMARY KEY, name TEXT NOT NULL, amount TEXT NOT NULL, state TEXT NOT NULL, created_at INTEGER NOT NULL);`)
+    // Journals from before attribution lack the bound amount. Such a holder is never attributed a transfer: it cannot be matched.
+    if (!db.query("SELECT 1 FROM pragma_table_info('multispoke_launches') WHERE name='value'").get()) db.exec('ALTER TABLE multispoke_launches ADD COLUMN value TEXT')
+  })
   const sending: Record<Side, Promise<unknown>> = { arc: Promise.resolve(), base: Promise.resolve(), robinhood: Promise.resolve() }
   const strip = (c: HubConfig | SpokeConfig) => ({ ...c, rpc: undefined, fromBlock: undefined, vaa: 'vaa' in c ? c.vaa.kind : undefined, priorityFeeWei: undefined,
     usdcAtomsPerNative: c.usdcAtomsPerNative.toString(), maxFeePerGasWei: 'maxFeePerGasWei' in c ? c.maxFeePerGasWei?.toString() : undefined })
