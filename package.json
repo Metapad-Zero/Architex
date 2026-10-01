@@ -25,6 +25,7 @@
     "equilibrium:solana:preview": "bun run scripts/solana/deploy-preview.ts",
     "equilibrium:arc-solana": "bun run scripts/solana/integrate.ts",
     "equilibrium:arc-solana:fulfill": "bun run server/equilibrium/solanaFulfillment.ts",
+    "equilibrium:fourchain": "EQUILIBRIUM_FOURCHAIN=1 bun test server/equilibrium/multispoke/__tests__/fourchain.test.ts",
     "equilibrium:contracts": "FOUNDRY_PROFILE=equilibrium forge test -vv",
     "deploy:self": "bun run ./scripts/self-deploy.ts",
     "compass:deploy": "bun run ./scripts/compass-deploy.ts",
