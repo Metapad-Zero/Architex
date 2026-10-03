@@ -1,35 +1,56 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { GHOST } from '../lib/format'
 import { readiness } from '../lib/equilibriumNetwork'
+import { JOB_MODES, REFRESH_MS, jobSummary, shouldRefresh, usdcAmount, usdcLabel, type JobMode, type PublicJob } from '../lib/equilibriumRecord'
 import infrastructure from '../lib/equilibriumInfrastructure.json'
 
-interface PublicJob {
-  id: string; mode: 'local' | 'fork' | 'testnet' | 'live'; state: string
-  payment: { settled: boolean; fulfillment: string }
-  settlement: { amount: string; transaction: string; nonce: string; fulfillment: string } | null
-  // A record written by an older service may predate any of these, so every field is optional.
-  funds?: { paid?: string; platformFee?: string; feesSpent?: string; quoteInventoryDeployed?: string; unallocatedHeld?: string; determinate?: boolean; refundable?: boolean; refundableAmount?: string; unresolvedEffects?: string[]; note?: string }
-  supply: { issuance: string; custody: string; remote: string; pending: string; reconciled: boolean; evidence: string }
-  steps: { id: string; chain: string; state: string; result?: { address?: string; transaction: string } }[]
+/** A USDC figure a person can read, with the exact atoms kept underneath as the record of truth. */
+function Money({ atoms, mode }: { atoms?: string; mode: JobMode }) {
+  if (atoms === undefined) return <>{GHOST}</>
+  return <>{usdcLabel(atoms, mode)}{usdcAmount(atoms) !== atoms && <span className="eq-atoms">{atoms} atoms</span>}</>
 }
-const labels = { local: 'Local rehearsal', fork: 'Fork rehearsal', testnet: 'Public testnet', live: 'Live' }
+
 /** Public evidence stays separate from browser-controlled simulation balances and keeper profit. */
 export function EquilibriumIntegration({ offline = false }: { offline?: boolean }) {
   const [jobs, setJobs] = useState<PublicJob[]>([])
-  const [readStatus, setReadStatus] = useState('Reading the public job record…')
-  useEffect(() => {
-    if (offline) return
+  const [checkedAt, setCheckedAt] = useState<Date | null>(null)
+  const [failed, setFailed] = useState(false)
+  const [reading, setReading] = useState(false)
+  const inFlight = useRef<AbortController | null>(null)
+  // One read at a time. A new read (a click, or the timer) waits for the one already out.
+  const read = useCallback(() => {
+    if (offline || inFlight.current) return
     const controller = new AbortController()
-    const timeout = setTimeout(() => { controller.abort(); setReadStatus('Job service unavailable. Dated infrastructure observations remain available.') }, 5000)
-    void fetch('/api/equilibrium', { signal: controller.signal }).then(async (response) => {
+    inFlight.current = controller; setReading(true)
+    let timedOut = false
+    const timeout = setTimeout(() => { timedOut = true; controller.abort() }, 5000)
+    void fetch('/api/equilibrium', { signal: controller.signal, cache: 'no-store' }).then(async (response) => {
       if (!response.ok) throw new Error('Unavailable')
       const body = await response.json() as { jobs?: PublicJob[] }
-      const records = (body.jobs ?? []).filter((job) => ['local', 'fork', 'testnet', 'live'].includes(job.mode))
-      setJobs(records); setReadStatus(records.length ? 'Job records are free to read.' : 'No EQUILIBRIUM issuance or market fulfillment is recorded here.')
-    }).catch(() => { if (!controller.signal.aborted) setReadStatus('Job service unavailable. The dated infrastructure observations below remain available.') })
-      .finally(() => clearTimeout(timeout))
-    return () => { clearTimeout(timeout); controller.abort() }
+      const records = (body.jobs ?? []).filter((job) => JOB_MODES.includes(job.mode))
+      setJobs(records); setFailed(false)
+    }).catch(() => {
+      // An abort that is not the timeout means the section unmounted: nothing to report.
+      if (controller.signal.aborted && !timedOut) return
+      // Keep the last good records on screen; the status says plainly that they may be out of date.
+      setFailed(true)
+    }).finally(() => {
+      clearTimeout(timeout)
+      if (inFlight.current !== controller) return
+      inFlight.current = null; setReading(false); setCheckedAt(new Date())
+    })
   }, [offline])
+  useEffect(() => { read(); return () => { const current = inFlight.current; inFlight.current = null; current?.abort() } }, [read])
+  // A partial launch can finish through reconciliation, and a down service can come back: read again until neither applies.
+  const polling = !offline && checkedAt !== null && shouldRefresh(jobs, failed)
+  const readStatus = failed
+    ? jobs.length ? 'Job service unavailable. Records below are from the last successful read; dated infrastructure observations remain available.' : 'Job service unavailable. Dated infrastructure observations remain available.'
+    : checkedAt === null ? 'Reading the public job record…' : jobs.length ? 'Job records are free to read.' : 'No EQUILIBRIUM issuance or market fulfillment is recorded here.'
+  useEffect(() => {
+    if (!polling) return
+    const timer = setInterval(read, REFRESH_MS)
+    return () => clearInterval(timer)
+  }, [polling, read])
   return <section className="eq-record eq-integration" aria-labelledby="eq-integration-title">
     <div className="eq-section-head"><h2 id="eq-integration-title">The integration record</h2><span className="eq-mode">Paid launch closed</span></div>
     <p className="eq-muted">Chain infrastructure has been read publicly. Token routes still need public round trips and funded pools. Local and fork rehearsals are labeled separately.</p>
@@ -39,26 +60,34 @@ export function EquilibriumIntegration({ offline = false }: { offline?: boolean 
       <dl>{infrastructure.observations.filter((o) => o.chain === route.chain).map((observation) => <div key={observation.network}><dt>{observation.mode === 'live' ? 'Mainnet read' : 'Testnet read'}</dt><dd>{'actualId' in observation ? observation.actualId : 'cluster' in observation ? observation.cluster : 'Unverified'}</dd></div>)}</dl>
     </div>)}</div>
     <p className="eq-muted">Infrastructure observed {infrastructure.observedAt}. Bytecode presence does not establish a working token route.</p>
-    <p role="status">{offline ? 'Offline demonstration. Durable job records require the local service; dated infrastructure observations are included.' : readStatus}</p>
-    {jobs.map((job) => <details key={job.id} className="eq-tools"><summary>{labels[job.mode]} · {job.state} · {job.id.slice(0, 12)}</summary>
+    <div className="eq-read-row">
+      <p role="status">{offline ? 'Offline demonstration. Durable job records require the local service; dated infrastructure observations are included.' : readStatus}</p>
+      {!offline && <div className="eq-read-controls">
+        {checkedAt && <span className="eq-muted">Last checked <time dateTime={checkedAt.toISOString()}>{checkedAt.toLocaleTimeString()}</time>{polling ? ' · checking every 10 s while a record is open' : ''}</span>}
+        <button type="button" className="eq-secondary" onClick={read} disabled={reading}>{reading ? 'Checking…' : 'Check again'}</button>
+      </div>}
+    </div>
+    {jobs.map((job) => <details key={job.id} className="eq-tools"><summary>{jobSummary(job)}</summary>
       <div className="eq-tools-content"><section><h3>Supply from recorded steps</h3><dl className="eq-ledger">
         <div><dt>Issued atoms</dt><dd>{job.supply.issuance}</dd></div><div><dt>Canonical custody</dt><dd>{job.supply.custody}</dd></div><div><dt>Remote atoms</dt><dd>{job.supply.remote}</dd></div><div><dt>Pending claim</dt><dd>{job.supply.pending}</dd></div>
       </dl><p>{job.supply.reconciled ? 'Recorded steps reconcile.' : 'Unresolved operations: reconcile external evidence before reporting supply.'}</p>
-      <p>Payment {job.payment.settled ? 'settled' : 'unsettled'} · fulfillment {job.payment.fulfillment}. {job.mode === 'local' ? 'All payments and addresses in this record are synthetic.' : ''}</p></section>
+      <p>Payment {job.payment.settled ? 'settled' : 'unsettled'} · fulfillment {job.payment.fulfillment}. {job.mode === 'local' ? 'All payments and addresses in this record are synthetic.' : ''}</p>
+      {job.error && job.state !== 'complete' && <p className="eq-muted">Last attempt: {job.error}</p>}</section>
       {/* The charge is shown on its own: settling it never means the launch was fulfilled. */}
       <section><h3>Settlement and funds</h3>
         {job.settlement
-          ? <><dl className="eq-ledger"><div><dt>Settled amount</dt><dd>{job.settlement.amount}</dd></div><div><dt>Authorization nonce</dt><dd>{job.settlement.nonce.slice(0, 12)}…</dd></div><div><dt>Launch fulfillment</dt><dd>{job.settlement.fulfillment}</dd></div></dl>
+          ? <><dl className="eq-ledger"><div><dt>Settled amount</dt><dd><Money atoms={job.settlement.amount} mode={job.mode} /></dd></div><div><dt>Authorization nonce</dt><dd>{job.settlement.nonce.slice(0, 12)}…</dd></div><div><dt>Launch fulfillment</dt><dd>{job.settlement.fulfillment}</dd></div></dl>
             <p className="eq-muted eq-settlement-tx">Settlement transaction {job.settlement.transaction}</p></>
-          : <p>No settlement is recorded for this job.</p>}
+          : <p>{job.payment.settled ? 'Payment settled before settlement evidence was recorded. This older record has no separate settlement entry.' : 'No settlement is recorded for this job.'}</p>}
         {job.funds ? <>
           <dl className="eq-ledger">
-            <div><dt>Platform fee</dt><dd>{job.funds.platformFee ?? GHOST}</dd></div><div><dt>Execution fees spent</dt><dd>{job.funds.feesSpent ?? GHOST}</dd></div>
-            <div><dt>Quote inventory deployed</dt><dd>{job.funds.quoteInventoryDeployed ?? GHOST}</dd></div><div><dt>Unallocated held</dt><dd>{job.funds.unallocatedHeld ?? GHOST}</dd></div>
+            <div><dt>Paid</dt><dd><Money atoms={job.funds.paid} mode={job.mode} /></dd></div>
+            <div><dt>Platform fee</dt><dd><Money atoms={job.funds.platformFee} mode={job.mode} /></dd></div><div><dt>Execution fees spent</dt><dd><Money atoms={job.funds.feesSpent} mode={job.mode} /></dd></div>
+            <div><dt>Quote inventory deployed</dt><dd><Money atoms={job.funds.quoteInventoryDeployed} mode={job.mode} /></dd></div><div><dt>Unallocated held</dt><dd><Money atoms={job.funds.unallocatedHeld} mode={job.mode} /></dd></div>
           </dl>
           {job.funds.note && <p>{job.funds.note}</p>}
           {(job.funds.unresolvedEffects?.length ?? 0) > 0 && <p className="eq-muted">Outstanding operations: {job.funds.unresolvedEffects!.join(', ')}. No refund can be decided until these resolve.</p>}
-          {job.funds.refundable && <p className="eq-muted">Determinate unspent remainder: {job.funds.refundableAmount}. This states what is unspent; no refund path is open.</p>}
+          {job.funds.refundable && job.funds.refundableAmount !== undefined && <p className="eq-muted">Determinate unspent remainder: {usdcLabel(job.funds.refundableAmount, job.mode)} ({job.funds.refundableAmount} atoms). This states what is unspent; no refund path is open.</p>}
         </> : <p className="eq-muted">This record predates the fund accounting.</p>}
       </section>
       <section><h3>Fulfillment steps</h3><ol className="eq-job-steps">{job.steps.map((step) => <li key={step.id}><p>{step.id} · {step.state}</p>{step.result && <p className="eq-muted">{step.result.address ?? step.result.transaction}</p>}</li>)}</ol></section></div>
